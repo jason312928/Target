@@ -1,0 +1,19 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "app.title" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Target" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Target" } } } },
+    "connection.action.start" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Start" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "启动" } } } },
+    "connection.action.stop" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stop" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "停止" } } } },
+    "connection.detail.ready" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Ready to start the Packet Tunnel Provider." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已准备启动 Packet Tunnel Provider。" } } } },
+    "connection.detail.running" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "The Packet Tunnel Provider start request was sent." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已发送 Packet Tunnel Provider 启动请求。" } } } },
+    "connection.detail.starting" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing the Packet Tunnel Provider." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在准备 Packet Tunnel Provider。" } } } },
+    "connection.detail.stopping" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stopping the Packet Tunnel Provider." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在停止 Packet Tunnel Provider。" } } } },
+    "connection.detail.unavailable" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "The Packet Tunnel Provider could not be started." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法启动 Packet Tunnel Provider。" } } } },
+    "connection.status.running" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Running" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "运行中" } } } },
+    "connection.status.starting" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Starting" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "启动中" } } } },
+    "connection.status.stopped" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stopped" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已停止" } } } },
+    "connection.status.stopping" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stopping" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "停止中" } } } },
+    "connection.status.unavailable" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Unavailable" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不可用" } } } }
+  },
+  "version" : "1.0"
+}
