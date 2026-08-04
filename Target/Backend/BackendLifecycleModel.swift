@@ -5,6 +5,7 @@ import Observation
 @Observable
 final class BackendLifecycleModel {
     private let backend: any EngineBackend
+    private let engineInstaller: (any EngineInstalling)?
     private let serviceManager: (any ServiceLifecycleManaging)?
     private let serviceTester: (any ServiceConnectionTesting)?
     private var operationTask: Task<Void, Never>?
@@ -14,8 +15,9 @@ final class BackendLifecycleModel {
     private(set) var error: BackendError?
     private(set) var pingResult: String?
 
-    init(backend: any EngineBackend = TargetServiceBackend()) {
+    init(backend: any EngineBackend = SingBoxBackend()) {
         self.backend = backend
+        self.engineInstaller = backend as? any EngineInstalling
         self.serviceManager = backend as? any ServiceLifecycleManaging
         self.serviceTester = backend as? any ServiceConnectionTesting
         self.status = .mockDefault
@@ -28,17 +30,7 @@ final class BackendLifecycleModel {
         operationTask != nil
     }
 
-    var canInstall: Bool {
-        !isBusy && [.notRegistered, .unavailable, .error].contains(status.serviceInstallation)
-    }
-
-    var canRemove: Bool {
-        !isBusy && [.requiresApproval, .enabled].contains(status.serviceInstallation)
-    }
-
-    var canPing: Bool {
-        !isBusy && status.serviceInstallation == .enabled
-    }
+    var canInstallEngine: Bool { !isBusy && status.engineInstallation != .installed }
 
     var canStart: Bool {
         operationTask == nil && lifecycleState != .running
@@ -48,8 +40,8 @@ final class BackendLifecycleModel {
         operationTask == nil && lifecycleState == .running
     }
 
-    var backendStateKey: String { "backend.status.service" }
-    var serviceStateKey: String { status.serviceInstallation.localizedKey }
+    var backendStateKey: String { "backend.status.sing-box" }
+    var engineInstallationKey: String { status.engineInstallation.localizedKey }
     var engineStateKey: String { status.engineState.localizedKey }
     var errorKey: String? { error?.localizedKey }
 
@@ -59,14 +51,22 @@ final class BackendLifecycleModel {
         }
     }
 
-    func installService() {
-        guard let serviceManager else {
-            finish(with: .serviceUnavailable)
+    func installEngine() {
+        guard let engineInstaller else {
+            finish(with: .engineInstallationFailed)
             return
         }
         error = nil
         run { _ in
-            try await serviceManager.installService()
+            try await engineInstaller.installEngine()
+        }
+    }
+
+    func validateConfiguration() {
+        error = nil
+        run { backend in
+            try await backend.validateConfiguration(XPCConfigurationRequest(profileName: "Local Direct"))
+            return try await backend.queryStatus()
         }
     }
 
@@ -114,6 +114,13 @@ final class BackendLifecycleModel {
 
     func cancelCurrentOperation() {
         operationTask?.cancel()
+    }
+
+    func stopOnApplicationTermination() {
+        guard lifecycleState == .running else { return }
+        Task { [backend] in
+            _ = try? await backend.stopEngine()
+        }
     }
 
     private func begin(

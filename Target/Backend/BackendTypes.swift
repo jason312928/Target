@@ -34,9 +34,25 @@ enum EngineState: String, Codable, Equatable, Sendable {
     }
 }
 
+enum EngineInstallationState: String, Codable, Equatable, Sendable {
+    case notInstalled
+    case installed
+    case invalid
+
+    var localizedKey: String {
+        switch self {
+        case .notInstalled: "engine.installation.not-installed"
+        case .installed: "engine.installation.installed"
+        case .invalid: "engine.installation.invalid"
+        }
+    }
+}
+
 struct BackendStatus: Codable, Equatable, Sendable {
     var serviceInstallation: ServiceInstallationState
     var engineState: EngineState
+    var engineInstallation: EngineInstallationState = .notInstalled
+    var engineVersion: String?
 
     static let mockDefault = BackendStatus(serviceInstallation: .notRegistered, engineState: .stopped)
 }
@@ -88,6 +104,10 @@ enum BackendError: Error, Equatable, Sendable {
     case operationCancelled
     case serviceUnavailable
     case notImplemented
+    case engineNotInstalled
+    case engineInstallationFailed
+    case configurationCheckFailed
+    case engineLaunchFailed
 
     var localizedKey: String {
         switch self {
@@ -98,6 +118,10 @@ enum BackendError: Error, Equatable, Sendable {
         case .operationCancelled: "backend.error.cancelled"
         case .serviceUnavailable: "backend.error.service-unavailable"
         case .notImplemented: "backend.error.not-implemented"
+        case .engineNotInstalled: "backend.error.engine-not-installed"
+        case .engineInstallationFailed: "backend.error.engine-installation-failed"
+        case .configurationCheckFailed: "backend.error.configuration-check-failed"
+        case .engineLaunchFailed: "backend.error.engine-launch-failed"
         }
     }
 }
@@ -159,6 +183,10 @@ protocol EngineBackend: TunnelBackend {
     func validateConfiguration(_ request: XPCConfigurationRequest) async throws
     func startEngine() async throws -> BackendStatus
     func stopEngine() async throws -> BackendStatus
+}
+
+protocol EngineInstalling: EngineBackend {
+    func installEngine() async throws -> BackendStatus
 }
 
 protocol ServiceLifecycleManaging: EngineBackend {

@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md) | [English](README.en.md)
 
-Target is a native SwiftUI macOS client. It can register its narrow privileged service using the macOS Service Management API. It does not change routes, DNS, system proxy settings, or network traffic.
+Target is a native SwiftUI macOS client. Its optional sing-box engine runs as the signed-in user and only exposes local proxy listeners. It does not set the system proxy or change routes, DNS, or firewall rules.
 
 ## Build requirements
 
@@ -15,7 +15,13 @@ Build the app:
 xcodebuild -project Target.xcodeproj -scheme Target -configuration Debug build
 ```
 
-LaunchDaemon registration requires a valid signing identity and a notarized app. In System Settings, an administrator must approve a registered service under General > Login Items & Extensions. The engine controls are intentionally not implemented in this release.
+For a local engine installation, run the bundled installer from the repository root:
+
+```sh
+Target/Resources/Scripts/install_sing_box.sh
+```
+
+It downloads the pinned sing-box 1.13.16 archive from the official sing-box GitHub release, verifies its SHA-256, selects Apple Silicon or Intel automatically, and installs it without `sudo` to `~/Library/Application Support/Target/sing-box`. The app generates its own minimal configuration there and binds its mixed SOCKS/HTTP listener to `127.0.0.1:2080` with a direct outbound.
 
 ## License
 

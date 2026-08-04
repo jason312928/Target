@@ -29,7 +29,19 @@
     "service.status.not-registered" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Not registered" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未注册" } } } },
     "service.status.requires-approval" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Awaiting approval" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待用户批准" } } } },
     "service.status.unavailable" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Unavailable" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不可用" } } } },
-    "service.label.ping" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Ping" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ping" } } } }
+    "service.label.ping" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Ping" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ping" } } } },
+    "backend.status.sing-box" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Local sing-box engine" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "本地 sing-box 引擎" } } } },
+    "engine.label.installation" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "sing-box" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "sing-box" } } } },
+    "engine.label.version" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Version" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "版本" } } } },
+    "engine.action.install" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Install sing-box" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "安装 sing-box" } } } },
+    "engine.action.validate" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Validate Configuration" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "验证配置" } } } },
+    "engine.installation.not-installed" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Not installed" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未安装" } } } },
+    "engine.installation.installed" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Installed" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已安装" } } } },
+    "engine.installation.invalid" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Invalid installation" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "安装无效" } } } },
+    "backend.error.engine-not-installed" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "sing-box is not installed." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未安装 sing-box。" } } } },
+    "backend.error.engine-installation-failed" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "sing-box installation failed." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "sing-box 安装失败。" } } } },
+    "backend.error.configuration-check-failed" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "sing-box rejected the managed configuration." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "sing-box 拒绝了受管理配置。" } } } },
+    "backend.error.engine-launch-failed" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "sing-box could not start." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法启动 sing-box。" } } } }
   },
   "version" : "1.0"
 }

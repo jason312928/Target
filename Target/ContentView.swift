@@ -20,16 +20,16 @@ struct ContentView: View {
 
             Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 12) {
                 GridRow {
-                    Text("backend.label.service")
-                    Text(LocalizedStringKey(lifecycle.serviceStateKey))
+                    Text("engine.label.installation")
+                    Text(LocalizedStringKey(lifecycle.engineInstallationKey))
+                }
+                GridRow {
+                    Text("engine.label.version")
+                    Text(lifecycle.status.engineVersion ?? "—")
                 }
                 GridRow {
                     Text("backend.label.engine")
                     Text(LocalizedStringKey(lifecycle.engineStateKey))
-                }
-                GridRow {
-                    Text("service.label.ping")
-                    Text(lifecycle.pingResult ?? "—")
                 }
                 if let errorKey = lifecycle.errorKey {
                     GridRow {
@@ -41,25 +41,21 @@ struct ContentView: View {
             }
 
             HStack {
-                Button("service.action.install") {
-                    lifecycle.installService()
+                Button("engine.action.install") {
+                    lifecycle.installEngine()
                 }
-                .disabled(!lifecycle.canInstall)
+                .disabled(!lifecycle.canInstallEngine)
 
-                Button("service.action.remove") {
-                    lifecycle.removeService()
+                Button("engine.action.validate") {
+                    lifecycle.validateConfiguration()
                 }
-                .disabled(!lifecycle.canRemove)
+                .disabled(lifecycle.isBusy || lifecycle.status.engineInstallation != .installed)
 
                 Button("service.action.refresh") {
                     lifecycle.refresh()
                 }
                 .disabled(lifecycle.isBusy)
 
-                Button("service.action.ping") {
-                    lifecycle.pingService()
-                }
-                .disabled(!lifecycle.canPing)
             }
 
             HStack {

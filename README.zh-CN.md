@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md) | [English](README.en.md)
 
-Target 是原生 SwiftUI macOS 客户端。它可通过 macOS Service Management API 注册受限的特权服务；不会修改路由、DNS、系统代理设置或网络流量。
+Target 是原生 SwiftUI macOS 客户端。可选的 sing-box 引擎以当前用户身份运行，仅提供本地代理监听；不会设置系统代理，也不会修改路由、DNS 或防火墙规则。
 
 ## 构建要求
 
@@ -15,7 +15,13 @@ Target 是原生 SwiftUI macOS 客户端。它可通过 macOS Service Management
 xcodebuild -project Target.xcodeproj -scheme Target -configuration Debug build
 ```
 
-注册 LaunchDaemon 需要有效签名和已公证的应用。在“系统设置 > 通用 > 登录项与扩展”中，管理员必须批准已注册的服务。本版本中的内核控制功能尚未实现。
+如需在本机安装引擎，请从仓库根目录运行随附的安装脚本：
+
+```sh
+Target/Resources/Scripts/install_sing_box.sh
+```
+
+脚本仅从官方 sing-box GitHub Release 下载固定的 sing-box 1.13.16，校验 SHA-256，自动识别 Apple Silicon 或 Intel，并在无需 `sudo` 的情况下安装到 `~/Library/Application Support/Target/sing-box`。App 只会在该目录生成最小配置，并以 direct outbound 在 `127.0.0.1:2080` 提供 SOCKS/HTTP 混合监听。
 
 ## 许可证
 

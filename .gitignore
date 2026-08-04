@@ -5,3 +5,4 @@ DerivedData/
 *.dSYM
 *.xcuserstate
 xcuserdata/
+Target/Resources/Scripts/*.tar.gz

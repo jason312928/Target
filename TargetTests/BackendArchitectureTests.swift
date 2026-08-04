@@ -1,4 +1,5 @@
 import XCTest
+import CFNetwork
 @testable import Target
 
 @MainActor
@@ -55,6 +56,40 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertThrowsError(try XPCConfigurationRequest.decodeAndValidate(unexpectedField)) { error in
             XCTAssertEqual(error as? BackendError, .invalidConfiguration(.malformedRequest))
         }
+    }
+
+    func testEngineLogRedactorRemovesIPv4Addresses() {
+        let result = String(decoding: EngineLogRedactor.redact(Data("dial 203.0.113.42 [2001:db8::1] /Users/example/secret".utf8)), as: UTF8.self)
+        XCTAssertFalse(result.contains("203.0.113.42"))
+        XCTAssertFalse(result.contains("2001:db8"))
+        XCTAssertFalse(result.contains("/Users/example"))
+    }
+
+    func testSingBoxManagedConfigurationAndLocalProxy() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_SING_BOX_INTEGRATION_TESTS"] == "1" else {
+            throw XCTSkip("Set RUN_SING_BOX_INTEGRATION_TESTS=1 after running the bundled installer.")
+        }
+
+        let backend = SingBoxBackend()
+        try await backend.validateConfiguration(XPCConfigurationRequest(profileName: "Local Direct"))
+        let running = try await backend.startEngine()
+        XCTAssertEqual(running.engineState, .running)
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 15
+        configuration.connectionProxyDictionary = [
+            kCFNetworkProxiesHTTPEnable as String: 1,
+            kCFNetworkProxiesHTTPProxy as String: "127.0.0.1",
+            kCFNetworkProxiesHTTPPort as String: 2080,
+            kCFNetworkProxiesHTTPSEnable as String: 1,
+            kCFNetworkProxiesHTTPSProxy as String: "127.0.0.1",
+            kCFNetworkProxiesHTTPSPort as String: 2080
+        ]
+        let (_, response) = try await URLSession(configuration: configuration).data(from: URL(string: "https://example.com")!)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+
+        let stopped = try await backend.stopEngine()
+        XCTAssertEqual(stopped.engineState, .stopped)
     }
 
     func testPrivilegedServicePingAndStatusWhenRequested() async throws {

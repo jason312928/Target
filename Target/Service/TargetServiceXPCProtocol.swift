@@ -43,5 +43,9 @@ private func errorCode(for error: BackendError) -> Int {
     case .operationCancelled: 5
     case .serviceUnavailable: 6
     case .notImplemented: 7
+    case .engineNotInstalled: 8
+    case .engineInstallationFailed: 9
+    case .configurationCheckFailed: 10
+    case .engineLaunchFailed: 11
     }
 }
