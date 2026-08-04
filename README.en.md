@@ -10,6 +10,14 @@ Target starts in Host Safe Mode. It observes the local listener and service heal
 
 Recovery is disabled unless Target has a validated, Target-owned snapshot. A recovery operation compares the current settings with Target's last written settings and stops on an external-change conflict; it never clears all proxies as a fallback.
 
+## Profiles and configuration
+
+Profiles are stored only in Target's Application Support container. A Profile can hold local JSON and optional remote subscription metadata; this release never fetches or parses subscriptions. The selected Profile, validation result, update timestamp, and valid configuration revisions are retained locally.
+
+The editor provides JSON syntax highlighting, line numbers, formatting, validation diagnostics, and previous-valid-version restore. Target stores configuration text as raw UTF-8 JSON, so fields unknown to this app remain intact. Each save first runs the official `sing-box check` command against a Target-managed staging file. A failed syntax or sing-box check never replaces the last valid JSON. Diagnostic and engine log handling redacts credentials, URLs, passwords, UUIDs, private keys, and local paths.
+
+New Profiles begin with a safe example: a dynamic `127.0.0.1` mixed listener and a `direct` outbound. It does not enable a system proxy, TUN, DNS takeover, route changes, or firewall changes.
+
 ## Build requirements
 
 - macOS 15 or later

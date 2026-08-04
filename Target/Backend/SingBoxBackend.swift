@@ -233,10 +233,22 @@ enum EngineLogRedactor {
     private static let ipv4 = try! NSRegularExpression(pattern: #"\b(?:\d{1,3}\.){3}\d{1,3}\b"#)
     private static let ipv6 = try! NSRegularExpression(pattern: #"(?i)[0-9a-f:]*:[0-9a-f:]+"#)
     private static let userPath = try! NSRegularExpression(pattern: #"/Users/[^\s]+"#)
+    private static let credentialURL = try! NSRegularExpression(pattern: #"://[^\s/@:]+:[^\s/@]+@"#)
+    private static let uuid = try! NSRegularExpression(pattern: #"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"#)
+    private static let sensitiveJSON = try! NSRegularExpression(pattern: #"(?i)(\"(?:password|uuid|private_key|private-key|token|secret|subscription_url)\"\s*:\s*)\"[^\"]*\""#)
+    private static let absolutePath = try! NSRegularExpression(pattern: #"(?<!:)\B/(?:[^\s\"']+/)+[^\s\"']+"#)
 
     static func redact(_ data: Data) -> Data {
         var text = String(decoding: data, as: UTF8.self)
-        for (expression, replacement) in [(ipv4, "[redacted-ip]"), (ipv6, "[redacted-ip]"), (userPath, "[redacted-path]")] {
+        for (expression, replacement) in [
+            (ipv4, "[redacted-ip]"),
+            (ipv6, "[redacted-ip]"),
+            (credentialURL, "://[redacted-credentials]@"),
+            (uuid, "[redacted-uuid]"),
+            (sensitiveJSON, "$1\"[redacted]\""),
+            (userPath, "[redacted-path]"),
+            (absolutePath, "[redacted-path]")
+        ] {
             let range = NSRange(text.startIndex..., in: text)
             text = expression.stringByReplacingMatches(in: text, range: range, withTemplate: replacement)
         }

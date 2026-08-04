@@ -11,7 +11,12 @@ struct TargetApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(lifecycle: lifecycle)
+            TabView {
+                ContentView(lifecycle: lifecycle)
+                    .tabItem { Label("app.title", systemImage: "bolt") }
+                ProfileWorkspaceView()
+                    .tabItem { Label("profile.title", systemImage: "doc.text") }
+            }
                 .onAppear { TargetApplicationDelegate.shared.lifecycle = lifecycle }
         }
     }
