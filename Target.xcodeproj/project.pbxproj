@@ -8,12 +8,17 @@
 /* Begin PBXBuildFile section */
 		A10000000000000000000001 /* TargetApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* TargetApp.swift */; };
 		A10000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* ContentView.swift */; };
-		A10000000000000000000003 /* TunnelLifecycleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* TunnelLifecycleModel.swift */; };
+		A10000000000000000000003 /* BackendLifecycleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* BackendLifecycleModel.swift */; };
 		A10000000000000000000004 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014 /* Localizable.xcstrings */; };
-		A10000000000000000000005 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021 /* PacketTunnelProvider.swift */; };
-		A10000000000000000000006 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000031 /* NetworkExtension.framework */; };
-		A10000000000000000000007 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000031 /* NetworkExtension.framework */; };
-		A10000000000000000000008 /* PacketTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A10000000000000000000042 /* PacketTunnel.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		A10000000000000000000005 /* BackendTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* BackendTypes.swift */; };
+		A10000000000000000000006 /* MockBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* MockBackend.swift */; };
+		A10000000000000000000007 /* TargetServiceXPCProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* TargetServiceXPCProtocol.swift */; };
+		A10000000000000000000008 /* TargetServiceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* TargetServiceClient.swift */; };
+		A10000000000000000000009 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021 /* main.swift */; };
+		A1000000000000000000000A /* BackendTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* BackendTypes.swift */; };
+		A1000000000000000000000B /* MockBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* MockBackend.swift */; };
+		A1000000000000000000000C /* TargetServiceXPCProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* TargetServiceXPCProtocol.swift */; };
+		A1000000000000000000000D /* BackendArchitectureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000031 /* BackendArchitectureTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -21,85 +26,84 @@
 			isa = PBXContainerItemProxy;
 			containerPortal = A10000000000000000000060 /* Project object */;
 			proxyType = 1;
-			remoteGlobalIDString = A10000000000000000000071;
-			remoteInfo = PacketTunnel;
+			remoteGlobalIDString = A10000000000000000000070;
+			remoteInfo = Target;
 		};
 /* End PBXContainerItemProxy section */
-
-/* Begin PBXCopyFilesBuildPhase section */
-		A10000000000000000000081 /* Embed Foundation Extensions */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
-			files = (A10000000000000000000008 /* PacketTunnel.appex in Embed Foundation Extensions */, );
-			name = "Embed Foundation Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		A10000000000000000000011 /* TargetApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetApp.swift; sourceTree = "<group>"; };
 		A10000000000000000000012 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		A10000000000000000000013 /* TunnelLifecycleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelLifecycleModel.swift; sourceTree = "<group>"; };
-		A10000000000000000000014 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Resources/Localizable.xcstrings; sourceTree = "<group>"; };
-		A10000000000000000000015 /* Target.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = Target.entitlements; sourceTree = "<group>"; };
-		A10000000000000000000021 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
-		A10000000000000000000022 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		A10000000000000000000023 /* PacketTunnel.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PacketTunnel.entitlements; sourceTree = "<group>"; };
-		A10000000000000000000031 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
+		A10000000000000000000013 /* BackendLifecycleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendLifecycleModel.swift; sourceTree = "<group>"; };
+		A10000000000000000000014 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		A10000000000000000000015 /* BackendTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendTypes.swift; sourceTree = "<group>"; };
+		A10000000000000000000016 /* MockBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockBackend.swift; sourceTree = "<group>"; };
+		A10000000000000000000017 /* TargetServiceXPCProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetServiceXPCProtocol.swift; sourceTree = "<group>"; };
+		A10000000000000000000018 /* TargetServiceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetServiceClient.swift; sourceTree = "<group>"; };
+		A10000000000000000000021 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		A10000000000000000000031 /* BackendArchitectureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendArchitectureTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000041 /* Target.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Target.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		A10000000000000000000042 /* PacketTunnel.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000042 /* TargetService */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = TargetService; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000043 /* TargetTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TargetTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		A10000000000000000000091 /* Frameworks */ = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000006 /* NetworkExtension.framework in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
-		A10000000000000000000092 /* Frameworks */ = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000007 /* NetworkExtension.framework in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000091 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000092 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000093 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		A100000000000000000000A1 = { isa = PBXGroup; children = (A100000000000000000000A2 /* Target */, A100000000000000000000A3 /* PacketTunnel */, A100000000000000000000A4 /* Frameworks */, A100000000000000000000A5 /* Products */, ); sourceTree = "<group>"; };
-		A100000000000000000000A2 /* Target */ = { isa = PBXGroup; children = (A10000000000000000000011 /* TargetApp.swift */, A10000000000000000000012 /* ContentView.swift */, A10000000000000000000013 /* TunnelLifecycleModel.swift */, A10000000000000000000014 /* Localizable.xcstrings */, A10000000000000000000015 /* Target.entitlements */, ); path = Target; sourceTree = "<group>"; };
-		A100000000000000000000A3 /* PacketTunnel */ = { isa = PBXGroup; children = (A10000000000000000000021 /* PacketTunnelProvider.swift */, A10000000000000000000022 /* Info.plist */, A10000000000000000000023 /* PacketTunnel.entitlements */, ); path = PacketTunnel; sourceTree = "<group>"; };
-		A100000000000000000000A4 /* Frameworks */ = { isa = PBXGroup; children = (A10000000000000000000031 /* NetworkExtension.framework */, ); name = Frameworks; sourceTree = "<group>"; };
-		A100000000000000000000A5 /* Products */ = { isa = PBXGroup; children = (A10000000000000000000041 /* Target.app */, A10000000000000000000042 /* PacketTunnel.appex */, ); name = Products; sourceTree = "<group>"; };
+		A100000000000000000000A1 = {isa = PBXGroup; children = (A100000000000000000000A2 /* Target */, A100000000000000000000A3 /* TargetService */, A100000000000000000000A4 /* TargetTests */, A100000000000000000000A5 /* Products */); sourceTree = "<group>"; };
+		A100000000000000000000A2 /* Target */ = {isa = PBXGroup; children = (A10000000000000000000011 /* TargetApp.swift */, A10000000000000000000012 /* ContentView.swift */, A100000000000000000000A6 /* Backend */, A100000000000000000000A7 /* Service */, A100000000000000000000A8 /* Resources */); path = Target; sourceTree = "<group>"; };
+		A100000000000000000000A3 /* TargetService */ = {isa = PBXGroup; children = (A10000000000000000000021 /* main.swift */); path = TargetService; sourceTree = "<group>"; };
+		A100000000000000000000A4 /* TargetTests */ = {isa = PBXGroup; children = (A10000000000000000000031 /* BackendArchitectureTests.swift */); path = TargetTests; sourceTree = "<group>"; };
+		A100000000000000000000A5 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000041 /* Target.app */, A10000000000000000000042 /* TargetService */, A10000000000000000000043 /* TargetTests.xctest */); name = Products; sourceTree = "<group>"; };
+		A100000000000000000000A6 /* Backend */ = {isa = PBXGroup; children = (A10000000000000000000013 /* BackendLifecycleModel.swift */, A10000000000000000000015 /* BackendTypes.swift */, A10000000000000000000016 /* MockBackend.swift */); path = Backend; sourceTree = "<group>"; };
+		A100000000000000000000A7 /* Service */ = {isa = PBXGroup; children = (A10000000000000000000017 /* TargetServiceXPCProtocol.swift */, A10000000000000000000018 /* TargetServiceClient.swift */); path = Service; sourceTree = "<group>"; };
+		A100000000000000000000A8 /* Resources */ = {isa = PBXGroup; children = (A10000000000000000000014 /* Localizable.xcstrings */); path = Resources; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A10000000000000000000070 /* Target */ = { isa = PBXNativeTarget; buildConfigurationList = A100000000000000000000B1 /* Build configuration list for PBXNativeTarget "Target" */; buildPhases = (A10000000000000000000093 /* Sources */, A10000000000000000000091 /* Frameworks */, A10000000000000000000094 /* Resources */, A10000000000000000000081 /* Embed Foundation Extensions */, ); buildRules = (); dependencies = (A10000000000000000000052 /* PBXTargetDependency */, ); name = Target; productName = Target; productReference = A10000000000000000000041 /* Target.app */; productType = "com.apple.product-type.application"; };
-		A10000000000000000000071 /* PacketTunnel */ = { isa = PBXNativeTarget; buildConfigurationList = A100000000000000000000B2 /* Build configuration list for PBXNativeTarget "PacketTunnel" */; buildPhases = (A10000000000000000000095 /* Sources */, A10000000000000000000092 /* Frameworks */, ); buildRules = (); dependencies = (); name = PacketTunnel; productName = PacketTunnel; productReference = A10000000000000000000042 /* PacketTunnel.appex */; productType = "com.apple.product-type.app-extension"; };
+		A10000000000000000000070 /* Target */ = {isa = PBXNativeTarget; buildConfigurationList = A100000000000000000000B1 /* Build configuration list for PBXNativeTarget "Target" */; buildPhases = (A10000000000000000000094 /* Sources */, A10000000000000000000091 /* Frameworks */, A10000000000000000000095 /* Resources */); buildRules = (); dependencies = (); name = Target; productName = Target; productReference = A10000000000000000000041 /* Target.app */; productType = "com.apple.product-type.application"; };
+		A10000000000000000000071 /* TargetService */ = {isa = PBXNativeTarget; buildConfigurationList = A100000000000000000000B2 /* Build configuration list for PBXNativeTarget "TargetService" */; buildPhases = (A10000000000000000000096 /* Sources */, A10000000000000000000092 /* Frameworks */); buildRules = (); dependencies = (); name = TargetService; productName = TargetService; productReference = A10000000000000000000042 /* TargetService */; productType = "com.apple.product-type.tool"; };
+		A10000000000000000000072 /* TargetTests */ = {isa = PBXNativeTarget; buildConfigurationList = A100000000000000000000B3 /* Build configuration list for PBXNativeTarget "TargetTests" */; buildPhases = (A10000000000000000000097 /* Sources */, A10000000000000000000093 /* Frameworks */); buildRules = (); dependencies = (A10000000000000000000052 /* PBXTargetDependency */); name = TargetTests; productName = TargetTests; productReference = A10000000000000000000043 /* TargetTests.xctest */; productType = "com.apple.product-type.bundle.unit-test"; };
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		A10000000000000000000060 /* Project object */ = { isa = PBXProject; attributes = { BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 2600; LastUpgradeCheck = 2600; TargetAttributes = { A10000000000000000000070 = { CreatedOnToolsVersion = 26.6; }; A10000000000000000000071 = { CreatedOnToolsVersion = 26.6; }; }; }; buildConfigurationList = A100000000000000000000B0 /* Build configuration list for PBXProject "Target" */; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, "zh-Hans", Base, ); mainGroup = A100000000000000000000A1; minimizedProjectReferenceProxies = 1; preferredProjectObjectVersion = 77; productRefGroup = A100000000000000000000A5 /* Products */; projectDirPath = ""; projectRoot = ""; targets = (A10000000000000000000070 /* Target */, A10000000000000000000071 /* PacketTunnel */, ); };
+		A10000000000000000000060 /* Project object */ = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = 1; LastSwiftUpdateCheck = 2600; LastUpgradeCheck = 2600; TargetAttributes = {A10000000000000000000070 = {CreatedOnToolsVersion = 26.6;}; A10000000000000000000071 = {CreatedOnToolsVersion = 26.6;}; A10000000000000000000072 = {CreatedOnToolsVersion = 26.6;};};}; buildConfigurationList = A100000000000000000000B0 /* Build configuration list for PBXProject "Target" */; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, "zh-Hans", Base); mainGroup = A100000000000000000000A1; minimizedProjectReferenceProxies = 1; preferredProjectObjectVersion = 77; productRefGroup = A100000000000000000000A5 /* Products */; projectDirPath = ""; projectRoot = ""; targets = (A10000000000000000000070 /* Target */, A10000000000000000000071 /* TargetService */, A10000000000000000000072 /* TargetTests */); };
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		A10000000000000000000094 /* Resources */ = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000004 /* Localizable.xcstrings in Resources */, ); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000095 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000004 /* Localizable.xcstrings in Resources */); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A10000000000000000000093 /* Sources */ = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* TargetApp.swift in Sources */, A10000000000000000000002 /* ContentView.swift in Sources */, A10000000000000000000003 /* TunnelLifecycleModel.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
-		A10000000000000000000095 /* Sources */ = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000005 /* PacketTunnelProvider.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000094 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* TargetApp.swift in Sources */, A10000000000000000000002 /* ContentView.swift in Sources */, A10000000000000000000003 /* BackendLifecycleModel.swift in Sources */, A10000000000000000000005 /* BackendTypes.swift in Sources */, A10000000000000000000006 /* MockBackend.swift in Sources */, A10000000000000000000007 /* TargetServiceXPCProtocol.swift in Sources */, A10000000000000000000008 /* TargetServiceClient.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000096 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000009 /* main.swift in Sources */, A1000000000000000000000A /* BackendTypes.swift in Sources */, A1000000000000000000000B /* MockBackend.swift in Sources */, A1000000000000000000000C /* TargetServiceXPCProtocol.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000097 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000D /* BackendArchitectureTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		A10000000000000000000052 /* PBXTargetDependency */ = { isa = PBXTargetDependency; target = A10000000000000000000071 /* PacketTunnel */; targetProxy = A10000000000000000000051 /* PBXContainerItemProxy */; };
+		A10000000000000000000052 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A10000000000000000000070 /* Target */; targetProxy = A10000000000000000000051 /* PBXContainerItemProxy */; };
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		A100000000000000000000C0 /* Debug */ = { isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SWIFT_VERSION = 5.0; }; name = Debug; };
-		A100000000000000000000C1 /* Release */ = { isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0; }; name = Release; };
-		A100000000000000000000D0 /* Debug */ = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_ENTITLEMENTS = Target/Target.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities"; MACOSX_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 1.0.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target; PRODUCT_NAME = Target; SWIFT_VERSION = 5.0; }; name = Debug; };
-		A100000000000000000000D1 /* Release */ = { isa = XCBuildConfiguration; buildSettings = { CODE_SIGN_ENTITLEMENTS = Target/Target.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities"; MACOSX_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 1.0.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target; PRODUCT_NAME = Target; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0; }; name = Release; };
-		A100000000000000000000E0 /* Debug */ = { isa = XCBuildConfiguration; buildSettings = { APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = PacketTunnel/PacketTunnel.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_APP_SANDBOX = YES; INFOPLIST_FILE = PacketTunnel/Info.plist; MACOSX_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 1.0.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target.PacketTunnel; PRODUCT_NAME = PacketTunnel; SKIP_INSTALL = YES; SWIFT_VERSION = 5.0; }; name = Debug; };
-		A100000000000000000000E1 /* Release */ = { isa = XCBuildConfiguration; buildSettings = { APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = PacketTunnel/PacketTunnel.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_APP_SANDBOX = YES; INFOPLIST_FILE = PacketTunnel/Info.plist; MACOSX_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 1.0.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target.PacketTunnel; PRODUCT_NAME = PacketTunnel; SKIP_INSTALL = YES; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0; }; name = Release; };
+		A100000000000000000000C0 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SWIFT_VERSION = 5.0;}; name = Debug;};
+		A100000000000000000000C1 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0;}; name = Release;};
+		A100000000000000000000D0 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CURRENT_PROJECT_VERSION = 1; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities"; MACOSX_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 1.0.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target; PRODUCT_NAME = Target; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_VERSION = 5.0;}; name = Debug;};
+		A100000000000000000000D1 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities"; MACOSX_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 1.0.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target; PRODUCT_NAME = Target; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0;}; name = Release;};
+		A100000000000000000000E0 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CURRENT_PROJECT_VERSION = 1; MACOSX_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target.TargetService; PRODUCT_NAME = TargetService; SWIFT_VERSION = 5.0;}; name = Debug;};
+		A100000000000000000000E1 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CURRENT_PROJECT_VERSION = 1; MACOSX_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target.TargetService; PRODUCT_NAME = TargetService; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0;}; name = Release;};
+		A100000000000000000000F0 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.TargetTests; PRODUCT_MODULE_NAME = TargetTests; PRODUCT_NAME = TargetTests; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Target.app/Contents/MacOS/Target"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_VERSION = 5.0;}; name = Debug;};
+		A100000000000000000000F1 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.TargetTests; PRODUCT_MODULE_NAME = TargetTests; PRODUCT_NAME = TargetTests; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Target.app/Contents/MacOS/Target"; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0;}; name = Release;};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		A100000000000000000000B0 /* Build configuration list for PBXProject "Target" */ = { isa = XCConfigurationList; buildConfigurations = (A100000000000000000000C0 /* Debug */, A100000000000000000000C1 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-		A100000000000000000000B1 /* Build configuration list for PBXNativeTarget "Target" */ = { isa = XCConfigurationList; buildConfigurations = (A100000000000000000000D0 /* Debug */, A100000000000000000000D1 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-		A100000000000000000000B2 /* Build configuration list for PBXNativeTarget "PacketTunnel" */ = { isa = XCConfigurationList; buildConfigurations = (A100000000000000000000E0 /* Debug */, A100000000000000000000E1 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A100000000000000000000B0 /* Build configuration list for PBXProject "Target" */ = {isa = XCConfigurationList; buildConfigurations = (A100000000000000000000C0 /* Debug */, A100000000000000000000C1 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+		A100000000000000000000B1 /* Build configuration list for PBXNativeTarget "Target" */ = {isa = XCConfigurationList; buildConfigurations = (A100000000000000000000D0 /* Debug */, A100000000000000000000D1 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+		A100000000000000000000B2 /* Build configuration list for PBXNativeTarget "TargetService" */ = {isa = XCConfigurationList; buildConfigurations = (A100000000000000000000E0 /* Debug */, A100000000000000000000E1 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+		A100000000000000000000B3 /* Build configuration list for PBXNativeTarget "TargetTests" */ = {isa = XCConfigurationList; buildConfigurations = (A100000000000000000000F0 /* Debug */, A100000000000000000000F1 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
 /* End XCConfigurationList section */
 	};
 	rootObject = A10000000000000000000060 /* Project object */;
