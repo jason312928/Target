@@ -5,6 +5,142 @@ import XCTest
 @testable import Target
 
 final class ProfileStoreTests: XCTestCase {
+    func testNewStoreEncryptsEveryPersistentRecordAndPreservesMetadataAfterRestart() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider(key: nil)
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        let subscription = URL(string: "https://user:subscription-secret@example.invalid/path")!
+        let profile = try store.create(name: "Encrypted Name", subscriptionURL: subscription)
+        let json = "{\n  \"custom_secret\": \"configuration-secret\",\n  \"inbounds\": [], \"outbounds\": [], \"route\": {}\n}\n"
+        try store.save(json: json, for: profile.id)
+
+        let manifest = try store.safeManagedURL("profiles.json")
+        let selection = try store.safeManagedURL("selected-profile.json")
+        let config = try store.safeManagedURL("\(profile.id.uuidString)/config.json")
+        let version = try store.safeManagedURL("\(profile.id.uuidString)/versions/2.json")
+        for url in [manifest, selection, config, version] {
+            let disk = try Data(contentsOf: url)
+            XCTAssertTrue(disk.starts(with: Data([0x54, 0x50, 0x45, 0x31])))
+            XCTAssertFalse(String(decoding: disk, as: UTF8.self).contains("configuration-secret"))
+            XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        }
+        for directory in [root, root.appending(path: profile.id.uuidString), root.appending(path: "\(profile.id.uuidString)/versions")] {
+            XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber)?.intValue, 0o700)
+        }
+        let allBytes = try recursiveData(in: root)
+        for value in ["subscription-secret", "configuration-secret", "Encrypted Name"] { XCTAssertFalse(allBytes.contains(Data(value.utf8))) }
+        XCTAssertGreaterThan(keys.createCount, 0)
+
+        let restored = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        XCTAssertEqual(try restored.configurationText(for: profile.id), json)
+        let restoredProfile = try XCTUnwrap(try restored.listProfiles().first)
+        XCTAssertEqual(restoredProfile.subscription?.url, subscription)
+        XCTAssertEqual(try restored.selectedProfileID(), profile.id)
+    }
+
+    func testEncryptedStoreFailsClosedForMissingWrongAndTamperedKeyMaterial() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        let profile = try store.create(name: "Closed")
+        let manifest = try store.safeManagedURL("profiles.json")
+        let original = try Data(contentsOf: manifest)
+        keys.removeKey()
+        XCTAssertThrowsError(try ProfileStore(rootDirectory: root, keyProvider: keys).listProfiles()) { XCTAssertEqual($0 as? ProfileStoreError, .encryptedStoreKeyMissing) }
+        XCTAssertEqual(keys.createCount, 0)
+        keys.replaceKey(Data(repeating: 8, count: 32))
+        XCTAssertThrowsError(try ProfileStore(rootDirectory: root, keyProvider: keys).listProfiles()) { XCTAssertEqual($0 as? ProfileStoreError, .encryptedStorageAuthenticationFailed) }
+        XCTAssertEqual(try Data(contentsOf: manifest), original)
+        keys.replaceKey(Data(repeating: 7, count: 32))
+        var tampered = original
+        tampered[tampered.count - 1] ^= 0x01
+        try tampered.write(to: manifest, options: .atomic)
+        XCTAssertThrowsError(try store.listProfiles()) { XCTAssertEqual($0 as? ProfileStoreError, .encryptedStorageAuthenticationFailed) }
+        XCTAssertEqual(profile.id, profile.id)
+    }
+
+    func testEncryptedEnvelopeRejectsPathReplacementVersionChangeAndPlaintextDowngrade() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        let first = try store.create(name: "One")
+        let second = try store.create(name: "Two")
+        let firstConfig = try store.safeManagedURL("\(first.id.uuidString)/config.json")
+        let secondConfig = try store.safeManagedURL("\(second.id.uuidString)/config.json")
+        try FileManager.default.removeItem(at: secondConfig)
+        try FileManager.default.copyItem(at: firstConfig, to: secondConfig)
+        XCTAssertThrowsError(try store.configurationText(for: second.id)) { XCTAssertEqual($0 as? ProfileStoreError, .encryptedStorageAADMismatch) }
+
+        let selection = try store.safeManagedURL("selected-profile.json")
+        let manifest = try store.safeManagedURL("profiles.json")
+        try FileManager.default.removeItem(at: manifest)
+        try FileManager.default.copyItem(at: selection, to: manifest)
+        XCTAssertThrowsError(try store.listProfiles()) { XCTAssertEqual($0 as? ProfileStoreError, .encryptedStorageAADMismatch) }
+
+        let cleanRoot = try temporaryDirectory()
+        let clean = ProfileStore(rootDirectory: cleanRoot, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
+        _ = try clean.create(name: "Version")
+        let cleanManifest = try clean.safeManagedURL("profiles.json")
+        var future = try Data(contentsOf: cleanManifest)
+        future[4] = 2
+        try future.write(to: cleanManifest, options: .atomic)
+        XCTAssertThrowsError(try clean.listProfiles()) { XCTAssertEqual($0 as? ProfileStoreError, .unsupportedStorageVersion) }
+
+        let downgradeRoot = try temporaryDirectory()
+        let downgrade = ProfileStore(rootDirectory: downgradeRoot, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
+        _ = try downgrade.create(name: "Downgrade")
+        let downgradeManifest = try downgrade.safeManagedURL("profiles.json")
+        try Data("[]".utf8).write(to: downgradeManifest, options: .atomic)
+        XCTAssertThrowsError(try downgrade.listProfiles()) { XCTAssertEqual($0 as? ProfileStoreError, .mixedOrDowngradedStorage) }
+    }
+
+    func testPlaintextLayoutMigratesAtomicallyAndRetainsRawBytes() throws {
+        let root = try temporaryDirectory()
+        let fixture = try writeLegacyFixture(root: root)
+        let keys = TestProfileKeyProvider(key: nil)
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        let profiles = try store.listProfiles()
+        XCTAssertEqual(Set(profiles.map(\.id)), Set([fixture.first.id, fixture.second.id]))
+        XCTAssertEqual(try store.selectedProfileID(), fixture.second.id)
+        XCTAssertEqual(try store.configurationText(for: fixture.first.id), fixture.firstConfig)
+        XCTAssertEqual(try store.validVersion(for: fixture.first.id, revision: 1).data, Data(fixture.firstVersion.utf8))
+        XCTAssertEqual(try store.validVersion(for: fixture.first.id, revision: 2).data, Data(fixture.firstConfig.utf8))
+        XCTAssertEqual(try XCTUnwrap(try store.listProfiles().first { $0.id == fixture.first.id }).subscription?.etag, "fixture-etag")
+        XCTAssertTrue((try Data(contentsOf: root.appending(path: "profiles.json"))).starts(with: Data([0x54, 0x50, 0x45, 0x31])))
+        XCTAssertFalse(try recursiveData(in: root).contains(Data("fixture-subscription-secret".utf8)))
+        XCTAssertNoThrow(try ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys).listProfiles())
+    }
+
+    func testMigrationFailuresLeaveRecoverableStateAndCanRetry() throws {
+        for point in [ProfileStorageFaultPoint.stagingWrite, .beforeStagingVerification, .beforeCommit, .afterBackupRename] {
+            let root = try temporaryDirectory()
+            _ = try writeLegacyFixture(root: root)
+            let legacyManifest = try Data(contentsOf: root.appending(path: "profiles.json"))
+            let keys = TestProfileKeyProvider(key: nil)
+            XCTAssertThrowsError(try ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, storageFaults: TestStorageFaults(failing: point)).listProfiles())
+            XCTAssertEqual(try Data(contentsOf: root.appending(path: "profiles.json")), legacyManifest)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appending(path: "storage-format.json").path))
+            XCTAssertEqual(try ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys).listProfiles().count, 2)
+        }
+        let committedRoot = try temporaryDirectory()
+        _ = try writeLegacyFixture(root: committedRoot)
+        let committedKeys = TestProfileKeyProvider(key: nil)
+        XCTAssertThrowsError(try ProfileStore(rootDirectory: committedRoot, checker: TestChecker(result: .success(())), keyProvider: committedKeys, storageFaults: TestStorageFaults(failing: .afterLiveSwap)).listProfiles())
+        XCTAssertEqual(try ProfileStore(rootDirectory: committedRoot, checker: TestChecker(result: .success(())), keyProvider: committedKeys).listProfiles().count, 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: committedRoot.appending(path: "storage-format.json").path))
+    }
+
+    func testValidationTemporaryFilesAreRemovedWithoutTouchingNeighborFiles() throws {
+        let root = try temporaryDirectory()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
+        let profile = try store.create(name: "Temporary")
+        try store.save(json: "{\"inbounds\":[],\"outbounds\":[],\"route\":{}}", for: profile.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.validationTemporaryDirectory.appending(path: "validation-orphan.json").path))
+        let neighbor = root.deletingLastPathComponent().appending(path: "unrelated-neighbor.txt")
+        try Data("keep".utf8).write(to: neighbor)
+        _ = try ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider()).listProfiles()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: neighbor.path))
+    }
     func testRawJSONPreservesUnknownFieldsWithoutCodableRoundTrip() throws {
         let store = try makeStore()
         let profile = try store.create(name: "Preservation")
@@ -127,7 +263,7 @@ final class ProfileStoreTests: XCTestCase {
 
     func testRunningProfileCannotBeDeleted() throws {
         let usage = FixedProfileUsage(inUse: true)
-        let store = ProfileStore(rootDirectory: try temporaryDirectory(), checker: TestChecker(result: .success(())), runtimeUsage: usage)
+        let store = ProfileStore(rootDirectory: try temporaryDirectory(), checker: TestChecker(result: .success(())), runtimeUsage: usage, keyProvider: TestProfileKeyProvider())
         let profile = try store.create(name: "Active")
         XCTAssertThrowsError(try store.delete(profile.id)) { error in
             XCTAssertEqual(error as? ProfileStoreError, .profileInUse)
@@ -281,7 +417,7 @@ final class ProfileStoreTests: XCTestCase {
     }
 
     private func makeStore(checker: TestChecker = TestChecker(result: .success(()))) throws -> ProfileStore {
-        ProfileStore(rootDirectory: try temporaryDirectory(), checker: checker)
+        ProfileStore(rootDirectory: try temporaryDirectory(), checker: checker, keyProvider: TestProfileKeyProvider())
     }
 
     private func temporaryDirectory() throws -> URL {
@@ -295,12 +431,61 @@ final class ProfileStoreTests: XCTestCase {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "Target/sing-box/bin/sing-box")
     }
+
+    private func recursiveData(in root: URL) throws -> Data {
+        let urls = try FileManager.default.subpathsOfDirectory(atPath: root.path)
+        return try urls.reduce(into: Data()) { result, relative in
+            let url = root.appending(path: relative)
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue { result += try Data(contentsOf: url) }
+        }
+    }
+
+    private func writeLegacyFixture(root: URL) throws -> (first: Profile, second: Profile, firstConfig: String, firstVersion: String) {
+        let time = Date(timeIntervalSince1970: 1_700_000_000)
+        let first = Profile(id: UUID(), name: "Legacy One", subscription: RemoteSubscription(url: URL(string: "https://fixture-subscription-secret@example.invalid/sub")!, etag: "fixture-etag", lastModified: "fixture-last-modified", cacheStatus: .updated), createdAt: time, updatedAt: time, validation: ProfileValidation(status: .valid, checkedAt: time, error: nil), validRevision: 2)
+        let second = Profile(id: UUID(), name: "Legacy Two", subscription: nil, createdAt: time, updatedAt: time, validation: .notChecked, validRevision: 1)
+        let firstVersion = "{ \"z\": 1, \"unknown\": [ true ] }\n"
+        let firstConfig = "{\n  \"unknown\" : [ true ], \"z\": 2\n}\n"
+        let secondConfig = "{\"inbounds\":[],\"outbounds\":[],\"route\":{}}\n"
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try JSONEncoder().encode([first, second]).write(to: root.appending(path: "profiles.json"))
+        try JSONEncoder().encode(second.id.uuidString).write(to: root.appending(path: "selected-profile.json"))
+        for (profile, config, versions) in [(first, firstConfig, [firstVersion, firstConfig]), (second, secondConfig, [secondConfig])] {
+            let directory = root.appending(path: profile.id.uuidString, directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: directory.appending(path: "versions"), withIntermediateDirectories: true)
+            try Data(config.utf8).write(to: directory.appending(path: "config.json"))
+            for (index, version) in versions.enumerated() { try Data(version.utf8).write(to: directory.appending(path: "versions/\(index + 1).json")) }
+        }
+        try Data("discard".utf8).write(to: root.appending(path: "\(first.id.uuidString)/.pending-check.json"))
+        return (first, second, firstConfig, firstVersion)
+    }
 }
 
 private final class TestChecker: SingBoxConfigurationChecking, @unchecked Sendable {
     var result: Result<Void, ConfigurationDiagnostic>
     init(result: Result<Void, ConfigurationDiagnostic>) { self.result = result }
     func check(configurationURL: URL) -> Result<Void, ConfigurationDiagnostic> { result }
+}
+
+final class TestProfileKeyProvider: ProfileEncryptionKeyProviding {
+    private var key: Data?
+    private(set) var createCount = 0
+    init(key: Data? = Data(repeating: 7, count: 32)) { self.key = key }
+    func loadMasterKey() throws -> Data? { key }
+    func createMasterKey() throws -> Data {
+        createCount += 1
+        if key == nil { key = Data(repeating: 9, count: 32) }
+        return key!
+    }
+    func removeKey() { key = nil }
+    func replaceKey(_ value: Data) { key = value }
+}
+
+private final class TestStorageFaults: ProfileStorageFaultInjecting {
+    let failing: ProfileStorageFaultPoint
+    init(failing: ProfileStorageFaultPoint) { self.failing = failing }
+    func check(_ point: ProfileStorageFaultPoint) throws { if point == failing { throw NSError(domain: "TestStorageFaults", code: 1) } }
 }
 
 private struct FixedPortSelector: LocalEnginePortSelecting {

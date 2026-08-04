@@ -236,7 +236,7 @@ final class BackendArchitectureTests: XCTestCase {
         let script = "#!/bin/sh\nif [ \"$1\" = \"version\" ]; then echo 'sing-box version test'; exit 0; fi\nif [ \"$1\" = \"check\" ]; then exit 1; fi\nexit 1\n"
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        let store = ProfileStore(rootDirectory: root.appending(path: "Profiles"), checker: FixedConfigurationChecker())
+        let store = ProfileStore(rootDirectory: root.appending(path: "Profiles"), checker: FixedConfigurationChecker(), keyProvider: TestProfileKeyProvider())
         _ = try store.create(name: "Failure")
         let backend = SingBoxBackend(profileStore: store, engineDirectory: root, executableURL: executable)
         do {
@@ -319,7 +319,7 @@ final class BackendArchitectureTests: XCTestCase {
     func testSingBoxManagedConfigurationAndLocalProxy() async throws {
         let root = try temporaryDirectory()
         let profileRoot = root.appending(path: "Profiles", directoryHint: .isDirectory)
-        let store = ProfileStore(rootDirectory: profileRoot)
+        let store = ProfileStore(rootDirectory: profileRoot, keyProvider: TestProfileKeyProvider())
         _ = try store.create(name: "Integration")
         let executable = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "Target/sing-box/bin/sing-box")

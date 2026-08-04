@@ -105,6 +105,19 @@ enum ProfileStoreError: LocalizedError, Equatable {
     case invalidJSON(ConfigurationDiagnostic)
     case validationFailed(ConfigurationDiagnostic)
     case invalidStoredMetadata
+    case keychainReadFailed
+    case encryptedStoreKeyMissing
+    case invalidEncryptionKey
+    case encryptionFailed
+    case invalidEncryptedEnvelope
+    case unsupportedStorageVersion
+    case encryptedStorageAuthenticationFailed
+    case encryptedStorageAADMismatch
+    case mixedOrDowngradedStorage
+    case missingEncryptedRecord
+    case plaintextMigrationValidationFailed
+    case plaintextMigrationCommitFailed
+    case plaintextMigrationRecoveryFailed
 
     var errorDescription: String? {
         switch self {
@@ -116,6 +129,13 @@ enum ProfileStoreError: LocalizedError, Equatable {
         case .unsafePath: "The requested path is outside Target-managed storage."
         case .invalidJSON, .validationFailed: "The configuration could not be validated."
         case .invalidStoredMetadata: "Profile metadata is invalid."
+        case .keychainReadFailed, .encryptedStoreKeyMissing, .invalidEncryptionKey,
+             .encryptionFailed, .invalidEncryptedEnvelope, .unsupportedStorageVersion,
+             .encryptedStorageAuthenticationFailed, .encryptedStorageAADMismatch,
+             .mixedOrDowngradedStorage, .missingEncryptedRecord,
+             .plaintextMigrationValidationFailed, .plaintextMigrationCommitFailed,
+             .plaintextMigrationRecoveryFailed:
+            "Profile storage could not be loaded safely."
         }
     }
 }
