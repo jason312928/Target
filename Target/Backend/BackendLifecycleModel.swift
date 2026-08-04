@@ -8,12 +8,17 @@ final class BackendLifecycleModel {
     private let engineInstaller: (any EngineInstalling)?
     private let serviceManager: (any ServiceLifecycleManaging)?
     private let serviceTester: (any ServiceConnectionTesting)?
+    private let systemProxyClient = TargetServiceXPCClient()
     private var operationTask: Task<Void, Never>?
+    private let hostSafeMode = true
 
     private(set) var status: BackendStatus
+    private(set) var serviceInstallation: ServiceInstallationState
+    private(set) var xpcState: XPCConnectionState
     private(set) var lifecycleState: BackendLifecycleState
     private(set) var error: BackendError?
     private(set) var pingResult: String?
+    private(set) var systemProxyStatus = SystemProxyStatus.disabled
 
     init(backend: any EngineBackend = SingBoxBackend()) {
         self.backend = backend
@@ -21,6 +26,8 @@ final class BackendLifecycleModel {
         self.serviceManager = backend as? any ServiceLifecycleManaging
         self.serviceTester = backend as? any ServiceConnectionTesting
         self.status = .mockDefault
+        self.serviceInstallation = TargetServiceRegistration.status
+        self.xpcState = .unknown
         self.lifecycleState = .stopped
         self.error = nil
         self.pingResult = nil
@@ -43,11 +50,67 @@ final class BackendLifecycleModel {
     var backendStateKey: String { "backend.status.sing-box" }
     var engineInstallationKey: String { status.engineInstallation.localizedKey }
     var engineStateKey: String { status.engineState.localizedKey }
+    var serviceInstallationKey: String { serviceInstallation.localizedKey }
+    var xpcStateKey: String { xpcState.localizedKey }
     var errorKey: String? { error?.localizedKey }
+    var systemProxyStateKey: String { systemProxyStatus.state.localizedKey }
+    var systemProxyErrorKey: String? { systemProxyStatus.error?.localizedKey }
+    var canEnableSystemProxy: Bool {
+        !hostSafeMode && !isBusy && lifecycleState == .running && systemProxyStatus.state != .enabled
+    }
+    var canDisableSystemProxy: Bool {
+        !hostSafeMode && !isBusy && [.enabled, .recoveryRequired, .failed].contains(systemProxyStatus.state)
+    }
+    var canRecoverSystemProxy: Bool { !hostSafeMode && !isBusy && systemProxyStatus.hasRecoverySnapshot }
+    var canManageService: Bool { !hostSafeMode && !isBusy }
+    var safeModeKey: String { "host-safety.status.safe" }
 
     func refresh() {
-        run { backend in
-            try await backend.queryStatus()
+        guard !isBusy else { return }
+        operationTask = Task { [weak self, backend] in
+            do {
+                let engineStatus = try await backend.queryStatus()
+                guard !Task.isCancelled else { return }
+                self?.status = engineStatus
+                await self?.refreshServiceStatus()
+                self?.error = nil
+                self?.lifecycleState = .settled(from: engineStatus)
+                self?.operationTask = nil
+            } catch let error as BackendError {
+                self?.finish(with: error)
+            } catch {
+                self?.finish(with: .serviceUnavailable)
+            }
+        }
+    }
+
+    func refreshSystemProxyStatus() {
+        guard !isBusy else { return }
+        operationTask = Task { [weak self] in
+            do {
+                let status = try await self?.systemProxyClient.querySystemProxyStatus()
+                guard !Task.isCancelled, let status else { return }
+                self?.systemProxyStatus = status
+                self?.operationTask = nil
+            } catch {
+                self?.systemProxyStatus = SystemProxyStatus(state: .failed, engineReachable: false, affectedServiceCount: 0, error: .recoveryFailed)
+                self?.operationTask = nil
+            }
+        }
+    }
+
+    func installService() {
+        guard canManageService else { return }
+        operationTask = Task { [weak self] in
+            do {
+                try TargetServiceRegistration.register()
+                self?.serviceInstallation = TargetServiceRegistration.status
+                self?.operationTask = nil
+            } catch let error as BackendError {
+                self?.finish(with: error)
+            } catch {
+                self?.finish(with: .serviceRegistrationFailed)
+            }
         }
     }
 
@@ -71,6 +134,69 @@ final class BackendLifecycleModel {
     }
 
     func removeService() {
+        guard canManageService else { return }
+        operationTask = Task { [weak self] in
+            do {
+                try TargetServiceRegistration.unregister()
+                self?.serviceInstallation = TargetServiceRegistration.status
+                self?.systemProxyStatus = .disabled
+                self?.operationTask = nil
+            } catch {
+                self?.finish(with: .serviceRegistrationFailed)
+            }
+        }
+    }
+
+    func enableSystemProxy() {
+        guard canEnableSystemProxy else { return }
+        systemProxyStatus = SystemProxyStatus(state: .enabling, engineReachable: true, affectedServiceCount: 0, error: nil)
+        operationTask = Task { [weak self] in
+            do {
+                let status = try await self?.systemProxyClient.enableSystemProxy()
+                guard !Task.isCancelled, let status else { return }
+                self?.systemProxyStatus = status
+                self?.operationTask = nil
+            } catch {
+                self?.systemProxyStatus = SystemProxyStatus(state: .failed, engineReachable: false, affectedServiceCount: 0, error: .applyFailed)
+                self?.operationTask = nil
+            }
+        }
+    }
+
+    func disableSystemProxy() {
+        guard canDisableSystemProxy else { return }
+        systemProxyStatus = SystemProxyStatus(state: .disabling, engineReachable: lifecycleState == .running, affectedServiceCount: systemProxyStatus.affectedServiceCount, error: nil)
+        operationTask = Task { [weak self] in
+            do {
+                let status = try await self?.systemProxyClient.disableSystemProxy()
+                guard !Task.isCancelled, let status else { return }
+                self?.systemProxyStatus = status
+                self?.operationTask = nil
+            } catch {
+                self?.systemProxyStatus = SystemProxyStatus(state: .recoveryRequired, engineReachable: self?.lifecycleState == .running, affectedServiceCount: self?.systemProxyStatus.affectedServiceCount ?? 0, error: .recoveryFailed)
+                self?.operationTask = nil
+            }
+        }
+    }
+
+    func recoverSystemProxy() {
+        guard canRecoverSystemProxy else { return }
+        systemProxyStatus = SystemProxyStatus(state: .recoveryRequired, engineReachable: lifecycleState == .running, affectedServiceCount: systemProxyStatus.affectedServiceCount, error: nil)
+        operationTask = Task { [weak self] in
+            do {
+                let status = try await self?.systemProxyClient.recoverSystemProxy()
+                guard !Task.isCancelled, let status else { return }
+                self?.systemProxyStatus = status
+                self?.operationTask = nil
+            } catch {
+                self?.systemProxyStatus.error = .recoveryFailed
+                self?.operationTask = nil
+            }
+        }
+    }
+
+    /* Legacy service-backed engine support remains available to alternative backends. */
+    private func removeServiceUsingBackend() {
         guard let serviceManager else {
             finish(with: .serviceUnavailable)
             return
@@ -107,8 +233,33 @@ final class BackendLifecycleModel {
     }
 
     func stop() {
+        guard operationTask == nil else { return }
+        guard lifecycleState == .running else {
+            finish(with: .invalidLifecycleTransition)
+            return
+        }
+        lifecycleState = .stopping
+        error = nil
+        operationTask = Task { [weak self, backend] in
+            do {
+                let status = try await backend.stopEngine()
+                guard !Task.isCancelled else { return }
+                self?.finish(with: status)
+            } catch {
+                self?.systemProxyStatus = SystemProxyStatus(
+                    state: .recoveryRequired,
+                    engineReachable: true,
+                    affectedServiceCount: self?.systemProxyStatus.affectedServiceCount ?? 0,
+                    error: .recoveryFailed
+                )
+                self?.finish(with: .serviceUnavailable)
+            }
+        }
+    }
+
+    private func startUsingBackend() {
         begin(.stop) { backend in
-            try await backend.stopEngine()
+            try await backend.startEngine()
         }
     }
 
@@ -165,6 +316,7 @@ final class BackendLifecycleModel {
 
     private func finish(with updatedStatus: BackendStatus) {
         status = updatedStatus
+        error = nil
         lifecycleState = .settled(from: updatedStatus)
         operationTask = nil
     }
@@ -172,7 +324,7 @@ final class BackendLifecycleModel {
     private func finish(with error: BackendError) {
         self.error = error
         if error == .serviceRegistrationFailed {
-            status.serviceInstallation = .error
+            serviceInstallation = .error
         }
         lifecycleState = .failed(error)
         operationTask = nil
@@ -187,5 +339,20 @@ final class BackendLifecycleModel {
         error = .operationCancelled
         lifecycleState = .failed(.operationCancelled)
         operationTask = nil
+    }
+
+    private func refreshServiceStatus() async {
+        let installation = TargetServiceRegistration.status
+        serviceInstallation = installation
+        guard installation == .enabled else {
+            xpcState = .unknown
+            return
+        }
+        do {
+            _ = try await systemProxyClient.ping()
+            xpcState = ServiceConnectionAssessment.xpcState(registration: installation, xpcReachable: true)
+        } catch {
+            xpcState = ServiceConnectionAssessment.xpcState(registration: installation, xpcReachable: false)
+        }
     }
 }

@@ -98,6 +98,63 @@ final class TargetServiceXPCClient {
             }
         }
     }
+
+    func querySystemProxyStatus() async throws -> SystemProxyStatus {
+        try await callSystemProxy { service, reply in
+            service.querySystemProxyStatus(withReply: reply)
+        }
+    }
+
+    func enableSystemProxy() async throws -> SystemProxyStatus {
+        try await callSystemProxy { service, reply in
+            service.enableSystemProxy(withReply: reply)
+        }
+    }
+
+    func disableSystemProxy() async throws -> SystemProxyStatus {
+        try await callSystemProxy { service, reply in
+            service.disableSystemProxy(withReply: reply)
+        }
+    }
+
+    func recoverSystemProxy() async throws -> SystemProxyStatus {
+        try await callSystemProxy { service, reply in
+            service.recoverSystemProxy(withReply: reply)
+        }
+    }
+
+    private func callSystemProxy(
+        _ action: @escaping (TargetServiceXPCProtocol, @escaping (Data?, NSError?) -> Void) -> Void
+    ) async throws -> SystemProxyStatus {
+        let connection = makeConnection()
+        defer { connection.invalidate() }
+        return try await withCheckedThrowingContinuation { continuation in
+            let reply = XPCReplyOnce(continuation)
+            connection.interruptionHandler = { reply.fail() }
+            connection.invalidationHandler = { reply.fail() }
+            connection.resume()
+            let proxy = connection.remoteObjectProxyWithErrorHandler { error in reply.fail(error) }
+            guard let service = proxy as? TargetServiceXPCProtocol else {
+                reply.fail()
+                return
+            }
+            action(service) { data, error in
+                if let error {
+                    reply.fail(error)
+                    return
+                }
+                guard let data else {
+                    reply.fail()
+                    return
+                }
+                do {
+                    reply.succeed(try XPCPayloadCodec.decodeSystemProxyStatus(data))
+                } catch {
+                    reply.fail(error)
+                }
+            }
+        }
+    }
 }
 
 private final class XPCReplyOnce<Value>: @unchecked Sendable {
@@ -128,13 +185,8 @@ private final class XPCReplyOnce<Value>: @unchecked Sendable {
 @available(macOS 13.0, *)
 actor TargetServiceBackend: ServiceLifecycleManaging, ServiceConnectionTesting {
     private let client = TargetServiceXPCClient()
-    private var didEncounterRegistrationError = false
 
     func queryStatus() async throws -> BackendStatus {
-        if didEncounterRegistrationError {
-            return BackendStatus(serviceInstallation: .error, engineState: .stopped)
-        }
-
         let installation = TargetServiceRegistration.status
         guard installation == .enabled else {
             return BackendStatus(serviceInstallation: installation, engineState: .stopped)
@@ -144,17 +196,17 @@ actor TargetServiceBackend: ServiceLifecycleManaging, ServiceConnectionTesting {
             let daemonStatus = try await client.queryStatus()
             return BackendStatus(serviceInstallation: .enabled, engineState: daemonStatus.engineState)
         } catch {
-            return BackendStatus(serviceInstallation: .unavailable, engineState: .stopped)
+            // Registration remains enabled even when the Mach service is not yet
+            // accepting connections. The caller presents XPC availability separately.
+            return BackendStatus(serviceInstallation: .enabled, engineState: .stopped)
         }
     }
 
     func installService() async throws -> BackendStatus {
         do {
             try TargetServiceRegistration.register()
-            didEncounterRegistrationError = false
             return try await queryStatus()
         } catch {
-            didEncounterRegistrationError = true
             throw error
         }
     }
@@ -162,10 +214,8 @@ actor TargetServiceBackend: ServiceLifecycleManaging, ServiceConnectionTesting {
     func removeService() async throws -> BackendStatus {
         do {
             try TargetServiceRegistration.unregister()
-            didEncounterRegistrationError = false
             return try await queryStatus()
         } catch {
-            didEncounterRegistrationError = true
             throw error
         }
     }

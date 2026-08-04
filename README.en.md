@@ -2,7 +2,13 @@
 
 [简体中文](README.zh-CN.md) | [English](README.en.md)
 
-Target is a native SwiftUI macOS client. Its optional sing-box engine runs as the signed-in user and only exposes local proxy listeners. It does not set the system proxy or change routes, DNS, or firewall rules.
+Target is a native SwiftUI macOS client. Its optional sing-box engine runs as the signed-in user and exposes a local mixed HTTP/SOCKS listener at `127.0.0.1:2080`.
+
+## Host Safe Mode
+
+Target starts in Host Safe Mode. It observes the local listener and service health but does not change system proxy, PAC, proxy discovery, DNS, routes, firewall, or TUN settings. If an existing system proxy or another proxy application is detected, Target refuses to take over the network. System-proxy controls remain disabled in Safe Mode.
+
+Recovery is disabled unless Target has a validated, Target-owned snapshot. A recovery operation compares the current settings with Target's last written settings and stops on an external-change conflict; it never clears all proxies as a fallback.
 
 ## Build requirements
 

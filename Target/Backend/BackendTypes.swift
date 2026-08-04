@@ -18,6 +18,25 @@ enum ServiceInstallationState: String, Codable, Equatable, Sendable {
     }
 }
 
+enum XPCConnectionState: String, Codable, Equatable, Sendable {
+    case unknown
+    case connected
+    case unavailable
+
+    var localizedKey: String { "xpc.status.\(rawValue)" }
+}
+
+enum ServiceConnectionAssessment {
+    static func xpcState(
+        registration: ServiceInstallationState,
+        xpcReachable: Bool?
+    ) -> XPCConnectionState {
+        guard registration == .enabled else { return .unknown }
+        guard let xpcReachable else { return .unknown }
+        return xpcReachable ? .connected : .unavailable
+    }
+}
+
 enum EngineState: String, Codable, Equatable, Sendable {
     case stopped
     case starting
@@ -108,6 +127,7 @@ enum BackendError: Error, Equatable, Sendable {
     case engineInstallationFailed
     case configurationCheckFailed
     case engineLaunchFailed
+    case enginePortUnavailable
 
     var localizedKey: String {
         switch self {
@@ -122,6 +142,7 @@ enum BackendError: Error, Equatable, Sendable {
         case .engineInstallationFailed: "backend.error.engine-installation-failed"
         case .configurationCheckFailed: "backend.error.configuration-check-failed"
         case .engineLaunchFailed: "backend.error.engine-launch-failed"
+        case .enginePortUnavailable: "backend.error.engine-port-unavailable"
         }
     }
 }

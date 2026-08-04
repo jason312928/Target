@@ -6,6 +6,13 @@ actor SingBoxBackend: EngineInstalling {
 
     private var process: Process?
     private var logHandle: FileHandle?
+    private let portProbe: any LocalProxyProbing
+    private let readinessTimeout: Duration
+
+    init(portProbe: any LocalProxyProbing = TCPPort2080Probe(), readinessTimeout: Duration = .seconds(3)) {
+        self.portProbe = portProbe
+        self.readinessTimeout = readinessTimeout
+    }
 
     private var engineDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -20,7 +27,9 @@ actor SingBoxBackend: EngineInstalling {
     func queryStatus() async throws -> BackendStatus {
         let installation = installationStatus()
         let version = installation == .installed ? try? versionString() : nil
-        let state: EngineState = process?.isRunning == true ? .running : .stopped
+        let processIsRunning = process?.isRunning == true
+        let portIsReady = await portProbe.isAvailable()
+        let state = EngineRuntimeReadiness.visibleState(processIsRunning: processIsRunning, portIsListening: portIsReady)
         return BackendStatus(
             serviceInstallation: .notRegistered,
             engineState: state,
@@ -86,12 +95,12 @@ actor SingBoxBackend: EngineInstalling {
         }
         process = launched
         self.logHandle = logHandle
-        try await Task.sleep(for: .milliseconds(150))
-        guard launched.isRunning else {
+        guard await waitForPortReadiness(for: launched) else {
+            stopOwnedProcess(launched)
             try? logHandle.close()
             self.logHandle = nil
             process = nil
-            throw BackendError.engineLaunchFailed
+            throw EngineRuntimeReadiness.startupFailure(processStillRunning: launched.isRunning)
         }
         return try await queryStatus()
     }
@@ -147,9 +156,35 @@ actor SingBoxBackend: EngineInstalling {
         return (process.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 
+    private func waitForPortReadiness(for process: Process) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + readinessTimeout
+        while process.isRunning && clock.now < deadline {
+            if await portProbe.isAvailable() { return true }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return process.isRunning ? await portProbe.isAvailable() : false
+    }
+
+    private func stopOwnedProcess(_ process: Process) {
+        guard process.isRunning else { return }
+        process.terminate()
+        process.waitUntilExit()
+    }
+
     deinit {
         if process?.isRunning == true { process?.terminate() }
         try? logHandle?.close()
+    }
+}
+
+enum EngineRuntimeReadiness {
+    static func visibleState(processIsRunning: Bool, portIsListening: Bool) -> EngineState {
+        processIsRunning && portIsListening ? .running : .stopped
+    }
+
+    static func startupFailure(processStillRunning: Bool) -> BackendError {
+        processStillRunning ? .enginePortUnavailable : .engineLaunchFailed
     }
 }
 

@@ -23,6 +23,10 @@
 		A1000000000000000000000F /* com.jason312928.Target.TargetService.plist in Embed LaunchDaemon Definition */ = {isa = PBXBuildFile; fileRef = A10000000000000000000022 /* com.jason312928.Target.TargetService.plist */; };
 		A10000000000000000000010 /* SingBoxBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* SingBoxBackend.swift */; };
 		A10000000000000000000020 /* install_sing_box.sh in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* install_sing_box.sh */; };
+		A10000000000000000000023 /* SystemProxyController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000024 /* SystemProxyController.swift */; };
+		A10000000000000000000025 /* SystemProxyController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000024 /* SystemProxyController.swift */; };
+		A10000000000000000000026 /* HostNetworkSafety.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000027 /* HostNetworkSafety.swift */; };
+		A10000000000000000000028 /* HostNetworkSafety.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000027 /* HostNetworkSafety.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -53,6 +57,8 @@
 		A10000000000000000000018 /* TargetServiceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetServiceClient.swift; sourceTree = "<group>"; };
 		A10000000000000000000019 /* SingBoxBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SingBoxBackend.swift; sourceTree = "<group>"; };
 		A1000000000000000000001A /* install_sing_box.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = Scripts/install_sing_box.sh; sourceTree = "<group>"; };
+		A10000000000000000000024 /* SystemProxyController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemProxyController.swift; sourceTree = "<group>"; };
+		A10000000000000000000027 /* HostNetworkSafety.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostNetworkSafety.swift; sourceTree = "<group>"; };
 		A10000000000000000000021 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		A10000000000000000000022 /* com.jason312928.Target.TargetService.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = com.jason312928.Target.TargetService.plist; sourceTree = "<group>"; };
 		A10000000000000000000031 /* BackendArchitectureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendArchitectureTests.swift; sourceTree = "<group>"; };
@@ -79,7 +85,7 @@
 		A100000000000000000000A4 /* TargetTests */ = {isa = PBXGroup; children = (A10000000000000000000031 /* BackendArchitectureTests.swift */); path = TargetTests; sourceTree = "<group>"; };
 		A100000000000000000000A5 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000041 /* Target.app */, A10000000000000000000042 /* TargetService */, A10000000000000000000043 /* TargetTests.xctest */); name = Products; sourceTree = "<group>"; };
 		A100000000000000000000A6 /* Backend */ = {isa = PBXGroup; children = (A10000000000000000000013 /* BackendLifecycleModel.swift */, A10000000000000000000015 /* BackendTypes.swift */, A10000000000000000000016 /* MockBackend.swift */, A10000000000000000000019 /* SingBoxBackend.swift */); path = Backend; sourceTree = "<group>"; };
-		A100000000000000000000A7 /* Service */ = {isa = PBXGroup; children = (A10000000000000000000017 /* TargetServiceXPCProtocol.swift */, A10000000000000000000018 /* TargetServiceClient.swift */); path = Service; sourceTree = "<group>"; };
+		A100000000000000000000A7 /* Service */ = {isa = PBXGroup; children = (A10000000000000000000017 /* TargetServiceXPCProtocol.swift */, A10000000000000000000018 /* TargetServiceClient.swift */, A10000000000000000000024 /* SystemProxyController.swift */, A10000000000000000000027 /* HostNetworkSafety.swift */); path = Service; sourceTree = "<group>"; };
 		A100000000000000000000A8 /* Resources */ = {isa = PBXGroup; children = (A10000000000000000000014 /* Localizable.xcstrings */, A1000000000000000000001A /* install_sing_box.sh */); path = Resources; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
@@ -98,8 +104,8 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A10000000000000000000094 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* TargetApp.swift in Sources */, A10000000000000000000002 /* ContentView.swift in Sources */, A10000000000000000000003 /* BackendLifecycleModel.swift in Sources */, A10000000000000000000005 /* BackendTypes.swift in Sources */, A10000000000000000000006 /* MockBackend.swift in Sources */, A10000000000000000000010 /* SingBoxBackend.swift in Sources */, A10000000000000000000007 /* TargetServiceXPCProtocol.swift in Sources */, A10000000000000000000008 /* TargetServiceClient.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
-		A10000000000000000000096 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000009 /* main.swift in Sources */, A1000000000000000000000A /* BackendTypes.swift in Sources */, A1000000000000000000000C /* TargetServiceXPCProtocol.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000094 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* TargetApp.swift in Sources */, A10000000000000000000002 /* ContentView.swift in Sources */, A10000000000000000000003 /* BackendLifecycleModel.swift in Sources */, A10000000000000000000005 /* BackendTypes.swift in Sources */, A10000000000000000000006 /* MockBackend.swift in Sources */, A10000000000000000000010 /* SingBoxBackend.swift in Sources */, A10000000000000000000007 /* TargetServiceXPCProtocol.swift in Sources */, A10000000000000000000008 /* TargetServiceClient.swift in Sources */, A10000000000000000000023 /* SystemProxyController.swift in Sources */, A10000000000000000000026 /* HostNetworkSafety.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000096 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000009 /* main.swift in Sources */, A1000000000000000000000A /* BackendTypes.swift in Sources */, A1000000000000000000000C /* TargetServiceXPCProtocol.swift in Sources */, A10000000000000000000025 /* SystemProxyController.swift in Sources */, A10000000000000000000028 /* HostNetworkSafety.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000097 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000D /* BackendArchitectureTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 

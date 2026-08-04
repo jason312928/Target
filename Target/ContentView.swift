@@ -20,6 +20,18 @@ struct ContentView: View {
 
             Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 12) {
                 GridRow {
+                    Text("backend.label.service")
+                    Text(LocalizedStringKey(lifecycle.serviceInstallationKey))
+                }
+                GridRow {
+                    Text("xpc.label.status")
+                    Text(LocalizedStringKey(lifecycle.xpcStateKey))
+                }
+                GridRow {
+                    Text("host-safety.label.status")
+                    Text(LocalizedStringKey(lifecycle.safeModeKey))
+                }
+                GridRow {
                     Text("engine.label.installation")
                     Text(LocalizedStringKey(lifecycle.engineInstallationKey))
                 }
@@ -31,6 +43,21 @@ struct ContentView: View {
                     Text("backend.label.engine")
                     Text(LocalizedStringKey(lifecycle.engineStateKey))
                 }
+                GridRow {
+                    Text("system-proxy.label.status")
+                    Text(LocalizedStringKey(lifecycle.systemProxyStateKey))
+                }
+                GridRow {
+                    Text("system-proxy.label.engine")
+                    Text(lifecycle.systemProxyStatus.engineReachable ? "system-proxy.engine.reachable" : "system-proxy.engine.unreachable")
+                }
+                if let systemProxyErrorKey = lifecycle.systemProxyErrorKey {
+                    GridRow {
+                        Text("system-proxy.label.error")
+                        Text(LocalizedStringKey(systemProxyErrorKey))
+                            .foregroundStyle(.red)
+                    }
+                }
                 if let errorKey = lifecycle.errorKey {
                     GridRow {
                         Text("backend.label.error")
@@ -41,6 +68,16 @@ struct ContentView: View {
             }
 
             HStack {
+                Button("service.action.install") {
+                    lifecycle.installService()
+                }
+                .disabled(!lifecycle.canManageService || lifecycle.serviceInstallation == .enabled)
+
+                Button("service.action.remove") {
+                    lifecycle.removeService()
+                }
+                .disabled(!lifecycle.canManageService || lifecycle.serviceInstallation == .notRegistered)
+
                 Button("engine.action.install") {
                     lifecycle.installEngine()
                 }
@@ -69,6 +106,30 @@ struct ContentView: View {
                     lifecycle.stop()
                 }
                 .disabled(!lifecycle.canStop)
+            }
+
+            Toggle("system-proxy.action.toggle", isOn: Binding(
+                get: { lifecycle.systemProxyStatus.state == .enabled },
+                set: { enabled in
+                    if enabled {
+                        lifecycle.enableSystemProxy()
+                    } else {
+                        lifecycle.disableSystemProxy()
+                    }
+                }
+            ))
+            .disabled(!lifecycle.canEnableSystemProxy && !lifecycle.canDisableSystemProxy)
+
+            HStack {
+                Button("system-proxy.action.refresh") {
+                    lifecycle.refreshSystemProxyStatus()
+                }
+                .disabled(lifecycle.isBusy)
+
+                Button("system-proxy.action.recover") {
+                    lifecycle.recoverSystemProxy()
+                }
+                .disabled(!lifecycle.canRecoverSystemProxy)
             }
         }
         .frame(minWidth: 420, minHeight: 260)

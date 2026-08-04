@@ -6,6 +6,7 @@ private final class TargetServiceServer: NSObject, NSXPCListenerDelegate {
 
     func run() {
         listener.delegate = self
+        endpoint.start()
         listener.resume()
         RunLoop.current.run()
     }
@@ -22,6 +23,11 @@ private let server = TargetServiceServer()
 server.run()
 
 private final class TargetServiceEndpoint: NSObject, TargetServiceXPCProtocol {
+    private let systemProxy = SystemProxyCoordinator()
+
+    func start() {
+        Task { await systemProxy.start() }
+    }
     func ping(withReply reply: @escaping (String) -> Void) {
         reply("target-service")
     }
@@ -45,5 +51,43 @@ private final class TargetServiceEndpoint: NSObject, TargetServiceXPCProtocol {
 
     func stopEngine(withReply reply: @escaping (Data?, NSError?) -> Void) {
         reply(nil, xpcError(BackendError.notImplemented))
+    }
+
+    func querySystemProxyStatus(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        Task {
+            let status = await systemProxy.querySystemProxyStatus()
+            do {
+                reply(try XPCPayloadCodec.encodeSystemProxyStatus(status), nil)
+            } catch {
+                reply(nil, xpcError(error))
+            }
+        }
+    }
+
+    func enableSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        performSystemProxyOperation(reply) { try await self.systemProxy.enableSystemProxy() }
+    }
+
+    func disableSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        performSystemProxyOperation(reply) { try await self.systemProxy.disableSystemProxy() }
+    }
+
+    func recoverSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        performSystemProxyOperation(reply) { try await self.systemProxy.recoverSystemProxy() }
+    }
+
+    private func performSystemProxyOperation(
+        _ reply: @escaping (Data?, NSError?) -> Void,
+        operation: @escaping () async throws -> SystemProxyStatus
+    ) {
+        Task {
+            do {
+                reply(try XPCPayloadCodec.encodeSystemProxyStatus(try await operation()), nil)
+            } catch let error as SystemProxyError {
+                reply(nil, xpcError(error))
+            } catch {
+                reply(nil, xpcError(BackendError.serviceUnavailable))
+            }
+        }
     }
 }
