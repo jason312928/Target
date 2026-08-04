@@ -47,6 +47,8 @@ final class BackendLifecycleModel {
         operationTask == nil && lifecycleState == .running
     }
 
+    var canRestart: Bool { canStop && status.restartRequired }
+
     var backendStateKey: String { "backend.status.sing-box" }
     var engineInstallationKey: String { status.engineInstallation.localizedKey }
     var engineStateKey: String { status.engineState.localizedKey }
@@ -250,6 +252,27 @@ final class BackendLifecycleModel {
                     affectedServiceCount: self?.systemProxyStatus.affectedServiceCount ?? 0,
                     error: .recoveryFailed
                 )
+                self?.finish(with: .serviceUnavailable)
+            }
+        }
+    }
+
+    func restartWithCurrentProfile() {
+        guard canRestart else { return }
+        lifecycleState = .stopping
+        error = nil
+        let backend = backend
+        operationTask = Task { [weak self] in
+            do {
+                _ = try await backend.stopEngine()
+                guard !Task.isCancelled else { return }
+                self?.lifecycleState = .starting
+                let status = try await backend.startEngine()
+                guard !Task.isCancelled else { return }
+                self?.finish(with: status)
+            } catch let error as BackendError {
+                self?.finish(with: error)
+            } catch {
                 self?.finish(with: .serviceUnavailable)
             }
         }

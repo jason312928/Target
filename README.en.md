@@ -2,6 +2,12 @@
 
 [简体中文](README.zh-CN.md) | [English](README.en.md)
 
+## Running with a Profile
+
+The engine starts only from the selected Profile's latest valid version. Before launch, Target runs `sing-box check` again and creates a permission-restricted, one-run configuration copy. It changes only explicit `127.0.0.1` inbound listener ports to dynamic high ports; saved JSON is never rewritten. TUN, transparent proxying, non-localhost listeners, and absolute or traversing file paths are rejected.
+
+The runtime record binds the Profile ID and revision to Target's PID, executable fingerprint, dynamic port, launch time, and configuration fingerprint. Target reports running only when every record matches. Editing, restoring, or switching Profiles leaves the live engine unchanged and requires an explicit restart. A running Profile cannot be deleted until the engine stops. Temporary configurations and records are removed after normal stop or failed launch, and logs redact URLs, credentials, keys, full paths, and full configuration content.
+
 Target is a native SwiftUI macOS client. Its optional sing-box engine runs as the signed-in user and exposes a local mixed HTTP/SOCKS listener on an automatically selected high localhost port.
 
 ## Host Safe Mode

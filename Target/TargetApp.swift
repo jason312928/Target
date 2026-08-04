@@ -14,7 +14,7 @@ struct TargetApp: App {
             TabView {
                 ContentView(lifecycle: lifecycle)
                     .tabItem { Label("app.title", systemImage: "bolt") }
-                ProfileWorkspaceView()
+                ProfileWorkspaceView(lifecycle: lifecycle)
                     .tabItem { Label("profile.title", systemImage: "doc.text") }
             }
                 .onAppear { TargetApplicationDelegate.shared.lifecycle = lifecycle }

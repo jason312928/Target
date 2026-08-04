@@ -18,6 +18,12 @@ Profile 仅存放在 Target 的 Application Support 容器中。Profile 可保�
 
 新建 Profile 使用安全示例配置：动态 `127.0.0.1` mixed 监听和 `direct` outbound；不会启用系统代理、TUN、DNS 接管、路由或防火墙修改。
 
+## 使用 Profile 运行引擎
+
+启动引擎时，Target 只会采用当前选中 Profile 的最近有效版本。启动前会再次用 `sing-box check` 验证，并为本次运行生成受限权限的临时配置副本；副本仅将显式的 `127.0.0.1` 入站监听端口替换为 Target 动态高位端口，绝不改写保存的原始 JSON。包含 TUN、透明代理、非 localhost 监听或绝对/越界文件路径的配置会被拒绝。
+
+运行记录绑定 Profile ID、有效版本、Target 启动的 PID、可执行文件指纹、动态端口、启动时间和配置指纹。只有这些记录与进程及端口都匹配时才显示“运行中”。编辑、恢复版本或切换 Profile 不会改变已运行的引擎；界面会提示重启。正在使用的 Profile 必须先停止引擎才可删除。停止或启动失败后，Target 会清理其临时配置和运行记录；日志不会显示订阅 URL、认证信息、私钥、完整路径或完整配置。
+
 ## 构建要求
 
 - macOS 15 或更高版本
@@ -35,7 +41,7 @@ xcodebuild -project Target.xcodeproj -scheme Target -configuration Debug build
 Target/Resources/Scripts/install_sing_box.sh
 ```
 
-脚本仅从官方 sing-box GitHub Release 下载固定的 sing-box 1.13.16，校验 SHA-256，自动识别 Apple Silicon 或 Intel，并在无需 `sudo` 的情况下安装到 `~/Library/Application Support/Target/sing-box`。App 只会在该目录生成最小配置，并以 direct outbound 在可用的高位 localhost 端口提供 SOCKS/HTTP 混合监听。
+脚本仅从官方 sing-box GitHub Release 下载固定的 sing-box 1.13.16，校验 SHA-256，自动识别 Apple Silicon 或 Intel，并在无需 `sudo` 的情况下安装到 `~/Library/Application Support/Target/sing-box`。App 只会在该目录创建一次性运行配置，并以当前 Profile 在可用的高位 localhost 端口提供 SOCKS/HTTP 混合监听。
 
 ## 许可证
 

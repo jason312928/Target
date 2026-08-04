@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ProfileWorkspaceView: View {
+    var lifecycle: BackendLifecycleModel? = nil
     @State private var model = ProfileViewModel()
     @State private var sheet: ProfileSheet?
     @State private var isImporting = false
@@ -54,8 +55,9 @@ struct ProfileWorkspaceView: View {
                 }
             }
         }
+        .onChange(of: model.selectedID) { _, _ in lifecycle?.refresh() }
         .alert("profile.delete.title", isPresented: $showDeleteConfirmation) {
-            Button("profile.action.delete", role: .destructive) { model.deleteSelected() }
+            Button("profile.action.delete", role: .destructive) { model.deleteSelected(); lifecycle?.refresh() }
             Button("profile.action.cancel", role: .cancel) { }
         } message: {
             Text("profile.delete.message")
@@ -101,13 +103,13 @@ struct ProfileWorkspaceView: View {
 
             HStack {
                 Button("profile.action.format") { model.format() }
-                Button("profile.action.restore") { model.restorePreviousVersion() }
+                Button("profile.action.restore") { model.restorePreviousVersion(); lifecycle?.refresh() }
                     .disabled(profile.validRevision <= 1)
                 Spacer()
                 Button("profile.action.rename") { sheet = .rename(profile.name) }
                 Button("profile.action.duplicate") { model.duplicateSelected() }
                 Button("profile.action.delete", role: .destructive) { showDeleteConfirmation = true }
-                Button("profile.action.save") { model.save() }
+                Button("profile.action.save") { model.save(); lifecycle?.refresh() }
                     .keyboardShortcut("s")
                     .disabled(!model.isDirty)
             }

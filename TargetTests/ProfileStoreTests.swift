@@ -79,6 +79,70 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertNoThrow(try store.safeManagedURL("metadata.json"))
     }
 
+    func testNoSelectedProfileCannotProvideLaunchVersion() throws {
+        let store = try makeStore()
+        XCTAssertThrowsError(try store.selectedValidVersion()) { error in
+            XCTAssertEqual(error as? ProfileStoreError, .noSelectedProfile)
+        }
+    }
+
+    func testMissingRecentValidVersionCannotProvideLaunchVersion() throws {
+        let store = try makeStore()
+        let profile = try store.create(name: "Missing Version")
+        let version = try store.safeManagedURL("\(profile.id.uuidString)/versions/1.json")
+        try FileManager.default.removeItem(at: version)
+        XCTAssertThrowsError(try store.selectedValidVersion()) { error in
+            XCTAssertEqual(error as? ProfileStoreError, .noValidVersion)
+        }
+    }
+
+    func testRuntimeCopyReplacesOnlyLocalPortAndLeavesSourceUntouched() throws {
+        let store = try makeStore()
+        let profile = try store.create(name: "Dynamic Port")
+        let source = SafeExampleConfiguration.json(port: 1080)
+        try store.save(json: source, for: profile.id)
+        let prepared = try ProfileRuntimeConfigurationPreparer(portSelector: FixedPortSelector(port: 51_234))
+            .prepare(store.selectedValidVersion())
+        XCTAssertEqual(try store.configurationText(for: profile.id), source)
+        let runtime = try XCTUnwrap(try JSONSerialization.jsonObject(with: prepared.data) as? [String: Any])
+        let inbound = try XCTUnwrap((runtime["inbounds"] as? [[String: Any]])?.first)
+        XCTAssertEqual(inbound["listen_port"] as? Int, 51_234)
+        XCTAssertEqual(prepared.primaryPort, 51_234)
+    }
+
+    func testUnsafeOrInvalidProfileCannotPrepareRuntimeCopy() throws {
+        let profile = Profile(
+            id: UUID(), name: "Unsafe", subscription: nil, createdAt: Date(), updatedAt: Date(),
+            validation: .notChecked, validRevision: 1
+        )
+        let version = ProfileConfigurationVersion(
+            profile: profile, revision: 1,
+            data: Data(#"{"inbounds":[{"type":"tun","listen":"127.0.0.1","listen_port":1}],"outbounds":[]}"#.utf8)
+        )
+        XCTAssertThrowsError(try ProfileRuntimeConfigurationPreparer(portSelector: FixedPortSelector(port: 51_234)).prepare(version)) { error in
+            XCTAssertEqual(error as? ProfileRuntimeConfigurationError, .unsafeConfiguration)
+        }
+    }
+
+    func testRunningProfileCannotBeDeleted() throws {
+        let usage = FixedProfileUsage(inUse: true)
+        let store = ProfileStore(rootDirectory: try temporaryDirectory(), checker: TestChecker(result: .success(())), runtimeUsage: usage)
+        let profile = try store.create(name: "Active")
+        XCTAssertThrowsError(try store.delete(profile.id)) { error in
+            XCTAssertEqual(error as? ProfileStoreError, .profileInUse)
+        }
+    }
+
+    func testRuntimeConfigurationCleanupRemovesOnlyEphemeralCopy() throws {
+        let root = try temporaryDirectory()
+        let runtime = RuntimeConfigurationStore(directory: root.appending(path: "runtime", directoryHint: .isDirectory))
+        let temporary = try runtime.write(Data("{}".utf8))
+        XCTAssertTrue(runtime.exists(id: temporary.id))
+        runtime.remove(id: temporary.id)
+        XCTAssertFalse(runtime.exists(id: temporary.id))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.path))
+    }
+
     func testSingBoxCheckSubcommandIntegration() throws {
         let root = try temporaryDirectory()
         let executable = root.appending(path: "sing-box")
@@ -94,8 +158,8 @@ final class ProfileStoreTests: XCTestCase {
     }
 
     func testInstalledSingBoxChecksSafeExampleConfigurationWhenRequested() throws {
-        guard ProcessInfo.processInfo.environment["RUN_SING_BOX_INTEGRATION_TESTS"] == "1" else {
-            throw XCTSkip("Set RUN_SING_BOX_INTEGRATION_TESTS=1 after installing sing-box.")
+        guard FileManager.default.isExecutableFile(atPath: singBoxExecutable.path) else {
+            throw XCTSkip("sing-box is not installed for localhost integration testing.")
         }
         let root = try temporaryDirectory()
         let configuration = root.appending(path: "safe-example.json")
@@ -115,10 +179,25 @@ final class ProfileStoreTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
     }
+
+    private var singBoxExecutable: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appending(path: "Target/sing-box/bin/sing-box")
+    }
 }
 
 private final class TestChecker: SingBoxConfigurationChecking, @unchecked Sendable {
     var result: Result<Void, ConfigurationDiagnostic>
     init(result: Result<Void, ConfigurationDiagnostic>) { self.result = result }
     func check(configurationURL: URL) -> Result<Void, ConfigurationDiagnostic> { result }
+}
+
+private struct FixedPortSelector: LocalEnginePortSelecting {
+    let port: UInt16
+    func selectAvailablePort() throws -> UInt16 { port }
+}
+
+private struct FixedProfileUsage: ProfileRuntimeUsageChecking {
+    let inUse: Bool
+    func isProfileInUse(_ id: UUID) -> Bool { inUse }
 }

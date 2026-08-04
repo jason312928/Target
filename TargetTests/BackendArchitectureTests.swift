@@ -195,14 +195,14 @@ final class BackendArchitectureTests: XCTestCase {
     }
 
     func testEngineRuntimeRecordRequiresHighDynamicPort() {
-        let lowPort = EngineRuntimeRecord(pid: 42, executablePath: "/tmp/sing-box", endpoint: LocalEngineEndpoint(port: 2080))
-        let highPort = EngineRuntimeRecord(pid: 42, executablePath: "/tmp/sing-box", endpoint: LocalEngineEndpoint(port: 51_234))
+        let lowPort = runtimeRecord(port: 2080)
+        let highPort = runtimeRecord(port: 51_234)
         XCTAssertFalse(lowPort.isValid)
         XCTAssertTrue(highPort.isValid)
     }
 
     func testOwnedRuntimeRejectsUnmatchedProcessEvenWhenPortListens() async {
-        let record = EngineRuntimeRecord(pid: 42, executablePath: "/tmp/target-sing-box", endpoint: LocalEngineEndpoint(port: 51_234))
+        let record = runtimeRecord(port: 51_234)
         let ownership = EngineRuntimeOwnership(
             store: FixedEngineRuntimeStore(record: record),
             processInspector: FixedEngineProcessInspector(shouldMatch: false),
@@ -214,6 +214,38 @@ final class BackendArchitectureTests: XCTestCase {
 
     func testDynamicPortSelectorReturnsHighPort() throws {
         XCTAssertGreaterThanOrEqual(try DynamicHighLocalPortSelector().selectAvailablePort(), LocalEngineEndpoint.minimumDynamicPort)
+    }
+
+    func testEditedProfileRequiresExplicitRestart() {
+        let id = UUID()
+        let original = Data("{\"inbounds\":[]}".utf8)
+        let record = EngineRuntimeRecord(
+            pid: 42, executablePath: "/tmp/target-sing-box", executableFingerprint: "identity",
+            endpoint: LocalEngineEndpoint(port: 51_234), profileID: id, profileRevision: 1,
+            sourceConfigurationFingerprint: TargetConfigurationFingerprint.sha256(original),
+            configurationFingerprint: "runtime", startedAt: Date(), runtimeConfigurationID: UUID()
+        )
+        let profile = Profile(id: id, name: "Edited", subscription: nil, createdAt: Date(), updatedAt: Date(), validation: .notChecked, validRevision: 2)
+        let selected = ProfileConfigurationVersion(profile: profile, revision: 2, data: Data("{\"inbounds\":[{}]}".utf8))
+        XCTAssertTrue(EngineRuntimeProfileState.requiresRestart(record: record, selected: selected))
+    }
+
+    func testFailedLaunchCleansTemporaryConfigurationAndRuntimeRecord() async throws {
+        let root = try temporaryDirectory()
+        let executable = root.appending(path: "sing-box")
+        let script = "#!/bin/sh\nif [ \"$1\" = \"version\" ]; then echo 'sing-box version test'; exit 0; fi\nif [ \"$1\" = \"check\" ]; then exit 1; fi\nexit 1\n"
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let store = ProfileStore(rootDirectory: root.appending(path: "Profiles"), checker: FixedConfigurationChecker())
+        _ = try store.create(name: "Failure")
+        let backend = SingBoxBackend(profileStore: store, engineDirectory: root, executableURL: executable)
+        do {
+            _ = try await backend.startEngine()
+            XCTFail("Expected configuration check failure")
+        } catch let error as BackendError {
+            XCTAssertEqual(error, .configurationCheckFailed)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appending(path: "runtime").path))
     }
 
     func testServiceRegistrationRejectsDerivedDataBundlePath() {
@@ -285,14 +317,22 @@ final class BackendArchitectureTests: XCTestCase {
     }
 
     func testSingBoxManagedConfigurationAndLocalProxy() async throws {
-        guard ProcessInfo.processInfo.environment["RUN_SING_BOX_INTEGRATION_TESTS"] == "1" else {
-            throw XCTSkip("Set RUN_SING_BOX_INTEGRATION_TESTS=1 after running the bundled installer.")
+        let root = try temporaryDirectory()
+        let profileRoot = root.appending(path: "Profiles", directoryHint: .isDirectory)
+        let store = ProfileStore(rootDirectory: profileRoot)
+        _ = try store.create(name: "Integration")
+        let executable = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appending(path: "Target/sing-box/bin/sing-box")
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            throw XCTSkip("sing-box is not installed for localhost integration testing.")
         }
-
-        let backend = SingBoxBackend()
-        try await backend.validateConfiguration(XPCConfigurationRequest(profileName: "Local Direct"))
+        let backend = SingBoxBackend(profileStore: store, engineDirectory: root, executableURL: executable)
+        try await backend.validateConfiguration(XPCConfigurationRequest(profileName: "Integration"))
         let running = try await backend.startEngine()
         XCTAssertEqual(running.engineState, .running)
+        XCTAssertNotNil(running.runningProfileID)
+        XCTAssertNotNil(running.runningProfileRevision)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(running.enginePort), Int(LocalEngineEndpoint.minimumDynamicPort))
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 15
@@ -309,6 +349,7 @@ final class BackendArchitectureTests: XCTestCase {
 
         let stopped = try await backend.stopEngine()
         XCTAssertEqual(stopped.engineState, .stopped)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appending(path: "runtime").path))
     }
 
     func testPrivilegedServicePingAndStatusWhenRequested() async throws {
@@ -354,6 +395,28 @@ final class BackendArchitectureTests: XCTestCase {
             endpointProvider: { LocalEngineEndpoint(port: 51_234) }
         )
     }
+
+    private func temporaryDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    private func runtimeRecord(port: UInt16) -> EngineRuntimeRecord {
+        EngineRuntimeRecord(
+            pid: 42,
+            executablePath: "/tmp/target-sing-box",
+            executableFingerprint: "test-identity",
+            endpoint: LocalEngineEndpoint(port: port),
+            profileID: UUID(),
+            profileRevision: 1,
+            sourceConfigurationFingerprint: "source",
+            configurationFingerprint: "runtime",
+            startedAt: Date(),
+            runtimeConfigurationID: UUID()
+        )
+    }
 }
 
 private final class FixedEngineRuntimeStore: EngineRuntimeStoring, @unchecked Sendable {
@@ -378,6 +441,10 @@ private struct FixedEnginePortProbe: LocalEnginePortProbing {
     let listening: Bool
 
     func isListening(on port: UInt16) async -> Bool { listening }
+}
+
+private struct FixedConfigurationChecker: SingBoxConfigurationChecking {
+    func check(configurationURL: URL) -> Result<Void, ConfigurationDiagnostic> { .success(()) }
 }
 
 private final class InMemorySystemProxySystem: SystemProxySystemManaging, @unchecked Sendable {

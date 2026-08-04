@@ -73,6 +73,9 @@ struct BackendStatus: Codable, Equatable, Sendable {
     var engineInstallation: EngineInstallationState = .notInstalled
     var engineVersion: String?
     var enginePort: Int?
+    var runningProfileID: UUID?
+    var runningProfileRevision: Int?
+    var restartRequired = false
 
     static let mockDefault = BackendStatus(serviceInstallation: .notRegistered, engineState: .stopped)
 }
@@ -129,6 +132,10 @@ enum BackendError: Error, Equatable, Sendable {
     case configurationCheckFailed
     case engineLaunchFailed
     case enginePortUnavailable
+    case profileNotSelected
+    case profileNoValidVersion
+    case profileConfigurationUnsafe
+    case profileConfigurationInvalid
 
     var localizedKey: String {
         switch self {
@@ -144,6 +151,10 @@ enum BackendError: Error, Equatable, Sendable {
         case .configurationCheckFailed: "backend.error.configuration-check-failed"
         case .engineLaunchFailed: "backend.error.engine-launch-failed"
         case .enginePortUnavailable: "backend.error.engine-port-unavailable"
+        case .profileNotSelected: "backend.error.profile-not-selected"
+        case .profileNoValidVersion: "backend.error.profile-no-valid-version"
+        case .profileConfigurationUnsafe: "backend.error.profile-unsafe-configuration"
+        case .profileConfigurationInvalid: "backend.error.profile-invalid-configuration"
         }
     }
 }

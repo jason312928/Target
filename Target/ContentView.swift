@@ -43,6 +43,24 @@ struct ContentView: View {
                     Text("backend.label.engine")
                     Text(LocalizedStringKey(lifecycle.engineStateKey))
                 }
+                if let profileID = lifecycle.status.runningProfileID {
+                    GridRow {
+                        Text("engine.label.profile")
+                        Text("\(profileID.uuidString.prefix(8)) · r\(lifecycle.status.runningProfileRevision ?? 0)")
+                    }
+                }
+                if let port = lifecycle.status.enginePort {
+                    GridRow {
+                        Text("engine.label.port")
+                        Text("127.0.0.1:\(port)")
+                    }
+                }
+                if lifecycle.status.restartRequired {
+                    GridRow {
+                        Text("engine.label.restart")
+                        Text("engine.restart.required").foregroundStyle(.orange)
+                    }
+                }
                 GridRow {
                     Text("system-proxy.label.status")
                     Text(LocalizedStringKey(lifecycle.systemProxyStateKey))
@@ -106,6 +124,11 @@ struct ContentView: View {
                     lifecycle.stop()
                 }
                 .disabled(!lifecycle.canStop)
+
+                Button("backend.action.restart") {
+                    lifecycle.restartWithCurrentProfile()
+                }
+                .disabled(!lifecycle.canRestart)
             }
 
             Toggle("system-proxy.action.toggle", isOn: Binding(

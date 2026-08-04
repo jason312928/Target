@@ -135,6 +135,8 @@ final class ProfileViewModel {
         case .invalidJSON(let diagnostic), .validationFailed(let diagnostic):
             self.diagnostic = diagnostic
             self.messageKey = diagnostic.messageKey
+        case .profileInUse:
+            self.messageKey = "profile.message.stop-before-delete"
         default:
             self.messageKey = "profile.message.operation-failed"
         }

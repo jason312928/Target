@@ -13,17 +13,20 @@ final class ProfileStore {
     private let checker: any SingBoxConfigurationChecking
     private let fileManager: FileManager
     private let now: () -> Date
+    private let runtimeUsage: any ProfileRuntimeUsageChecking
 
     init(
         rootDirectory: URL = ProfileStore.defaultRootDirectory(),
         checker: any SingBoxConfigurationChecking = SingBoxConfigurationChecker(),
         fileManager: FileManager = .default,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        runtimeUsage: any ProfileRuntimeUsageChecking = EngineRuntimeOwnership()
     ) {
         self.rootDirectory = rootDirectory.standardizedFileURL
         self.checker = checker
         self.fileManager = fileManager
         self.now = now
+        self.runtimeUsage = runtimeUsage
     }
 
     static func defaultRootDirectory() -> URL {
@@ -104,6 +107,7 @@ final class ProfileStore {
 
     func delete(_ id: UUID) throws {
         guard try profile(id) != nil else { throw ProfileStoreError.profileNotFound }
+        guard !runtimeUsage.isProfileInUse(id) else { throw ProfileStoreError.profileInUse }
         let directory = try safeProfileDirectory(id)
         try fileManager.removeItem(at: directory)
         var profiles = try loadManifest()
@@ -117,6 +121,24 @@ final class ProfileStore {
         let data = try Data(contentsOf: try configurationURL(for: id))
         guard let text = String(data: data, encoding: .utf8) else { throw ProfileStoreError.invalidStoredMetadata }
         return text
+    }
+
+    func selectedValidVersion() throws -> ProfileConfigurationVersion {
+        guard let id = try selectedProfileID() else { throw ProfileStoreError.noSelectedProfile }
+        guard let profile = try profile(id) else { throw ProfileStoreError.profileNotFound }
+        return try validVersion(for: profile, revision: profile.validRevision)
+    }
+
+    func validVersion(for id: UUID, revision: Int) throws -> ProfileConfigurationVersion {
+        guard let profile = try profile(id) else { throw ProfileStoreError.profileNotFound }
+        return try validVersion(for: profile, revision: revision)
+    }
+
+    private func validVersion(for profile: Profile, revision: Int) throws -> ProfileConfigurationVersion {
+        guard revision > 0 else { throw ProfileStoreError.noValidVersion }
+        let url = try versionURL(for: profile.id, revision: revision)
+        guard fileManager.fileExists(atPath: url.path) else { throw ProfileStoreError.noValidVersion }
+        return ProfileConfigurationVersion(profile: profile, revision: revision, data: try Data(contentsOf: url))
     }
 
     /// Verifies the exact user-provided bytes in a managed staging file before

@@ -9,41 +9,59 @@ actor SingBoxBackend: EngineInstalling {
     private let portProbe: any LocalEnginePortProbing
     private let portSelector: any LocalEnginePortSelecting
     private let runtimeOwnership: EngineRuntimeOwnership
+    private let profileStore: ProfileStore
+    private let runtimeConfigurations: RuntimeConfigurationStore
     private let readinessTimeout: Duration
+    private let executableURL: URL
+    private let logURL: URL
 
     init(
         portProbe: any LocalEnginePortProbing = LocalTCPPortProbe(),
         portSelector: any LocalEnginePortSelecting = DynamicHighLocalPortSelector(),
         runtimeOwnership: EngineRuntimeOwnership = EngineRuntimeOwnership(),
+        profileStore: ProfileStore = ProfileStore(),
+        engineDirectory: URL? = nil,
+        executableURL: URL? = nil,
         readinessTimeout: Duration = .seconds(3)
     ) {
+        let defaultDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appending(path: Self.applicationSupportDirectoryName, directoryHint: .isDirectory)
+            .appending(path: Self.engineDirectoryName, directoryHint: .isDirectory)
+        let resolvedDirectory = (engineDirectory ?? defaultDirectory).standardizedFileURL
         self.portProbe = portProbe
         self.portSelector = portSelector
         self.runtimeOwnership = runtimeOwnership
+        self.profileStore = profileStore
+        self.runtimeConfigurations = RuntimeConfigurationStore(directory: resolvedDirectory.appending(path: "runtime", directoryHint: .isDirectory))
         self.readinessTimeout = readinessTimeout
+        self.executableURL = executableURL ?? resolvedDirectory.appending(path: "bin/sing-box")
+        self.logURL = resolvedDirectory.appending(path: "logs/sing-box.log")
     }
-
-    private var engineDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appending(path: Self.applicationSupportDirectoryName, directoryHint: .isDirectory)
-            .appending(path: Self.engineDirectoryName, directoryHint: .isDirectory)
-    }
-
-    private var executableURL: URL { engineDirectory.appending(path: "bin/sing-box") }
-    private var configurationURL: URL { engineDirectory.appending(path: "config.json") }
-    private var logURL: URL { engineDirectory.appending(path: "logs/sing-box.log") }
 
     func queryStatus() async throws -> BackendStatus {
         let installation = installationStatus()
         let version = installation == .installed ? try? versionString() : nil
-        let endpoint = await runtimeOwnership.ownedEndpoint()
-        let state = EngineRuntimeReadiness.visibleState(processIsOwned: endpoint != nil, portIsListening: endpoint != nil)
+        let ownedRecord = await runtimeOwnership.ownedRecord()
+        let verifiedRecord: EngineRuntimeRecord?
+        if let record = ownedRecord,
+           runtimeConfigurations.exists(id: record.runtimeConfigurationID),
+           let version = try? profileStore.validVersion(for: record.profileID, revision: record.profileRevision),
+           TargetConfigurationFingerprint.sha256(version.data) == record.sourceConfigurationFingerprint {
+            verifiedRecord = record
+        } else {
+            verifiedRecord = nil
+        }
+        let selected = try? profileStore.selectedValidVersion()
+        let restartRequired = verifiedRecord.map { EngineRuntimeProfileState.requiresRestart(record: $0, selected: selected) } ?? false
         return BackendStatus(
             serviceInstallation: .notRegistered,
-            engineState: state,
+            engineState: verifiedRecord == nil ? .stopped : .running,
             engineInstallation: installation,
             engineVersion: version,
-            enginePort: endpoint.map { Int($0.port) }
+            enginePort: verifiedRecord.map { Int($0.endpoint.port) },
+            runningProfileID: verifiedRecord?.profileID,
+            runningProfileRevision: verifiedRecord?.profileRevision,
+            restartRequired: restartRequired
         )
     }
 
@@ -53,51 +71,109 @@ actor SingBoxBackend: EngineInstalling {
         }
         let installer = Process()
         installer.executableURL = installerURL
-        installer.arguments = []
         let result = try run(installer)
         guard result.status == 0 else { throw BackendError.engineInstallationFailed }
         return try await queryStatus()
     }
 
     func validateConfiguration(_ request: XPCConfigurationRequest) async throws {
-        try await validateConfiguration(request, port: nil)
-    }
-
-    private func validateConfiguration(_ request: XPCConfigurationRequest, port: UInt16?) async throws {
         _ = try request.validated()
         guard installationStatus() == .installed else { throw BackendError.engineNotInstalled }
-        let configuredPort: UInt16
-        if let port {
-            configuredPort = port
-        } else if let existingEndpoint = await runtimeOwnership.ownedEndpoint() {
-            configuredPort = existingEndpoint.port
-        } else {
-            configuredPort = try portSelector.selectAvailablePort()
+        let prepared = try prepareSelectedConfiguration()
+        let temporary = try runtimeConfigurations.write(prepared.data)
+        defer { runtimeConfigurations.remove(id: temporary.id) }
+        try checkConfiguration(at: temporary.url)
+    }
+
+    func startEngine() async throws -> BackendStatus {
+        guard await runtimeOwnership.ownedRecord() == nil else { throw BackendError.invalidLifecycleTransition }
+        guard installationStatus() == .installed else { throw BackendError.engineNotInstalled }
+        runtimeOwnership.clearRecord()
+        runtimeConfigurations.removeAll()
+
+        let prepared = try prepareSelectedConfiguration()
+        let temporary = try runtimeConfigurations.write(prepared.data)
+        var launched: Process?
+        var handle: FileHandle?
+        do {
+            try checkConfiguration(at: temporary.url)
+            let openedLogHandle = try openLog()
+            handle = openedLogHandle
+            let candidate = makeEngineProcess(configurationURL: temporary.url, logHandle: openedLogHandle)
+            try candidate.run()
+            launched = candidate
+            try runtimeOwnership.recordLaunchedProcess(
+                pid: candidate.processIdentifier,
+                executableURL: executableURL,
+                port: prepared.primaryPort,
+                profileID: prepared.profileID,
+                profileRevision: prepared.profileRevision,
+                sourceConfigurationFingerprint: prepared.sourceFingerprint,
+                configurationFingerprint: prepared.configurationFingerprint,
+                runtimeConfigurationID: temporary.id
+            )
+            guard await waitForPortReadiness(for: candidate) else {
+                throw EngineRuntimeReadiness.startupFailure(processStillRunning: candidate.isRunning)
+            }
+            process = candidate
+            logHandle = openedLogHandle
+            return try await queryStatus()
+        } catch let error as BackendError {
+            cleanupFailedLaunch(process: launched, logHandle: handle, configurationID: temporary.id)
+            throw error
+        } catch {
+            cleanupFailedLaunch(process: launched, logHandle: handle, configurationID: temporary.id)
+            throw BackendError.engineLaunchFailed
         }
-        try createManagedConfiguration(port: configuredPort)
+    }
+
+    func stopEngine() async throws -> BackendStatus {
+        guard let record = runtimeOwnership.currentRecord(), runtimeOwnership.ownsProcess(record) else {
+            runtimeOwnership.clearRecord()
+            throw BackendError.invalidLifecycleTransition
+        }
+        if let process, process.processIdentifier == record.pid, process.isRunning {
+            stopOwnedProcess(process)
+        } else {
+            kill(pid_t(record.pid), SIGTERM)
+        }
+        self.process = nil
+        runtimeOwnership.clearRecord()
+        runtimeConfigurations.remove(id: record.runtimeConfigurationID)
+        try? logHandle?.close()
+        logHandle = nil
+        return try await queryStatus()
+    }
+
+    private func prepareSelectedConfiguration() throws -> PreparedProfileConfiguration {
+        do {
+            return try ProfileRuntimeConfigurationPreparer(portSelector: portSelector).prepare(profileStore.selectedValidVersion())
+        } catch let error as ProfileStoreError {
+            switch error {
+            case .noSelectedProfile: throw BackendError.profileNotSelected
+            case .noValidVersion: throw BackendError.profileNoValidVersion
+            case .unsafePath: throw BackendError.profileConfigurationUnsafe
+            default: throw BackendError.profileConfigurationInvalid
+            }
+        } catch let error as ProfileRuntimeConfigurationError {
+            switch error {
+            case .unsafeConfiguration: throw BackendError.profileConfigurationUnsafe
+            case .invalidJSON, .noLoopbackMixedInbound, .invalidPort: throw BackendError.profileConfigurationInvalid
+            }
+        } catch {
+            throw BackendError.profileConfigurationInvalid
+        }
+    }
+
+    private func checkConfiguration(at url: URL) throws {
         let checker = Process()
         checker.executableURL = executableURL
-        checker.arguments = ["check", "-c", configurationURL.path]
+        checker.arguments = ["check", "-c", url.path]
         let result = try run(checker)
         guard result.status == 0 else { throw BackendError.configurationCheckFailed }
     }
 
-    func startEngine() async throws -> BackendStatus {
-        guard await runtimeOwnership.ownedEndpoint() == nil else { throw BackendError.invalidLifecycleTransition }
-        let port: UInt16
-        do {
-            port = try portSelector.selectAvailablePort()
-        } catch {
-            throw BackendError.engineLaunchFailed
-        }
-        try await validateConfiguration(XPCConfigurationRequest(profileName: "Local Direct"), port: port)
-
-        let fileManager = FileManager.default
-        try fileManager.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        _ = fileManager.createFile(atPath: logURL.path, contents: nil)
-        let logHandle = try FileHandle(forWritingTo: logURL)
-        try logHandle.seekToEnd()
-
+    private func makeEngineProcess(configurationURL: URL, logHandle: FileHandle) -> Process {
         let launched = Process()
         launched.executableURL = executableURL
         launched.arguments = ["run", "-c", configurationURL.path]
@@ -107,56 +183,31 @@ actor SingBoxBackend: EngineInstalling {
         pipe.fileHandleForReading.readabilityHandler = { [weak logHandle] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            let safe = EngineLogRedactor.redact(data)
-            try? logHandle?.write(contentsOf: safe)
+            try? logHandle?.write(contentsOf: EngineLogRedactor.redact(data))
         }
-        launched.terminationHandler = { _ in
-            pipe.fileHandleForReading.readabilityHandler = nil
-        }
-        do {
-            try launched.run()
-            try runtimeOwnership.recordLaunchedProcess(pid: launched.processIdentifier, executableURL: executableURL, port: port)
-        } catch {
-            pipe.fileHandleForReading.readabilityHandler = nil
-            try? logHandle.close()
-            throw BackendError.engineLaunchFailed
-        }
-        process = launched
-        self.logHandle = logHandle
-        guard await waitForPortReadiness(for: launched) else {
-            stopOwnedProcess(launched)
-            runtimeOwnership.clearRecord()
-            try? logHandle.close()
-            self.logHandle = nil
-            process = nil
-            throw EngineRuntimeReadiness.startupFailure(processStillRunning: launched.isRunning)
-        }
-        return try await queryStatus()
+        launched.terminationHandler = { _ in pipe.fileHandleForReading.readabilityHandler = nil }
+        return launched
     }
 
-    func stopEngine() async throws -> BackendStatus {
-        guard let record = runtimeOwnership.currentRecord(), runtimeOwnership.ownsProcess(record) else {
-            runtimeOwnership.clearRecord()
-            throw BackendError.invalidLifecycleTransition
-        }
-        if let process, process.processIdentifier == record.pid, process.isRunning {
-            process.terminate()
-            process.waitUntilExit()
-        } else {
-            // The record's PID and executable identity were validated above, so this
-            // can never target an unrelated listener.
-            kill(pid_t(record.pid), SIGTERM)
-        }
-        self.process = nil
+    private func openLog() throws -> FileHandle {
+        try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        _ = FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: logURL)
+        try handle.seekToEnd()
+        return handle
+    }
+
+    private func cleanupFailedLaunch(process: Process?, logHandle: FileHandle?, configurationID: UUID) {
+        if let process { stopOwnedProcess(process) }
         runtimeOwnership.clearRecord()
+        runtimeConfigurations.remove(id: configurationID)
         try? logHandle?.close()
-        logHandle = nil
-        return try await queryStatus()
+        self.process = nil
+        self.logHandle = nil
     }
 
     private func installationStatus() -> EngineInstallationState {
-        let executable = executableURL.path
-        guard FileManager.default.isExecutableFile(atPath: executable) else { return .notInstalled }
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else { return .notInstalled }
         return (try? versionString()) == nil ? .invalid : .installed
     }
 
@@ -165,24 +216,9 @@ actor SingBoxBackend: EngineInstalling {
         version.executableURL = executableURL
         version.arguments = ["version"]
         let result = try run(version)
-        guard result.status == 0,
-              let firstLine = result.output.split(separator: "\n").first,
-              firstLine.hasPrefix("sing-box version ") else {
-            throw BackendError.engineNotInstalled
-        }
+        guard result.status == 0, let firstLine = result.output.split(separator: "\n").first,
+              firstLine.hasPrefix("sing-box version ") else { throw BackendError.engineNotInstalled }
         return String(firstLine).replacingOccurrences(of: "sing-box version ", with: "")
-    }
-
-    private func createManagedConfiguration(port: UInt16) throws {
-        try FileManager.default.createDirectory(at: engineDirectory, withIntermediateDirectories: true)
-        let configuration: [String: Any] = [
-            "log": ["level": "error", "timestamp": true],
-            "inbounds": [["type": "mixed", "tag": "local-mixed", "listen": LocalEngineEndpoint.host, "listen_port": Int(port)]],
-            "outbounds": [["type": "direct", "tag": "direct"]],
-            "route": ["final": "direct"]
-        ]
-        let data = try JSONSerialization.data(withJSONObject: configuration, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: configurationURL, options: .atomic)
     }
 
     private func run(_ process: Process) throws -> (status: Int32, output: String) {
@@ -199,11 +235,11 @@ actor SingBoxBackend: EngineInstalling {
         let clock = ContinuousClock()
         let deadline = clock.now + readinessTimeout
         while process.isRunning && clock.now < deadline {
-            guard let record = runtimeOwnership.currentRecord(), runtimeOwnership.ownsProcess(record) else { return false }
+            guard let record = await runtimeOwnership.ownedRecord() else { return false }
             if await portProbe.isListening(on: record.endpoint.port) { return true }
             try? await Task.sleep(for: .milliseconds(50))
         }
-        guard let record = runtimeOwnership.currentRecord(), runtimeOwnership.ownsProcess(record) else { return false }
+        guard let record = await runtimeOwnership.ownedRecord() else { return false }
         return process.isRunning ? await portProbe.isListening(on: record.endpoint.port) : false
     }
 
@@ -229,6 +265,14 @@ enum EngineRuntimeReadiness {
     }
 }
 
+enum EngineRuntimeProfileState {
+    static func requiresRestart(record: EngineRuntimeRecord, selected: ProfileConfigurationVersion?) -> Bool {
+        guard let selected else { return true }
+        return record.profileID != selected.profile.id || record.profileRevision != selected.revision
+            || record.sourceConfigurationFingerprint != TargetConfigurationFingerprint.sha256(selected.data)
+    }
+}
+
 enum EngineLogRedactor {
     private static let ipv4 = try! NSRegularExpression(pattern: #"\b(?:\d{1,3}\.){3}\d{1,3}\b"#)
     private static let ipv6 = try! NSRegularExpression(pattern: #"(?i)[0-9a-f:]*:[0-9a-f:]+"#)
@@ -240,17 +284,8 @@ enum EngineLogRedactor {
 
     static func redact(_ data: Data) -> Data {
         var text = String(decoding: data, as: UTF8.self)
-        for (expression, replacement) in [
-            (ipv4, "[redacted-ip]"),
-            (ipv6, "[redacted-ip]"),
-            (credentialURL, "://[redacted-credentials]@"),
-            (uuid, "[redacted-uuid]"),
-            (sensitiveJSON, "$1\"[redacted]\""),
-            (userPath, "[redacted-path]"),
-            (absolutePath, "[redacted-path]")
-        ] {
-            let range = NSRange(text.startIndex..., in: text)
-            text = expression.stringByReplacingMatches(in: text, range: range, withTemplate: replacement)
+        for (expression, replacement) in [(ipv4, "[redacted-ip]"), (ipv6, "[redacted-ip]"), (credentialURL, "://[redacted-credentials]@"), (uuid, "[redacted-uuid]"), (sensitiveJSON, "$1\"[redacted]\""), (userPath, "[redacted-path]"), (absolutePath, "[redacted-path]")] {
+            text = expression.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: replacement)
         }
         return Data(text.utf8)
     }

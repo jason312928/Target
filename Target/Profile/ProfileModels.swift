@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 enum ProfileValidationStatus: String, Codable, Equatable, Sendable {
     case notChecked
@@ -41,7 +42,10 @@ struct Profile: Identifiable, Codable, Equatable, Sendable {
 }
 
 enum ProfileStoreError: LocalizedError, Equatable {
+    case noSelectedProfile
     case profileNotFound
+    case noValidVersion
+    case profileInUse
     case invalidName
     case unsafePath
     case invalidJSON(ConfigurationDiagnostic)
@@ -50,12 +54,30 @@ enum ProfileStoreError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
+        case .noSelectedProfile: "No Profile is selected."
         case .profileNotFound: "Profile not found."
+        case .noValidVersion: "The Profile has no valid configuration version."
+        case .profileInUse: "Stop the running engine before deleting this Profile."
         case .invalidName: "A profile name is required."
         case .unsafePath: "The requested path is outside Target-managed storage."
         case .invalidJSON, .validationFailed: "The configuration could not be validated."
         case .invalidStoredMetadata: "Profile metadata is invalid."
         }
+    }
+}
+
+/// A launch always uses an immutable version rather than the editor's working
+/// document. The bytes are intentionally opaque so unknown sing-box fields are
+/// retained exactly in the user-managed source file.
+struct ProfileConfigurationVersion: Sendable {
+    let profile: Profile
+    let revision: Int
+    let data: Data
+}
+
+enum TargetConfigurationFingerprint {
+    static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 

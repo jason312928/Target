@@ -1,6 +1,11 @@
 import Darwin
 import Foundation
 import Network
+import CryptoKit
+
+protocol ProfileRuntimeUsageChecking: Sendable {
+    func isProfileInUse(_ id: UUID) -> Bool
+}
 
 struct LocalEngineEndpoint: Codable, Equatable, Sendable {
     static let host = "127.0.0.1"
@@ -14,9 +19,20 @@ struct LocalEngineEndpoint: Codable, Equatable, Sendable {
 struct EngineRuntimeRecord: Codable, Equatable, Sendable {
     let pid: Int32
     let executablePath: String
+    let executableFingerprint: String
     let endpoint: LocalEngineEndpoint
+    let profileID: UUID
+    let profileRevision: Int
+    let sourceConfigurationFingerprint: String
+    let configurationFingerprint: String
+    let startedAt: Date
+    let runtimeConfigurationID: UUID
 
-    var isValid: Bool { pid > 0 && endpoint.isDynamicHighPort && !executablePath.isEmpty }
+    var isValid: Bool {
+        pid > 0 && endpoint.isDynamicHighPort && !executablePath.isEmpty
+            && !executableFingerprint.isEmpty && profileRevision > 0
+            && !sourceConfigurationFingerprint.isEmpty && !configurationFingerprint.isEmpty
+    }
 }
 
 protocol EngineRuntimeStoring: Sendable {
@@ -160,24 +176,45 @@ final class EngineRuntimeOwnership: @unchecked Sendable {
         self.portProbe = portProbe
     }
 
-    func ownedEndpoint() async -> LocalEngineEndpoint? {
+    func ownedRecord() async -> EngineRuntimeRecord? {
         guard let record = try? store.load(), record.isValid,
               processInspector.matches(pid: record.pid, executablePath: record.executablePath),
+              executableFingerprintMatches(record),
               await portProbe.isListening(on: record.endpoint.port) else {
             return nil
         }
-        return record.endpoint
+        return record
     }
+
+    func ownedEndpoint() async -> LocalEngineEndpoint? { await ownedRecord()?.endpoint }
 
     func ownsProcess(_ record: EngineRuntimeRecord) -> Bool {
         record.isValid && processInspector.matches(pid: record.pid, executablePath: record.executablePath)
+            && executableFingerprintMatches(record)
     }
 
-    func recordLaunchedProcess(pid: Int32, executableURL: URL, port: UInt16) throws {
+    func recordLaunchedProcess(
+        pid: Int32,
+        executableURL: URL,
+        port: UInt16,
+        profileID: UUID,
+        profileRevision: Int,
+        sourceConfigurationFingerprint: String,
+        configurationFingerprint: String,
+        runtimeConfigurationID: UUID
+    ) throws {
+        let resolvedExecutable = executableURL.resolvingSymlinksInPath()
         let record = EngineRuntimeRecord(
             pid: pid,
-            executablePath: executableURL.resolvingSymlinksInPath().path,
-            endpoint: LocalEngineEndpoint(port: port)
+            executablePath: resolvedExecutable.path,
+            executableFingerprint: try EngineExecutableFingerprint.sha256(of: resolvedExecutable),
+            endpoint: LocalEngineEndpoint(port: port),
+            profileID: profileID,
+            profileRevision: profileRevision,
+            sourceConfigurationFingerprint: sourceConfigurationFingerprint,
+            configurationFingerprint: configurationFingerprint,
+            startedAt: Date(),
+            runtimeConfigurationID: runtimeConfigurationID
         )
         guard record.isValid else { throw BackendError.engineLaunchFailed }
         try store.save(record)
@@ -185,6 +222,25 @@ final class EngineRuntimeOwnership: @unchecked Sendable {
 
     func currentRecord() -> EngineRuntimeRecord? { try? store.load() }
     func clearRecord() { try? store.clear() }
+
+    private func executableFingerprintMatches(_ record: EngineRuntimeRecord) -> Bool {
+        guard let fingerprint = try? EngineExecutableFingerprint.sha256(of: URL(fileURLWithPath: record.executablePath)) else { return false }
+        return fingerprint == record.executableFingerprint
+    }
+}
+
+extension EngineRuntimeOwnership: ProfileRuntimeUsageChecking {
+    func isProfileInUse(_ id: UUID) -> Bool {
+        guard let record = currentRecord(), record.profileID == id else { return false }
+        return ownsProcess(record)
+    }
+}
+
+enum EngineExecutableFingerprint {
+    static func sha256(of url: URL) throws -> String {
+        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 struct TargetOwnedPortProbe: LocalProxyProbing {

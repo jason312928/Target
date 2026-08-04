@@ -82,5 +82,9 @@ private func errorCode(for error: BackendError) -> Int {
     case .configurationCheckFailed: 10
     case .engineLaunchFailed: 11
     case .enginePortUnavailable: 12
+    case .profileNotSelected: 13
+    case .profileNoValidVersion: 14
+    case .profileConfigurationUnsafe: 15
+    case .profileConfigurationInvalid: 16
     }
 }
