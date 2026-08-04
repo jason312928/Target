@@ -6,11 +6,20 @@ actor SingBoxBackend: EngineInstalling {
 
     private var process: Process?
     private var logHandle: FileHandle?
-    private let portProbe: any LocalProxyProbing
+    private let portProbe: any LocalEnginePortProbing
+    private let portSelector: any LocalEnginePortSelecting
+    private let runtimeOwnership: EngineRuntimeOwnership
     private let readinessTimeout: Duration
 
-    init(portProbe: any LocalProxyProbing = TCPPort2080Probe(), readinessTimeout: Duration = .seconds(3)) {
+    init(
+        portProbe: any LocalEnginePortProbing = LocalTCPPortProbe(),
+        portSelector: any LocalEnginePortSelecting = DynamicHighLocalPortSelector(),
+        runtimeOwnership: EngineRuntimeOwnership = EngineRuntimeOwnership(),
+        readinessTimeout: Duration = .seconds(3)
+    ) {
         self.portProbe = portProbe
+        self.portSelector = portSelector
+        self.runtimeOwnership = runtimeOwnership
         self.readinessTimeout = readinessTimeout
     }
 
@@ -27,14 +36,14 @@ actor SingBoxBackend: EngineInstalling {
     func queryStatus() async throws -> BackendStatus {
         let installation = installationStatus()
         let version = installation == .installed ? try? versionString() : nil
-        let processIsRunning = process?.isRunning == true
-        let portIsReady = await portProbe.isAvailable()
-        let state = EngineRuntimeReadiness.visibleState(processIsRunning: processIsRunning, portIsListening: portIsReady)
+        let endpoint = await runtimeOwnership.ownedEndpoint()
+        let state = EngineRuntimeReadiness.visibleState(processIsOwned: endpoint != nil, portIsListening: endpoint != nil)
         return BackendStatus(
             serviceInstallation: .notRegistered,
             engineState: state,
             engineInstallation: installation,
-            engineVersion: version
+            engineVersion: version,
+            enginePort: endpoint.map { Int($0.port) }
         )
     }
 
@@ -51,9 +60,21 @@ actor SingBoxBackend: EngineInstalling {
     }
 
     func validateConfiguration(_ request: XPCConfigurationRequest) async throws {
+        try await validateConfiguration(request, port: nil)
+    }
+
+    private func validateConfiguration(_ request: XPCConfigurationRequest, port: UInt16?) async throws {
         _ = try request.validated()
         guard installationStatus() == .installed else { throw BackendError.engineNotInstalled }
-        try createManagedConfiguration()
+        let configuredPort: UInt16
+        if let port {
+            configuredPort = port
+        } else if let existingEndpoint = await runtimeOwnership.ownedEndpoint() {
+            configuredPort = existingEndpoint.port
+        } else {
+            configuredPort = try portSelector.selectAvailablePort()
+        }
+        try createManagedConfiguration(port: configuredPort)
         let checker = Process()
         checker.executableURL = executableURL
         checker.arguments = ["check", "-c", configurationURL.path]
@@ -62,8 +83,14 @@ actor SingBoxBackend: EngineInstalling {
     }
 
     func startEngine() async throws -> BackendStatus {
-        guard process?.isRunning != true else { throw BackendError.invalidLifecycleTransition }
-        try await validateConfiguration(XPCConfigurationRequest(profileName: "Local Direct"))
+        guard await runtimeOwnership.ownedEndpoint() == nil else { throw BackendError.invalidLifecycleTransition }
+        let port: UInt16
+        do {
+            port = try portSelector.selectAvailablePort()
+        } catch {
+            throw BackendError.engineLaunchFailed
+        }
+        try await validateConfiguration(XPCConfigurationRequest(profileName: "Local Direct"), port: port)
 
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -88,6 +115,7 @@ actor SingBoxBackend: EngineInstalling {
         }
         do {
             try launched.run()
+            try runtimeOwnership.recordLaunchedProcess(pid: launched.processIdentifier, executableURL: executableURL, port: port)
         } catch {
             pipe.fileHandleForReading.readabilityHandler = nil
             try? logHandle.close()
@@ -97,6 +125,7 @@ actor SingBoxBackend: EngineInstalling {
         self.logHandle = logHandle
         guard await waitForPortReadiness(for: launched) else {
             stopOwnedProcess(launched)
+            runtimeOwnership.clearRecord()
             try? logHandle.close()
             self.logHandle = nil
             process = nil
@@ -106,10 +135,20 @@ actor SingBoxBackend: EngineInstalling {
     }
 
     func stopEngine() async throws -> BackendStatus {
-        guard let process, process.isRunning else { throw BackendError.invalidLifecycleTransition }
-        process.terminate()
-        process.waitUntilExit()
+        guard let record = runtimeOwnership.currentRecord(), runtimeOwnership.ownsProcess(record) else {
+            runtimeOwnership.clearRecord()
+            throw BackendError.invalidLifecycleTransition
+        }
+        if let process, process.processIdentifier == record.pid, process.isRunning {
+            process.terminate()
+            process.waitUntilExit()
+        } else {
+            // The record's PID and executable identity were validated above, so this
+            // can never target an unrelated listener.
+            kill(pid_t(record.pid), SIGTERM)
+        }
         self.process = nil
+        runtimeOwnership.clearRecord()
         try? logHandle?.close()
         logHandle = nil
         return try await queryStatus()
@@ -134,11 +173,11 @@ actor SingBoxBackend: EngineInstalling {
         return String(firstLine).replacingOccurrences(of: "sing-box version ", with: "")
     }
 
-    private func createManagedConfiguration() throws {
+    private func createManagedConfiguration(port: UInt16) throws {
         try FileManager.default.createDirectory(at: engineDirectory, withIntermediateDirectories: true)
         let configuration: [String: Any] = [
             "log": ["level": "error", "timestamp": true],
-            "inbounds": [["type": "mixed", "tag": "local-mixed", "listen": "127.0.0.1", "listen_port": 2080]],
+            "inbounds": [["type": "mixed", "tag": "local-mixed", "listen": LocalEngineEndpoint.host, "listen_port": Int(port)]],
             "outbounds": [["type": "direct", "tag": "direct"]],
             "route": ["final": "direct"]
         ]
@@ -160,10 +199,12 @@ actor SingBoxBackend: EngineInstalling {
         let clock = ContinuousClock()
         let deadline = clock.now + readinessTimeout
         while process.isRunning && clock.now < deadline {
-            if await portProbe.isAvailable() { return true }
+            guard let record = runtimeOwnership.currentRecord(), runtimeOwnership.ownsProcess(record) else { return false }
+            if await portProbe.isListening(on: record.endpoint.port) { return true }
             try? await Task.sleep(for: .milliseconds(50))
         }
-        return process.isRunning ? await portProbe.isAvailable() : false
+        guard let record = runtimeOwnership.currentRecord(), runtimeOwnership.ownsProcess(record) else { return false }
+        return process.isRunning ? await portProbe.isListening(on: record.endpoint.port) : false
     }
 
     private func stopOwnedProcess(_ process: Process) {
@@ -179,8 +220,8 @@ actor SingBoxBackend: EngineInstalling {
 }
 
 enum EngineRuntimeReadiness {
-    static func visibleState(processIsRunning: Bool, portIsListening: Bool) -> EngineState {
-        processIsRunning && portIsListening ? .running : .stopped
+    static func visibleState(processIsOwned: Bool, portIsListening: Bool) -> EngineState {
+        processIsOwned && portIsListening ? .running : .stopped
     }
 
     static func startupFailure(processStillRunning: Bool) -> BackendError {

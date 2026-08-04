@@ -72,6 +72,7 @@ struct BackendStatus: Codable, Equatable, Sendable {
     var engineState: EngineState
     var engineInstallation: EngineInstallationState = .notInstalled
     var engineVersion: String?
+    var enginePort: Int?
 
     static let mockDefault = BackendStatus(serviceInstallation: .notRegistered, engineState: .stopped)
 }

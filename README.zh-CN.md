@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md) | [English](README.en.md)
 
-Target 是原生 SwiftUI macOS 客户端。可选的 sing-box 引擎以当前用户身份运行，并在 `127.0.0.1:2080` 提供本地 HTTP/SOCKS mixed 监听。
+Target 是原生 SwiftUI macOS 客户端。可选的 sing-box 引擎以当前用户身份运行，并在自动选择的高位 localhost 端口提供本地 HTTP/SOCKS mixed 监听。
 
 ## 宿主安全模式
 
@@ -27,7 +27,7 @@ xcodebuild -project Target.xcodeproj -scheme Target -configuration Debug build
 Target/Resources/Scripts/install_sing_box.sh
 ```
 
-脚本仅从官方 sing-box GitHub Release 下载固定的 sing-box 1.13.16，校验 SHA-256，自动识别 Apple Silicon 或 Intel，并在无需 `sudo` 的情况下安装到 `~/Library/Application Support/Target/sing-box`。App 只会在该目录生成最小配置，并以 direct outbound 在 `127.0.0.1:2080` 提供 SOCKS/HTTP 混合监听。
+脚本仅从官方 sing-box GitHub Release 下载固定的 sing-box 1.13.16，校验 SHA-256，自动识别 Apple Silicon 或 Intel，并在无需 `sudo` 的情况下安装到 `~/Library/Application Support/Target/sing-box`。App 只会在该目录生成最小配置，并以 direct outbound 在可用的高位 localhost 端口提供 SOCKS/HTTP 混合监听。
 
 ## 许可证
 

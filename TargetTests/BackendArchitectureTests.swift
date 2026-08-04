@@ -166,9 +166,36 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertEqual(ServiceConnectionAssessment.xpcState(registration: .enabled, xpcReachable: true), .connected)
     }
 
-    func testProcessWithoutPortIsNotReportedAsRunning() {
-        XCTAssertEqual(EngineRuntimeReadiness.visibleState(processIsRunning: true, portIsListening: false), .stopped)
+    func testProcessWithoutOwnedPortIsNotReportedAsRunning() {
+        XCTAssertEqual(EngineRuntimeReadiness.visibleState(processIsOwned: true, portIsListening: false), .stopped)
         XCTAssertEqual(EngineRuntimeReadiness.startupFailure(processStillRunning: true), .enginePortUnavailable)
+    }
+
+    func testEngineRuntimeRecordRequiresHighDynamicPort() {
+        let lowPort = EngineRuntimeRecord(pid: 42, executablePath: "/tmp/sing-box", endpoint: LocalEngineEndpoint(port: 2080))
+        let highPort = EngineRuntimeRecord(pid: 42, executablePath: "/tmp/sing-box", endpoint: LocalEngineEndpoint(port: 51_234))
+        XCTAssertFalse(lowPort.isValid)
+        XCTAssertTrue(highPort.isValid)
+    }
+
+    func testOwnedRuntimeRejectsUnmatchedProcessEvenWhenPortListens() async {
+        let record = EngineRuntimeRecord(pid: 42, executablePath: "/tmp/target-sing-box", endpoint: LocalEngineEndpoint(port: 51_234))
+        let ownership = EngineRuntimeOwnership(
+            store: FixedEngineRuntimeStore(record: record),
+            processInspector: FixedEngineProcessInspector(shouldMatch: false),
+            portProbe: FixedEnginePortProbe(listening: true)
+        )
+        let endpoint = await ownership.ownedEndpoint()
+        XCTAssertNil(endpoint)
+    }
+
+    func testDynamicPortSelectorReturnsHighPort() throws {
+        XCTAssertGreaterThanOrEqual(try DynamicHighLocalPortSelector().selectAvailablePort(), LocalEngineEndpoint.minimumDynamicPort)
+    }
+
+    func testServiceRegistrationRejectsDerivedDataBundlePath() {
+        let temporaryApp = URL(fileURLWithPath: "/tmp/DerivedData/Target/Build/Products/Release/Target.app")
+        XCTAssertFalse(TargetServiceBundleLocation.isStable(temporaryApp))
     }
 
     func testMockBackendStartsAndStopsWhenServiceIsInstalled() async throws {
@@ -249,10 +276,10 @@ final class BackendArchitectureTests: XCTestCase {
         configuration.connectionProxyDictionary = [
             kCFNetworkProxiesHTTPEnable as String: 1,
             kCFNetworkProxiesHTTPProxy as String: "127.0.0.1",
-            kCFNetworkProxiesHTTPPort as String: 2080,
+            kCFNetworkProxiesHTTPPort as String: running.enginePort!,
             kCFNetworkProxiesHTTPSEnable as String: 1,
             kCFNetworkProxiesHTTPSProxy as String: "127.0.0.1",
-            kCFNetworkProxiesHTTPSPort as String: 2080
+            kCFNetworkProxiesHTTPSPort as String: running.enginePort!
         ]
         let (_, response) = try await URLSession(configuration: configuration).data(from: URL(string: "https://example.com")!)
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
@@ -300,9 +327,34 @@ final class BackendArchitectureTests: XCTestCase {
             recoveryStore: store,
             portProbe: probe,
             environment: FixedHostEnvironment(proxyConfigured: false, proxyApplicationRunning: false),
-            safetyMode: .authorizedNetworkTest
+            safetyMode: .authorizedNetworkTest,
+            endpointProvider: { LocalEngineEndpoint(port: 51_234) }
         )
     }
+}
+
+private final class FixedEngineRuntimeStore: EngineRuntimeStoring, @unchecked Sendable {
+    private let record: EngineRuntimeRecord?
+
+    init(record: EngineRuntimeRecord?) {
+        self.record = record
+    }
+
+    func load() throws -> EngineRuntimeRecord? { record }
+    func save(_ record: EngineRuntimeRecord) throws { XCTFail("Unexpected runtime record write") }
+    func clear() throws { XCTFail("Unexpected runtime record removal") }
+}
+
+private struct FixedEngineProcessInspector: EngineProcessInspecting {
+    let shouldMatch: Bool
+
+    func matches(pid: Int32, executablePath: String) -> Bool { shouldMatch }
+}
+
+private struct FixedEnginePortProbe: LocalEnginePortProbing {
+    let listening: Bool
+
+    func isListening(on port: UInt16) async -> Bool { listening }
 }
 
 private final class InMemorySystemProxySystem: SystemProxySystemManaging, @unchecked Sendable {

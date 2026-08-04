@@ -3,6 +3,10 @@ import ServiceManagement
 
 @available(macOS 13.0, *)
 enum TargetServiceRegistration {
+    static var isStableInstallation: Bool {
+        TargetServiceBundleLocation.isStable(Bundle.main.bundleURL)
+    }
+
     static var status: ServiceInstallationState {
         let service = SMAppService.daemon(plistName: TargetServiceIdentifiers.launchDaemonPlistName)
         switch service.status {
@@ -20,6 +24,7 @@ enum TargetServiceRegistration {
     }
 
     static func register() throws {
+        guard isStableInstallation else { throw BackendError.serviceRegistrationFailed }
         let service = SMAppService.daemon(plistName: TargetServiceIdentifiers.launchDaemonPlistName)
         do {
             try service.register()
@@ -38,6 +43,22 @@ enum TargetServiceRegistration {
         } catch {
             throw BackendError.serviceRegistrationFailed
         }
+    }
+}
+
+enum TargetServiceBundleLocation {
+    static func isStable(_ bundleURL: URL) -> Bool {
+        let bundlePath = bundleURL.resolvingSymlinksInPath().path
+        guard !bundlePath.contains("/DerivedData/"),
+              FileManager.default.fileExists(atPath: bundleURL.appending(path: "Contents/Library/HelperTools/TargetService").path),
+              FileManager.default.fileExists(atPath: bundleURL.appending(path: "Contents/Library/LaunchDaemons/\(TargetServiceIdentifiers.launchDaemonPlistName)").path) else {
+            return false
+        }
+
+        let systemApplications = "/Applications/"
+        let userApplications = FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: "Applications", directoryHint: .isDirectory).path + "/"
+        return bundlePath.hasPrefix(systemApplications) || bundlePath.hasPrefix(userApplications)
     }
 }
 

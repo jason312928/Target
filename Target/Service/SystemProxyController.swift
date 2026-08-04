@@ -247,53 +247,31 @@ private final class TCPPortProbeCompletion: @unchecked Sendable {
     }
 }
 
-struct TCPPort2080Probe: LocalProxyProbing {
-    func isAvailable() async -> Bool {
-        await withCheckedContinuation { continuation in
-            let connection = NWConnection(host: "127.0.0.1", port: 2080, using: .tcp)
-            let completion = TCPPortProbeCompletion(continuation)
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    completion.finish(true)
-                    connection.cancel()
-                case .failed, .cancelled:
-                    completion.finish(false)
-                default: break
-                }
-            }
-            connection.start(queue: .global(qos: .utility))
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
-                completion.finish(false)
-                connection.cancel()
-            }
-        }
-    }
-}
-
 actor SystemProxyCoordinator {
-    static let localHost = "127.0.0.1"
-    static let localPort = 2080
+    static let localHost = LocalEngineEndpoint.host
 
     private let system: any SystemProxySystemManaging
     private let recoveryStore: any SystemProxyRecoveryStoring
     private let portProbe: any LocalProxyProbing
     private let environment: any HostNetworkEnvironmentChecking
     private let safetyMode: HostNetworkSafetyMode
+    private let endpointProvider: @Sendable () async -> LocalEngineEndpoint?
     private var monitoringTask: Task<Void, Never>?
 
     init(
         system: any SystemProxySystemManaging = SystemConfigurationProxyManager(),
         recoveryStore: any SystemProxyRecoveryStoring = UserDefaultsSystemProxyRecoveryStore(),
-        portProbe: any LocalProxyProbing = TCPPort2080Probe(),
+        portProbe: any LocalProxyProbing = TargetOwnedPortProbe(),
         environment: any HostNetworkEnvironmentChecking = HostNetworkEnvironmentProbe(),
-        safetyMode: HostNetworkSafetyMode = .safe
+        safetyMode: HostNetworkSafetyMode = .safe,
+        endpointProvider: @escaping @Sendable () async -> LocalEngineEndpoint? = { await EngineRuntimeOwnership().ownedEndpoint() }
     ) {
         self.system = system
         self.recoveryStore = recoveryStore
         self.portProbe = portProbe
         self.environment = environment
         self.safetyMode = safetyMode
+        self.endpointProvider = endpointProvider
     }
 
     deinit { monitoringTask?.cancel() }
@@ -338,7 +316,9 @@ actor SystemProxyCoordinator {
 
     func enableSystemProxy() async throws -> SystemProxyStatus {
         try requireNetworkWritePermission()
-        guard await portProbe.isAvailable() else { throw SystemProxyError.localProxyUnavailable }
+        guard let endpoint = await endpointProvider(), await portProbe.isAvailable() else {
+            throw SystemProxyError.localProxyUnavailable
+        }
 
         if let existing = try recoveryStore.load() {
             guard existing.owner == TargetServiceIdentifiers.snapshotOwner else { throw SystemProxyError.invalidSnapshotOwner }
@@ -355,14 +335,14 @@ actor SystemProxyCoordinator {
         }
         guard !snapshots.isEmpty else { throw SystemProxyError.noActiveNetworkService }
         let writtenSettings = Dictionary(uniqueKeysWithValues: snapshots.map { snapshot in
-            (snapshot.serviceID, managedSettings(from: snapshot.properties))
+            (snapshot.serviceID, managedSettings(from: snapshot.properties, port: endpoint.port))
         })
         let record = SystemProxyRecoveryRecord(owner: TargetServiceIdentifiers.snapshotOwner, snapshots: snapshots, writtenSettings: writtenSettings)
         try recoveryStore.save(record)
 
         do {
             for snapshot in snapshots {
-                try system.setProxySettings(managedSettings(from: snapshot.properties), for: snapshot.serviceID)
+                try system.setProxySettings(managedSettings(from: snapshot.properties, port: endpoint.port), for: snapshot.serviceID)
             }
             guard try settingsMatchLastWrite(record) else {
                 throw SystemProxyError.verificationFailed
@@ -430,10 +410,10 @@ actor SystemProxyCoordinator {
         }
     }
 
-    private func managedSettings(from original: [String: SystemProxyValue]) -> [String: SystemProxyValue] {
+    private func managedSettings(from original: [String: SystemProxyValue], port: UInt16) -> [String: SystemProxyValue] {
         var settings = original
         let localHost = SystemProxyValue.string(Self.localHost)
-        let localPort = SystemProxyValue.integer(Self.localPort)
+        let localPort = SystemProxyValue.integer(Int(port))
         settings[kSCPropNetProxiesHTTPEnable as String] = .integer(1)
         settings[kSCPropNetProxiesHTTPProxy as String] = localHost
         settings[kSCPropNetProxiesHTTPPort as String] = localPort
@@ -448,19 +428,4 @@ actor SystemProxyCoordinator {
         return settings
     }
 
-    private func isManagedProxy(_ settings: [String: SystemProxyValue]) throws -> Bool {
-        let host = SystemProxyValue.string(Self.localHost)
-        let port = SystemProxyValue.integer(Self.localPort)
-        return settings[kSCPropNetProxiesHTTPEnable as String] == .integer(1)
-            && settings[kSCPropNetProxiesHTTPProxy as String] == host
-            && settings[kSCPropNetProxiesHTTPPort as String] == port
-            && settings[kSCPropNetProxiesHTTPSEnable as String] == .integer(1)
-            && settings[kSCPropNetProxiesHTTPSProxy as String] == host
-            && settings[kSCPropNetProxiesHTTPSPort as String] == port
-            && settings[kSCPropNetProxiesSOCKSEnable as String] == .integer(1)
-            && settings[kSCPropNetProxiesSOCKSProxy as String] == host
-            && settings[kSCPropNetProxiesSOCKSPort as String] == port
-            && settings[kSCPropNetProxiesProxyAutoConfigEnable as String] == .integer(0)
-            && settings[kSCPropNetProxiesProxyAutoDiscoveryEnable as String] == .integer(0)
-    }
 }

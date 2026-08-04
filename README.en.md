@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md) | [English](README.en.md)
 
-Target is a native SwiftUI macOS client. Its optional sing-box engine runs as the signed-in user and exposes a local mixed HTTP/SOCKS listener at `127.0.0.1:2080`.
+Target is a native SwiftUI macOS client. Its optional sing-box engine runs as the signed-in user and exposes a local mixed HTTP/SOCKS listener on an automatically selected high localhost port.
 
 ## Host Safe Mode
 
@@ -27,7 +27,7 @@ For a local engine installation, run the bundled installer from the repository r
 Target/Resources/Scripts/install_sing_box.sh
 ```
 
-It downloads the pinned sing-box 1.13.16 archive from the official sing-box GitHub release, verifies its SHA-256, selects Apple Silicon or Intel automatically, and installs it without `sudo` to `~/Library/Application Support/Target/sing-box`. The app generates its own minimal configuration there and binds its mixed SOCKS/HTTP listener to `127.0.0.1:2080` with a direct outbound.
+It downloads the pinned sing-box 1.13.16 archive from the official sing-box GitHub release, verifies its SHA-256, selects Apple Silicon or Intel automatically, and installs it without `sudo` to `~/Library/Application Support/Target/sing-box`. The app generates its own minimal configuration there and binds its mixed SOCKS/HTTP listener to an available high localhost port with a direct outbound.
 
 ## License
 
