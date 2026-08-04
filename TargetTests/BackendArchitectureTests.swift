@@ -12,7 +12,7 @@ final class BackendArchitectureTests: XCTestCase {
     }
 
     func testMockBackendStartsAndStopsWhenServiceIsInstalled() async throws {
-        let backend = MockBackend(initialStatus: BackendStatus(serviceInstallation: .installed, engineState: .stopped))
+        let backend = MockBackend(initialStatus: BackendStatus(serviceInstallation: .enabled, engineState: .stopped))
 
         let runningStatus = try await backend.startEngine()
         XCTAssertEqual(runningStatus.engineState, .running)
@@ -33,11 +33,11 @@ final class BackendArchitectureTests: XCTestCase {
     }
 
     func testModelPresentsStartErrorWhenDefaultServiceIsMissing() async throws {
-        let model = BackendLifecycleModel()
+        let model = BackendLifecycleModel(backend: MockBackend())
         model.start()
 
         try await waitUntil { model.error == .serviceNotInstalled }
-        XCTAssertEqual(model.status.serviceInstallation, .notInstalled)
+        XCTAssertEqual(model.status.serviceInstallation, .notRegistered)
         XCTAssertEqual(model.status.engineState, .stopped)
         XCTAssertEqual(model.lifecycleState, .failed(.serviceNotInstalled))
     }
@@ -55,6 +55,20 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertThrowsError(try XPCConfigurationRequest.decodeAndValidate(unexpectedField)) { error in
             XCTAssertEqual(error as? BackendError, .invalidConfiguration(.malformedRequest))
         }
+    }
+
+    func testPrivilegedServicePingAndStatusWhenRequested() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_PRIVILEGED_SERVICE_INTEGRATION_TESTS"] == "1" else {
+            throw XCTSkip("Set RUN_PRIVILEGED_SERVICE_INTEGRATION_TESTS=1 after approving the service.")
+        }
+
+        let client = TargetServiceXPCClient()
+        let ping = try await client.ping()
+        XCTAssertEqual(ping, "target-service")
+
+        let status = try await client.queryStatus()
+        XCTAssertEqual(status.serviceInstallation, .enabled)
+        XCTAssertEqual(status.engineState, .stopped)
     }
 
     private func waitUntil(

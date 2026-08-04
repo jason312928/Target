@@ -1,13 +1,19 @@
 import Foundation
 
 enum ServiceInstallationState: String, Codable, Equatable, Sendable {
-    case notInstalled
-    case installed
+    case notRegistered
+    case requiresApproval
+    case enabled
+    case unavailable
+    case error
 
     var localizedKey: String {
         switch self {
-        case .notInstalled: "service.status.not-installed"
-        case .installed: "service.status.installed"
+        case .notRegistered: "service.status.not-registered"
+        case .requiresApproval: "service.status.requires-approval"
+        case .enabled: "service.status.enabled"
+        case .unavailable: "service.status.unavailable"
+        case .error: "service.status.error"
         }
     }
 }
@@ -32,7 +38,7 @@ struct BackendStatus: Codable, Equatable, Sendable {
     var serviceInstallation: ServiceInstallationState
     var engineState: EngineState
 
-    static let mockDefault = BackendStatus(serviceInstallation: .notInstalled, engineState: .stopped)
+    static let mockDefault = BackendStatus(serviceInstallation: .notRegistered, engineState: .stopped)
 }
 
 enum BackendOperation: Sendable {
@@ -76,18 +82,22 @@ enum ConfigurationValidationError: Error, Equatable, Sendable {
 
 enum BackendError: Error, Equatable, Sendable {
     case serviceNotInstalled
+    case serviceRegistrationFailed
     case invalidConfiguration(ConfigurationValidationError)
     case invalidLifecycleTransition
     case operationCancelled
     case serviceUnavailable
+    case notImplemented
 
     var localizedKey: String {
         switch self {
         case .serviceNotInstalled: "backend.error.service-not-installed"
+        case .serviceRegistrationFailed: "backend.error.service-registration-failed"
         case .invalidConfiguration: "backend.error.invalid-configuration"
         case .invalidLifecycleTransition: "backend.error.invalid-lifecycle"
         case .operationCancelled: "backend.error.cancelled"
         case .serviceUnavailable: "backend.error.service-unavailable"
+        case .notImplemented: "backend.error.not-implemented"
         }
     }
 }
@@ -149,4 +159,13 @@ protocol EngineBackend: TunnelBackend {
     func validateConfiguration(_ request: XPCConfigurationRequest) async throws
     func startEngine() async throws -> BackendStatus
     func stopEngine() async throws -> BackendStatus
+}
+
+protocol ServiceLifecycleManaging: EngineBackend {
+    func installService() async throws -> BackendStatus
+    func removeService() async throws -> BackendStatus
+}
+
+protocol ServiceConnectionTesting: EngineBackend {
+    func pingService() async throws -> String
 }

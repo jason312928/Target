@@ -23,7 +23,7 @@ actor MockBackend: EngineBackend {
     }
 
     func startEngine() async throws -> BackendStatus {
-        guard status.serviceInstallation == .installed else {
+        guard status.serviceInstallation == .enabled else {
             throw BackendError.serviceNotInstalled
         }
         guard status.engineState == .stopped else {

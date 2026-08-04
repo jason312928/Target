@@ -19,6 +19,8 @@
 		A1000000000000000000000B /* MockBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* MockBackend.swift */; };
 		A1000000000000000000000C /* TargetServiceXPCProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* TargetServiceXPCProtocol.swift */; };
 		A1000000000000000000000D /* BackendArchitectureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000031 /* BackendArchitectureTests.swift */; };
+		A1000000000000000000000E /* TargetService in Embed Privileged Service */ = {isa = PBXBuildFile; fileRef = A10000000000000000000042 /* TargetService */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		A1000000000000000000000F /* com.jason312928.Target.TargetService.plist in Embed LaunchDaemon Definition */ = {isa = PBXBuildFile; fileRef = A10000000000000000000022 /* com.jason312928.Target.TargetService.plist */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -28,6 +30,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = A10000000000000000000070;
 			remoteInfo = Target;
+		};
+		A10000000000000000000053 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000060 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000000071;
+			remoteInfo = TargetService;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -41,6 +50,7 @@
 		A10000000000000000000017 /* TargetServiceXPCProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetServiceXPCProtocol.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* TargetServiceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TargetServiceClient.swift; sourceTree = "<group>"; };
 		A10000000000000000000021 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		A10000000000000000000022 /* com.jason312928.Target.TargetService.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = com.jason312928.Target.TargetService.plist; sourceTree = "<group>"; };
 		A10000000000000000000031 /* BackendArchitectureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendArchitectureTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000041 /* Target.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Target.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000042 /* TargetService */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = TargetService; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -53,10 +63,15 @@
 		A10000000000000000000093 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		A10000000000000000000098 /* Embed Privileged Service */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = "Contents/Library/HelperTools"; dstSubfolderSpec = 1; files = (A1000000000000000000000E /* TargetService in Embed Privileged Service */, ); name = "Embed Privileged Service"; runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000099 /* Embed LaunchDaemon Definition */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = "Contents/Library/LaunchDaemons"; dstSubfolderSpec = 1; files = (A1000000000000000000000F /* com.jason312928.Target.TargetService.plist in Embed LaunchDaemon Definition */, ); name = "Embed LaunchDaemon Definition"; runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXGroup section */
 		A100000000000000000000A1 = {isa = PBXGroup; children = (A100000000000000000000A2 /* Target */, A100000000000000000000A3 /* TargetService */, A100000000000000000000A4 /* TargetTests */, A100000000000000000000A5 /* Products */); sourceTree = "<group>"; };
 		A100000000000000000000A2 /* Target */ = {isa = PBXGroup; children = (A10000000000000000000011 /* TargetApp.swift */, A10000000000000000000012 /* ContentView.swift */, A100000000000000000000A6 /* Backend */, A100000000000000000000A7 /* Service */, A100000000000000000000A8 /* Resources */); path = Target; sourceTree = "<group>"; };
-		A100000000000000000000A3 /* TargetService */ = {isa = PBXGroup; children = (A10000000000000000000021 /* main.swift */); path = TargetService; sourceTree = "<group>"; };
+		A100000000000000000000A3 /* TargetService */ = {isa = PBXGroup; children = (A10000000000000000000021 /* main.swift */, A10000000000000000000022 /* com.jason312928.Target.TargetService.plist */); path = TargetService; sourceTree = "<group>"; };
 		A100000000000000000000A4 /* TargetTests */ = {isa = PBXGroup; children = (A10000000000000000000031 /* BackendArchitectureTests.swift */); path = TargetTests; sourceTree = "<group>"; };
 		A100000000000000000000A5 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000041 /* Target.app */, A10000000000000000000042 /* TargetService */, A10000000000000000000043 /* TargetTests.xctest */); name = Products; sourceTree = "<group>"; };
 		A100000000000000000000A6 /* Backend */ = {isa = PBXGroup; children = (A10000000000000000000013 /* BackendLifecycleModel.swift */, A10000000000000000000015 /* BackendTypes.swift */, A10000000000000000000016 /* MockBackend.swift */); path = Backend; sourceTree = "<group>"; };
@@ -65,7 +80,7 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A10000000000000000000070 /* Target */ = {isa = PBXNativeTarget; buildConfigurationList = A100000000000000000000B1 /* Build configuration list for PBXNativeTarget "Target" */; buildPhases = (A10000000000000000000094 /* Sources */, A10000000000000000000091 /* Frameworks */, A10000000000000000000095 /* Resources */); buildRules = (); dependencies = (); name = Target; productName = Target; productReference = A10000000000000000000041 /* Target.app */; productType = "com.apple.product-type.application"; };
+		A10000000000000000000070 /* Target */ = {isa = PBXNativeTarget; buildConfigurationList = A100000000000000000000B1 /* Build configuration list for PBXNativeTarget "Target" */; buildPhases = (A10000000000000000000094 /* Sources */, A10000000000000000000091 /* Frameworks */, A10000000000000000000095 /* Resources */, A10000000000000000000098 /* Embed Privileged Service */, A10000000000000000000099 /* Embed LaunchDaemon Definition */); buildRules = (); dependencies = (A10000000000000000000054 /* PBXTargetDependency */, ); name = Target; productName = Target; productReference = A10000000000000000000041 /* Target.app */; productType = "com.apple.product-type.application"; };
 		A10000000000000000000071 /* TargetService */ = {isa = PBXNativeTarget; buildConfigurationList = A100000000000000000000B2 /* Build configuration list for PBXNativeTarget "TargetService" */; buildPhases = (A10000000000000000000096 /* Sources */, A10000000000000000000092 /* Frameworks */); buildRules = (); dependencies = (); name = TargetService; productName = TargetService; productReference = A10000000000000000000042 /* TargetService */; productType = "com.apple.product-type.tool"; };
 		A10000000000000000000072 /* TargetTests */ = {isa = PBXNativeTarget; buildConfigurationList = A100000000000000000000B3 /* Build configuration list for PBXNativeTarget "TargetTests" */; buildPhases = (A10000000000000000000097 /* Sources */, A10000000000000000000093 /* Frameworks */); buildRules = (); dependencies = (A10000000000000000000052 /* PBXTargetDependency */); name = TargetTests; productName = TargetTests; productReference = A10000000000000000000043 /* TargetTests.xctest */; productType = "com.apple.product-type.bundle.unit-test"; };
 /* End PBXNativeTarget section */
@@ -80,21 +95,22 @@
 
 /* Begin PBXSourcesBuildPhase section */
 		A10000000000000000000094 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* TargetApp.swift in Sources */, A10000000000000000000002 /* ContentView.swift in Sources */, A10000000000000000000003 /* BackendLifecycleModel.swift in Sources */, A10000000000000000000005 /* BackendTypes.swift in Sources */, A10000000000000000000006 /* MockBackend.swift in Sources */, A10000000000000000000007 /* TargetServiceXPCProtocol.swift in Sources */, A10000000000000000000008 /* TargetServiceClient.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
-		A10000000000000000000096 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000009 /* main.swift in Sources */, A1000000000000000000000A /* BackendTypes.swift in Sources */, A1000000000000000000000B /* MockBackend.swift in Sources */, A1000000000000000000000C /* TargetServiceXPCProtocol.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000096 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000009 /* main.swift in Sources */, A1000000000000000000000A /* BackendTypes.swift in Sources */, A1000000000000000000000C /* TargetServiceXPCProtocol.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000097 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000D /* BackendArchitectureTests.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
 		A10000000000000000000052 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A10000000000000000000070 /* Target */; targetProxy = A10000000000000000000051 /* PBXContainerItemProxy */; };
+		A10000000000000000000054 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A10000000000000000000071 /* TargetService */; targetProxy = A10000000000000000000053 /* PBXContainerItemProxy */; };
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A100000000000000000000C0 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SWIFT_VERSION = 5.0;}; name = Debug;};
 		A100000000000000000000C1 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0;}; name = Release;};
-		A100000000000000000000D0 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CURRENT_PROJECT_VERSION = 1; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities"; MACOSX_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 1.0.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target; PRODUCT_NAME = Target; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_VERSION = 5.0;}; name = Debug;};
-		A100000000000000000000D1 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities"; MACOSX_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 1.0.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target; PRODUCT_NAME = Target; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0;}; name = Release;};
-		A100000000000000000000E0 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CURRENT_PROJECT_VERSION = 1; MACOSX_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target.TargetService; PRODUCT_NAME = TargetService; SWIFT_VERSION = 5.0;}; name = Debug;};
-		A100000000000000000000E1 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CURRENT_PROJECT_VERSION = 1; MACOSX_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target.TargetService; PRODUCT_NAME = TargetService; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0;}; name = Release;};
+		A100000000000000000000D0 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_IDENTITY = "Apple Development"; CODE_SIGN_STYLE = Manual; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = S36LPLF94S; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities"; MACOSX_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 1.0.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target; PRODUCT_NAME = Target; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_VERSION = 5.0;}; name = Debug;};
+		A100000000000000000000D1 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_IDENTITY = "Apple Development"; CODE_SIGN_STYLE = Manual; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = S36LPLF94S; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities"; MACOSX_DEPLOYMENT_TARGET = 15.0; MARKETING_VERSION = 1.0.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target; PRODUCT_NAME = Target; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0;}; name = Release;};
+		A100000000000000000000E0 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_IDENTITY = "Apple Development"; CODE_SIGN_STYLE = Manual; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = S36LPLF94S; MACOSX_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target.TargetService; PRODUCT_NAME = TargetService; SWIFT_VERSION = 5.0;}; name = Debug;};
+		A100000000000000000000E1 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_IDENTITY = "Apple Development"; CODE_SIGN_STYLE = Manual; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = S36LPLF94S; MACOSX_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.Target.TargetService; PRODUCT_NAME = TargetService; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0;}; name = Release;};
 		A100000000000000000000F0 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.TargetTests; PRODUCT_MODULE_NAME = TargetTests; PRODUCT_NAME = TargetTests; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Target.app/Contents/MacOS/Target"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_VERSION = 5.0;}; name = Debug;};
 		A100000000000000000000F1 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {BUNDLE_LOADER = "$(TEST_HOST)"; GENERATE_INFOPLIST_FILE = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = com.jason312928.TargetTests; PRODUCT_MODULE_NAME = TargetTests; PRODUCT_NAME = TargetTests; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Target.app/Contents/MacOS/Target"; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_OPTIMIZATION_LEVEL = "-O"; SWIFT_VERSION = 5.0;}; name = Release;};
 /* End XCBuildConfiguration section */

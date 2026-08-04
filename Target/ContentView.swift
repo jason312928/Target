@@ -13,7 +13,7 @@ struct ContentView: View {
                 VStack(alignment: .leading) {
                     Text("app.title")
                         .font(.largeTitle)
-                    Text("backend.status.mock")
+                    Text(LocalizedStringKey(lifecycle.backendStateKey))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -27,6 +27,10 @@ struct ContentView: View {
                     Text("backend.label.engine")
                     Text(LocalizedStringKey(lifecycle.engineStateKey))
                 }
+                GridRow {
+                    Text("service.label.ping")
+                    Text(lifecycle.pingResult ?? "—")
+                }
                 if let errorKey = lifecycle.errorKey {
                     GridRow {
                         Text("backend.label.error")
@@ -34,6 +38,28 @@ struct ContentView: View {
                             .foregroundStyle(.red)
                     }
                 }
+            }
+
+            HStack {
+                Button("service.action.install") {
+                    lifecycle.installService()
+                }
+                .disabled(!lifecycle.canInstall)
+
+                Button("service.action.remove") {
+                    lifecycle.removeService()
+                }
+                .disabled(!lifecycle.canRemove)
+
+                Button("service.action.refresh") {
+                    lifecycle.refresh()
+                }
+                .disabled(lifecycle.isBusy)
+
+                Button("service.action.ping") {
+                    lifecycle.pingService()
+                }
+                .disabled(!lifecycle.canPing)
             }
 
             HStack {

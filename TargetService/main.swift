@@ -22,53 +22,28 @@ private let server = TargetServiceServer()
 server.run()
 
 private final class TargetServiceEndpoint: NSObject, TargetServiceXPCProtocol {
-    private let backend = MockBackend(initialStatus: BackendStatus(serviceInstallation: .installed, engineState: .stopped))
-
     func ping(withReply reply: @escaping (String) -> Void) {
         reply("target-service")
     }
 
     func queryStatus(withReply reply: @escaping (Data?, NSError?) -> Void) {
-        Task {
-            do {
-                let status = try await backend.queryStatus()
-                reply(try XPCPayloadCodec.encodeStatus(status), nil)
-            } catch {
-                reply(nil, xpcError(error))
-            }
+        do {
+            let status = BackendStatus(serviceInstallation: .enabled, engineState: .stopped)
+            reply(try XPCPayloadCodec.encodeStatus(status), nil)
+        } catch {
+            reply(nil, xpcError(error))
         }
     }
 
     func validateConfiguration(_ request: Data, withReply reply: @escaping (NSError?) -> Void) {
-        Task {
-            do {
-                try await backend.validateConfiguration(XPCConfigurationRequest.decodeAndValidate(request))
-                reply(nil)
-            } catch {
-                reply(xpcError(error))
-            }
-        }
+        reply(xpcError(BackendError.notImplemented))
     }
 
     func startEngine(withReply reply: @escaping (Data?, NSError?) -> Void) {
-        Task {
-            do {
-                let status = try await backend.startEngine()
-                reply(try XPCPayloadCodec.encodeStatus(status), nil)
-            } catch {
-                reply(nil, xpcError(error))
-            }
-        }
+        reply(nil, xpcError(BackendError.notImplemented))
     }
 
     func stopEngine(withReply reply: @escaping (Data?, NSError?) -> Void) {
-        Task {
-            do {
-                let status = try await backend.stopEngine()
-                reply(try XPCPayloadCodec.encodeStatus(status), nil)
-            } catch {
-                reply(nil, xpcError(error))
-            }
-        }
+        reply(nil, xpcError(BackendError.notImplemented))
     }
 }

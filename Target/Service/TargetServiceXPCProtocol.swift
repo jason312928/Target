@@ -37,9 +37,11 @@ func xpcError(_ error: Error) -> NSError {
 private func errorCode(for error: BackendError) -> Int {
     switch error {
     case .serviceNotInstalled: 1
-    case .invalidConfiguration: 2
-    case .invalidLifecycleTransition: 3
-    case .operationCancelled: 4
-    case .serviceUnavailable: 5
+    case .serviceRegistrationFailed: 2
+    case .invalidConfiguration: 3
+    case .invalidLifecycleTransition: 4
+    case .operationCancelled: 5
+    case .serviceUnavailable: 6
+    case .notImplemented: 7
     }
 }

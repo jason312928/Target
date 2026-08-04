@@ -13,12 +13,23 @@
     "backend.label.error" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Error" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "错误" } } } },
     "backend.label.service" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Service" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "服务" } } } },
     "backend.status.mock" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Mock backend" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟后端" } } } },
+    "backend.status.service" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Privileged service" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "特权服务" } } } },
     "engine.status.running" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Running" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "运行中" } } } },
     "engine.status.starting" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Starting" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "启动中" } } } },
     "engine.status.stopped" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stopped" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已停止" } } } },
     "engine.status.stopping" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stopping" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "停止中" } } } },
-    "service.status.installed" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Installed" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已安装" } } } },
-    "service.status.not-installed" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Not installed" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未安装" } } } }
+    "backend.error.not-implemented" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "This engine operation is not implemented yet." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此内核操作尚未实现。" } } } },
+    "backend.error.service-registration-failed" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "The service registration operation failed." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "服务注册操作失败。" } } } },
+    "service.action.install" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Install Service" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "安装服务" } } } },
+    "service.action.ping" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Ping Service" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ping 服务" } } } },
+    "service.action.refresh" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Refresh Status" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "刷新状态" } } } },
+    "service.action.remove" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Remove Service" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "移除服务" } } } },
+    "service.status.enabled" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Enabled" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已启用" } } } },
+    "service.status.error" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Error" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "错误" } } } },
+    "service.status.not-registered" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Not registered" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未注册" } } } },
+    "service.status.requires-approval" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Awaiting approval" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待用户批准" } } } },
+    "service.status.unavailable" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Unavailable" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不可用" } } } },
+    "service.label.ping" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Ping" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ping" } } } }
   },
   "version" : "1.0"
 }
