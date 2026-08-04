@@ -255,10 +255,13 @@ final class ProfileEncryptedStorage {
                   UUID(uuidString: child.lastPathComponent) != nil else { throw ProfileStoreError.mixedOrDowngradedStorage }
             let config = child.appending(path: "config.json")
             let versions = child.appending(path: "versions", directoryHint: .isDirectory)
+            let profileEntries = try fileManager.contentsOfDirectory(atPath: child.path)
+            guard Set(profileEntries) == ["config.json", "versions"] else { throw ProfileStoreError.mixedOrDowngradedStorage }
             guard fileManager.fileExists(atPath: config.path), try encryptedURLIsValid(config), fileManager.fileExists(atPath: versions.path) else { throw ProfileStoreError.mixedOrDowngradedStorage }
             let versionFiles = try fileManager.contentsOfDirectory(at: versions, includingPropertiesForKeys: nil)
             for version in versionFiles {
-                guard version.pathExtension == "json", try encryptedURLIsValid(version) else { throw ProfileStoreError.mixedOrDowngradedStorage }
+                let revision = Int(version.deletingPathExtension().lastPathComponent) ?? 0
+                guard revision > 0, version.pathExtension == "json", try encryptedURLIsValid(version) else { throw ProfileStoreError.mixedOrDowngradedStorage }
             }
         }
     }

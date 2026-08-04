@@ -92,6 +92,12 @@ final class ProfileStoreTests: XCTestCase {
         let downgradeManifest = try downgrade.safeManagedURL("profiles.json")
         try Data("[]".utf8).write(to: downgradeManifest, options: .atomic)
         XCTAssertThrowsError(try downgrade.listProfiles()) { XCTAssertEqual($0 as? ProfileStoreError, .mixedOrDowngradedStorage) }
+
+        let pendingRoot = try temporaryDirectory()
+        let pending = ProfileStore(rootDirectory: pendingRoot, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
+        let pendingProfile = try pending.create(name: "No Pending")
+        try Data("{}".utf8).write(to: pendingRoot.appending(path: "\(pendingProfile.id.uuidString)/.pending-check.json"))
+        XCTAssertThrowsError(try pending.listProfiles()) { XCTAssertEqual($0 as? ProfileStoreError, .mixedOrDowngradedStorage) }
     }
 
     func testPlaintextLayoutMigratesAtomicallyAndRetainsRawBytes() throws {
