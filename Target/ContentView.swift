@@ -134,5 +134,8 @@ struct ContentView: View {
         }
         .frame(minWidth: 420, minHeight: 260)
         .padding(32)
+        .onAppear {
+            lifecycle.refresh()
+        }
     }
 }

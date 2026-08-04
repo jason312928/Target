@@ -111,6 +111,29 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertEqual(system.writeCount, 0)
     }
 
+    func testUnreadableRecoverySnapshotRequiresManualReview() async {
+        let coordinator = SystemProxyCoordinator(
+            system: InMemorySystemProxySystem(serviceIDs: ["service-a"], settings: ["service-a": [:]]),
+            recoveryStore: ThrowingRecoveryStore(),
+            portProbe: TogglePortProbe(available: false)
+        )
+
+        let status = await coordinator.querySystemProxyStatus()
+        XCTAssertEqual(status.state, .recoveryRequired)
+        XCTAssertEqual(status.error, .snapshotFailed)
+        XCTAssertFalse(status.hasRecoverySnapshot)
+    }
+
+    func testHostNetworkProbeTreatsSurgeAsAnExistingNetworkController() {
+        let probe = HostNetworkEnvironmentProbe(
+            system: InMemorySystemProxySystem(serviceIDs: ["service-a"], settings: ["service-a": [:]]),
+            runningBundleIdentifiers: { ["com.nssurge.surge-mac"] }
+        )
+
+        XCTAssertTrue(probe.inspect().hasRunningProxyApplication)
+        XCTAssertFalse(probe.inspect().mayTakeOverNetwork)
+    }
+
     func testExistingProxyApplicationRefusesTakeover() async throws {
         let system = InMemorySystemProxySystem(serviceIDs: ["service-a"], settings: ["service-a": [:]])
         let coordinator = SystemProxyCoordinator(
@@ -396,6 +419,12 @@ private final class InMemoryRecoveryStore: SystemProxyRecoveryStoring, @unchecke
     func load() throws -> SystemProxyRecoveryRecord? { record }
     func save(_ record: SystemProxyRecoveryRecord) throws { self.record = record }
     func clear() throws { record = nil }
+}
+
+private struct ThrowingRecoveryStore: SystemProxyRecoveryStoring {
+    func load() throws -> SystemProxyRecoveryRecord? { throw SystemProxyError.snapshotFailed }
+    func save(_ record: SystemProxyRecoveryRecord) throws {}
+    func clear() throws {}
 }
 
 private actor TogglePortProbe: LocalProxyProbing {

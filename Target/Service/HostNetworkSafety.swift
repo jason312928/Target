@@ -26,6 +26,11 @@ protocol HostNetworkEnvironmentChecking: Sendable {
 /// Read-only host inspection. It reports only aggregate safety facts: it never reads
 /// a third-party application's configuration and never changes another process.
 final class HostNetworkEnvironmentProbe: HostNetworkEnvironmentChecking, @unchecked Sendable {
+    private static let proxyApplicationMarkers = [
+        "clash", "shadowrocket", "quantumult", "surge", "mihomo", "v2ray", "xray",
+        "hysteria", "trojan", "outline", "proxifier", "charles", "fiddler", "mitmproxy"
+    ]
+
     private let system: any SystemProxySystemManaging
     private let runningBundleIdentifiers: @Sendable () -> [String]
 
@@ -46,7 +51,7 @@ final class HostNetworkEnvironmentProbe: HostNetworkEnvironmentChecking, @unchec
         }) ?? true
         let runningProxy = runningBundleIdentifiers().contains { identifier in
             let lowered = identifier.lowercased()
-            return ["clash", "shadowrocket", "quantumult"].contains { lowered.contains($0) }
+            return Self.proxyApplicationMarkers.contains { lowered.contains($0) }
         }
         return HostNetworkEnvironmentStatus(
             hasConfiguredSystemProxy: configured,

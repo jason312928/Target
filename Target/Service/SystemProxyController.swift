@@ -289,7 +289,19 @@ actor SystemProxyCoordinator {
     }
 
     func querySystemProxyStatus() async -> SystemProxyStatus {
-        guard let record = try? recoveryStore.load() else {
+        let record: SystemProxyRecoveryRecord?
+        do {
+            record = try recoveryStore.load()
+        } catch {
+            return SystemProxyStatus(
+                state: .recoveryRequired,
+                engineReachable: await portProbe.isAvailable(),
+                affectedServiceCount: 0,
+                error: .snapshotFailed,
+                hasRecoverySnapshot: false
+            )
+        }
+        guard let record else {
             return SystemProxyStatus(state: .disabled, engineReachable: await portProbe.isAvailable(), affectedServiceCount: 0, error: nil, hasRecoverySnapshot: false)
         }
         guard record.owner == TargetServiceIdentifiers.snapshotOwner else {

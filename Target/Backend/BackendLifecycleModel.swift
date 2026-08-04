@@ -76,6 +76,7 @@ final class BackendLifecycleModel {
                 guard !Task.isCancelled else { return }
                 self?.status = engineStatus
                 await self?.refreshServiceStatus()
+                await self?.loadSystemProxyStatus()
                 self?.error = nil
                 self?.lifecycleState = .settled(from: engineStatus)
                 self?.operationTask = nil
@@ -90,15 +91,9 @@ final class BackendLifecycleModel {
     func refreshSystemProxyStatus() {
         guard !isBusy else { return }
         operationTask = Task { [weak self] in
-            do {
-                let status = try await self?.systemProxyClient.querySystemProxyStatus()
-                guard !Task.isCancelled, let status else { return }
-                self?.systemProxyStatus = status
-                self?.operationTask = nil
-            } catch {
-                self?.systemProxyStatus = SystemProxyStatus(state: .failed, engineReachable: false, affectedServiceCount: 0, error: .recoveryFailed)
-                self?.operationTask = nil
-            }
+            await self?.loadSystemProxyStatus()
+            guard !Task.isCancelled else { return }
+            self?.operationTask = nil
         }
     }
 
@@ -356,6 +351,19 @@ final class BackendLifecycleModel {
             xpcState = ServiceConnectionAssessment.xpcState(registration: installation, xpcReachable: true)
         } catch {
             xpcState = ServiceConnectionAssessment.xpcState(registration: installation, xpcReachable: false)
+        }
+    }
+
+    private func loadSystemProxyStatus() async {
+        do {
+            systemProxyStatus = try await systemProxyClient.querySystemProxyStatus()
+        } catch {
+            systemProxyStatus = SystemProxyStatus(
+                state: .failed,
+                engineReachable: false,
+                affectedServiceCount: 0,
+                error: .recoveryFailed
+            )
         }
     }
 }
