@@ -5,6 +5,8 @@ import Observation
 @Observable
 final class ProfileViewModel {
     private let store: ProfileStore
+    private let subscriptionFetcher: SecureSubscriptionFetcher
+    private var subscriptionTask: Task<Void, Never>?
 
     private(set) var profiles: [Profile] = []
     var selectedID: UUID? { didSet { selectProfile() } }
@@ -12,9 +14,12 @@ final class ProfileViewModel {
     private(set) var diagnostic: ConfigurationDiagnostic?
     private(set) var isDirty = false
     private(set) var messageKey: String?
+    private(set) var pendingSubscriptionUpdate: PendingSubscriptionUpdate?
+    private(set) var isUpdatingSubscription = false
 
-    init(store: ProfileStore = ProfileStore()) {
+    init(store: ProfileStore = ProfileStore(), subscriptionFetcher: SecureSubscriptionFetcher = SecureSubscriptionFetcher()) {
         self.store = store
+        self.subscriptionFetcher = subscriptionFetcher
         reload()
     }
 
@@ -111,6 +116,66 @@ final class ProfileViewModel {
             reload()
             messageKey = "profile.message.restored"
         } catch { messageKey = "profile.message.operation-failed" }
+    }
+
+    func updateSubscription() {
+        guard let profile = selectedProfile, let subscription = profile.subscription, subscriptionTask == nil else { return }
+        messageKey = nil
+        pendingSubscriptionUpdate = nil
+        isUpdatingSubscription = true
+        let profileID = profile.id
+        let store = store
+        let fetcher = subscriptionFetcher
+        subscriptionTask = Task { [weak self] in
+            defer {
+                self?.subscriptionTask = nil
+                self?.isUpdatingSubscription = false
+            }
+            do {
+                let response = try await fetcher.fetch(subscription: subscription)
+                guard !Task.isCancelled else { throw SubscriptionUpdateError.cancelled }
+                let pending = try store.previewSubscriptionUpdate(response, for: profileID)
+                guard !Task.isCancelled else { throw SubscriptionUpdateError.cancelled }
+                self?.pendingSubscriptionUpdate = pending
+                self?.reload()
+                if pending == nil { self?.messageKey = "profile.subscription.not-modified" }
+            } catch let error as SubscriptionUpdateError {
+                if error == .cancelled { try? store.recordSubscriptionCancellation(for: profileID) }
+                else { try? store.recordSubscriptionFailure(for: profileID, messageKey: error.messageKey) }
+                self?.reload()
+                self?.messageKey = error.messageKey
+            } catch let error as ProfileStoreError {
+                self?.reload()
+                self?.present(error)
+            } catch {
+                try? store.recordSubscriptionFailure(for: profileID, messageKey: "profile.subscription.error.download-failed")
+                self?.reload()
+                self?.messageKey = "profile.subscription.error.download-failed"
+            }
+        }
+    }
+
+    func cancelSubscriptionUpdate() {
+        subscriptionTask?.cancel()
+    }
+
+    func confirmSubscriptionUpdate() {
+        guard let pending = pendingSubscriptionUpdate else { return }
+        do {
+            try store.applySubscriptionUpdate(pending)
+            pendingSubscriptionUpdate = nil
+            reload()
+            messageKey = "profile.subscription.applied"
+        } catch let error as ProfileStoreError {
+            present(error)
+        } catch {
+            messageKey = "profile.message.operation-failed"
+        }
+    }
+
+    func discardSubscriptionPreview() {
+        pendingSubscriptionUpdate = nil
+        messageKey = "profile.subscription.preview-dismissed"
     }
 
     private func selectProfile() {

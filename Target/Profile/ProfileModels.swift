@@ -24,9 +24,63 @@ struct ConfigurationDiagnostic: Error, Codable, Equatable, Sendable {
 /// Metadata is deliberately separate from the configuration JSON. The URL is never
 /// rendered in logs or diagnostics; it exists only so a future explicit refresh can
 /// use the source selected by the user.
+enum SubscriptionCacheStatus: String, Codable, Equatable, Sendable {
+    case notChecked
+    case updated
+    case notModified
+    case failed
+    case cancelled
+}
+
+/// Subscription metadata is private application data (the enclosing manifest is
+/// owner-readable only). It is never included in diagnostics or application logs.
 struct RemoteSubscription: Codable, Equatable, Sendable {
     let url: URL
     var lastUpdatedAt: Date?
+    var lastCheckedAt: Date?
+    var etag: String?
+    var lastModified: String?
+    var cacheStatus: SubscriptionCacheStatus
+    var lastErrorKey: String?
+
+    init(
+        url: URL,
+        lastUpdatedAt: Date? = nil,
+        lastCheckedAt: Date? = nil,
+        etag: String? = nil,
+        lastModified: String? = nil,
+        cacheStatus: SubscriptionCacheStatus = .notChecked,
+        lastErrorKey: String? = nil
+    ) {
+        self.url = url
+        self.lastUpdatedAt = lastUpdatedAt
+        self.lastCheckedAt = lastCheckedAt
+        self.etag = etag
+        self.lastModified = lastModified
+        self.cacheStatus = cacheStatus
+        self.lastErrorKey = lastErrorKey
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case url, lastUpdatedAt, lastCheckedAt, etag, lastModified, cacheStatus, lastErrorKey
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        url = try values.decode(URL.self, forKey: .url)
+        lastUpdatedAt = try values.decodeIfPresent(Date.self, forKey: .lastUpdatedAt)
+        lastCheckedAt = try values.decodeIfPresent(Date.self, forKey: .lastCheckedAt)
+        etag = try values.decodeIfPresent(String.self, forKey: .etag)
+        lastModified = try values.decodeIfPresent(String.self, forKey: .lastModified)
+        cacheStatus = try values.decodeIfPresent(SubscriptionCacheStatus.self, forKey: .cacheStatus) ?? .notChecked
+        lastErrorKey = try values.decodeIfPresent(String.self, forKey: .lastErrorKey)
+    }
+}
+
+struct ProfileVersionSummary: Identifiable, Equatable, Sendable {
+    let revision: Int
+    let savedAt: Date?
+    var id: Int { revision }
 }
 
 struct Profile: Identifiable, Codable, Equatable, Sendable {

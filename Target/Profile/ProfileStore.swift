@@ -58,7 +58,7 @@ final class ProfileStore {
         let timestamp = now()
         let profile = Profile(
             id: UUID(), name: normalizedName,
-            subscription: subscriptionURL.map { RemoteSubscription(url: $0, lastUpdatedAt: nil) },
+            subscription: subscriptionURL.map { RemoteSubscription(url: $0) },
             createdAt: timestamp, updatedAt: timestamp, validation: .notChecked, validRevision: 1
         )
         let directory = try safeProfileDirectory(profile.id)
@@ -181,6 +181,67 @@ final class ProfileStore {
         }
     }
 
+    func availableValidVersions(for id: UUID) throws -> [ProfileVersionSummary] {
+        guard let profile = try profile(id) else { throw ProfileStoreError.profileNotFound }
+        return (1...profile.validRevision).reversed().compactMap { revision in
+            guard let attributes = try? fileManager.attributesOfItem(atPath: (try? versionURL(for: id, revision: revision))?.path ?? "") else { return nil }
+            return ProfileVersionSummary(revision: revision, savedAt: attributes[.modificationDate] as? Date)
+        }
+    }
+
+    /// Validates a download in a managed staging file and produces a redacted,
+    /// structural preview. It deliberately leaves config.json and version history
+    /// untouched until `applySubscriptionUpdate` is called after user approval.
+    func previewSubscriptionUpdate(_ response: SubscriptionResponse, for id: UUID) throws -> PendingSubscriptionUpdate? {
+        guard try profile(id)?.subscription != nil else { throw SubscriptionUpdateError.noSubscription }
+        if response.cacheStatus == .notModified {
+            try recordSubscriptionResult(for: id, response: response, error: nil)
+            return nil
+        }
+        guard let text = String(data: response.data, encoding: .utf8) else {
+            throw ProfileStoreError.invalidJSON(ConfigurationDiagnostic(messageKey: "profile.validation.json-syntax", line: nil, column: nil))
+        }
+        if let syntaxError = JSONSyntaxChecker.validate(text) {
+            try recordSubscriptionFailure(for: id, messageKey: syntaxError.messageKey)
+            throw ProfileStoreError.invalidJSON(syntaxError)
+        }
+        let staging = try stagingURL(for: id)
+        try write(response.data, to: staging)
+        let checkResult = checker.check(configurationURL: staging)
+        try? fileManager.removeItem(at: staging)
+        if case .failure(let diagnostic) = checkResult {
+            try recordSubscriptionFailure(for: id, messageKey: diagnostic.messageKey)
+            throw ProfileStoreError.validationFailed(diagnostic)
+        }
+        let current = try Data(contentsOf: try configurationURL(for: id))
+        return PendingSubscriptionUpdate(profileID: id, json: text, diff: .make(current: current, candidate: response.data), response: response)
+    }
+
+    func applySubscriptionUpdate(_ pending: PendingSubscriptionUpdate) throws {
+        try save(json: pending.json, for: pending.profileID)
+        try recordSubscriptionResult(for: pending.profileID, response: pending.response, error: nil)
+    }
+
+    func recordSubscriptionFailure(for id: UUID, messageKey: String) throws {
+        try update(id) { profile in
+            guard var subscription = profile.subscription else { return }
+            subscription.lastCheckedAt = now()
+            subscription.cacheStatus = .failed
+            subscription.lastErrorKey = messageKey
+            profile.subscription = subscription
+        }
+    }
+
+    func recordSubscriptionCancellation(for id: UUID) throws {
+        try update(id) { profile in
+            guard var subscription = profile.subscription else { return }
+            subscription.lastCheckedAt = now()
+            subscription.cacheStatus = .cancelled
+            subscription.lastErrorKey = "profile.subscription.error.cancelled"
+            profile.subscription = subscription
+        }
+    }
+
     func safeManagedURL(_ relativePath: String) throws -> URL {
         try safeRootFile(relativePath)
     }
@@ -212,7 +273,9 @@ final class ProfileStore {
     }
 
     private func saveManifest(_ profiles: [Profile]) throws {
-        try write(JSONEncoder().encode(profiles), to: try safeRootFile(Self.manifestName))
+        let manifest = try safeRootFile(Self.manifestName)
+        try write(JSONEncoder().encode(profiles), to: manifest)
+        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: manifest.path)
     }
 
     private func loadSelection() throws -> UUID? {
@@ -260,5 +323,20 @@ final class ProfileStore {
         guard parent.path == rootDirectory.path || parent.path.hasPrefix(rootDirectory.path + "/") else { throw ProfileStoreError.unsafePath }
         try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
         try data.write(to: url, options: .atomic)
+        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private func recordSubscriptionResult(for id: UUID, response: SubscriptionResponse, error: String?) throws {
+        try update(id) { profile in
+            guard var subscription = profile.subscription else { return }
+            let timestamp = now()
+            subscription.lastCheckedAt = timestamp
+            if response.cacheStatus == .updated { subscription.lastUpdatedAt = timestamp }
+            subscription.etag = response.etag
+            subscription.lastModified = response.lastModified
+            subscription.cacheStatus = response.cacheStatus
+            subscription.lastErrorKey = error
+            profile.subscription = subscription
+        }
     }
 }

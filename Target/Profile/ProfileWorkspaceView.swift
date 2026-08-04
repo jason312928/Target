@@ -55,6 +55,19 @@ struct ProfileWorkspaceView: View {
                 }
             }
         }
+        .sheet(isPresented: Binding(
+            get: { model.pendingSubscriptionUpdate != nil },
+            set: { if !$0 { model.discardSubscriptionPreview() } }
+        )) {
+            if let pending = model.pendingSubscriptionUpdate {
+                SubscriptionDiffPreview(diff: pending.diff) {
+                    model.discardSubscriptionPreview()
+                } confirm: {
+                    model.confirmSubscriptionUpdate()
+                    lifecycle?.refresh()
+                }
+            }
+        }
         .onChange(of: model.selectedID) { _, _ in lifecycle?.refresh() }
         .alert("profile.delete.title", isPresented: $showDeleteConfirmation) {
             Button("profile.action.delete", role: .destructive) { model.deleteSelected(); lifecycle?.refresh() }
@@ -85,6 +98,25 @@ struct ProfileWorkspaceView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
+            if let subscription = profile.subscription {
+                HStack(spacing: 10) {
+                    Label {
+                        Text(LocalizedStringKey(subscription.cacheStatus == .notModified ? "profile.subscription.cache.not-modified" : "profile.subscription.cache.\(subscription.cacheStatus.rawValue)"))
+                    } icon: { Image(systemName: "arrow.triangle.2.circlepath") }
+                    if let checked = subscription.lastCheckedAt { Text(checked, style: .relative) }
+                    if let error = subscription.lastErrorKey { Text(LocalizedStringKey(error)).foregroundStyle(.red) }
+                    Spacer()
+                    if model.isUpdatingSubscription {
+                        ProgressView().controlSize(.small)
+                        Button("profile.subscription.cancel") { model.cancelSubscriptionUpdate() }
+                    } else {
+                        Button("profile.subscription.update") { model.updateSubscription() }
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
             JSONCodeEditor(text: Binding(get: { model.editorText }, set: model.updateEditor)) { model.updateEditor($0) }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -105,6 +137,8 @@ struct ProfileWorkspaceView: View {
                 Button("profile.action.format") { model.format() }
                 Button("profile.action.restore") { model.restorePreviousVersion(); lifecycle?.refresh() }
                     .disabled(profile.validRevision <= 1)
+                Text("profile.history.available") + Text(" \(profile.validRevision)")
+                    .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("profile.action.rename") { sheet = .rename(profile.name) }
                 Button("profile.action.duplicate") { model.duplicateSelected() }
@@ -118,6 +152,72 @@ struct ProfileWorkspaceView: View {
         .navigationTitle("profile.editor.title")
     }
 
+}
+
+private struct SubscriptionDiffPreview: View {
+    let diff: ProfileConfigurationDiff
+    let dismiss: () -> Void
+    let confirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("profile.subscription.preview.title").font(.headline)
+            Text("profile.subscription.preview.description").font(.callout).foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    DiffSection(section: diff.outbounds)
+                    DiffSection(section: diff.routeRules)
+                    DiffSection(section: diff.dns)
+                    DiffSection(section: diff.inbounds)
+                    DiffSection(section: diff.unknown)
+                    if !diff.hasChanges {
+                        Text("profile.diff.no-changes").foregroundStyle(.secondary)
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("profile.subscription.discard") { dismiss() }
+                Button("profile.subscription.confirm") { confirm() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 540, height: 460)
+    }
+}
+
+private struct DiffSection: View {
+    let section: ProfileConfigurationDiff.Section
+
+    var body: some View {
+        if section.hasChanges {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(LocalizedStringKey(section.id)).font(.subheadline.weight(.semibold))
+                ForEach(section.added, id: \.self) { entry in
+                    Label {
+                        if entry == "profile.diff.added" { Text(LocalizedStringKey(entry)) }
+                        else { Text(verbatim: entry) }
+                    } icon: { Image(systemName: "plus.circle.fill") }
+                        .foregroundStyle(.green)
+                }
+                ForEach(section.removed, id: \.self) { entry in
+                    Label {
+                        if entry == "profile.diff.removed" { Text(LocalizedStringKey(entry)) }
+                        else { Text(verbatim: entry) }
+                    } icon: { Image(systemName: "minus.circle.fill") }
+                        .foregroundStyle(.red)
+                }
+                ForEach(section.modified, id: \.self) { entry in
+                    Label {
+                        if entry == "profile.diff.changed" { Text(LocalizedStringKey(entry)) }
+                        else { Text(verbatim: entry) }
+                    } icon: { Image(systemName: "pencil.circle.fill") }
+                        .foregroundStyle(.orange)
+                }
+            }
+            .font(.caption)
+        }
+    }
 }
 
 private struct ProfileRow: View {
