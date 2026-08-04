@@ -62,7 +62,10 @@ final class BackendLifecycleModel {
         !hostSafeMode && !isBusy && [.enabled, .recoveryRequired, .failed].contains(systemProxyStatus.state)
     }
     var canRecoverSystemProxy: Bool { !hostSafeMode && !isBusy && systemProxyStatus.hasRecoverySnapshot }
-    var canManageService: Bool { !hostSafeMode && !isBusy }
+    /// Service registration is independent from host-network changes. Keep it
+    /// available in Host Safe Mode so a user can approve and repair the bundled
+    /// daemon without enabling proxy, DNS, route, firewall, or TUN operations.
+    var canManageService: Bool { !isBusy }
     var safeModeKey: String { "host-safety.status.safe" }
 
     func refresh() {
