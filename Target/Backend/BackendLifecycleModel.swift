@@ -69,6 +69,7 @@ final class BackendLifecycleModel {
     /// daemon without enabling proxy, DNS, route, firewall, or TUN operations.
     var canManageService: Bool { !isBusy }
     var safeModeKey: String { "host-safety.status.safe" }
+    var isHostSafeMode: Bool { hostSafeMode }
 
     func refresh() {
         guard !isBusy else { return }

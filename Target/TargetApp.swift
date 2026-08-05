@@ -13,7 +13,7 @@ struct TargetApp: App {
         WindowGroup {
             TabView {
                 ContentView(lifecycle: lifecycle)
-                    .tabItem { Label("app.title", systemImage: "bolt") }
+                    .tabItem { Label("dashboard.title", systemImage: "rectangle.grid.1x2") }
                 ProfileWorkspaceView(lifecycle: lifecycle)
                     .tabItem { Label("profile.title", systemImage: "doc.text") }
             }
