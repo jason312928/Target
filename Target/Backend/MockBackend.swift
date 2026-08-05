@@ -26,6 +26,12 @@ actor MockBackend: EngineBackend {
         guard status.serviceInstallation == .enabled else {
             throw BackendError.serviceNotInstalled
         }
+        guard status.engineInstallation == .installed else {
+            throw BackendError.engineNotInstalled
+        }
+        guard status.hasSelectedValidProfile else {
+            throw BackendError.profileNotSelected
+        }
         guard status.engineState == .stopped else {
             throw BackendError.invalidLifecycleTransition
         }

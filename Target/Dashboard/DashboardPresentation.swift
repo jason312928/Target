@@ -12,6 +12,7 @@ enum DashboardPrimaryAction: Equatable {
     case start
     case stop
     case restart
+    case profileRequired
     case unavailable
 
     var titleKey: String {
@@ -20,6 +21,7 @@ enum DashboardPrimaryAction: Equatable {
         case .start: "backend.action.start"
         case .stop: "backend.action.stop"
         case .restart: "dashboard.action.restart"
+        case .profileRequired: "dashboard.action.profile-required"
         case .unavailable: "dashboard.action.unavailable"
         }
     }
@@ -70,31 +72,36 @@ struct DashboardPresentation: Equatable {
         self.systemProxyEngineKey = systemProxyStatus.engineReachable ? "system-proxy.engine.reachable" : "system-proxy.engine.unreachable"
         self.isHostSafeMode = isHostSafeMode
 
-        if isBusy || lifecycleState == .starting || lifecycleState == .stopping {
+        if isBusy || status.engineState == .starting || status.engineState == .stopping {
             statusLevel = .neutral
             titleKey = "dashboard.status.working"
             descriptionKey = "dashboard.status.working.description"
             primaryAction = .unavailable
-        } else if let error {
-            statusLevel = .critical
-            titleKey = "dashboard.status.attention"
-            descriptionKey = error.localizedKey
-            primaryAction = status.engineInstallation == .installed ? .start : .installEngine
         } else if status.engineInstallation != .installed {
             statusLevel = .warning
             titleKey = "dashboard.status.engine-unavailable"
             descriptionKey = "dashboard.status.engine-unavailable.description"
             primaryAction = .installEngine
-        } else if status.restartRequired && lifecycleState == .running {
+        } else if status.engineState == .running && status.restartRequired {
             statusLevel = .warning
             titleKey = "dashboard.status.restart-required"
             descriptionKey = "engine.restart.required"
             primaryAction = .restart
-        } else if lifecycleState == .running {
+        } else if status.engineState == .running {
             statusLevel = .positive
             titleKey = "dashboard.status.running"
             descriptionKey = "dashboard.status.running.description"
             primaryAction = .stop
+        } else if !status.hasSelectedValidProfile {
+            statusLevel = .warning
+            titleKey = "dashboard.status.profile-required"
+            descriptionKey = "dashboard.status.profile-required.description"
+            primaryAction = .profileRequired
+        } else if let error {
+            statusLevel = .critical
+            titleKey = "dashboard.status.attention"
+            descriptionKey = error.localizedKey
+            primaryAction = .start
         } else {
             statusLevel = .neutral
             titleKey = "dashboard.status.ready"

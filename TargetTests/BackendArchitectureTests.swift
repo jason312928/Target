@@ -248,13 +248,48 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appending(path: "runtime").path))
     }
 
+    func testSingBoxStatusPropagatesSelectedValidProfileReadiness() async throws {
+        let root = try temporaryDirectory()
+        let executable = root.appending(path: "sing-box")
+        let script = "#!/bin/sh\nif [ \"$1\" = \"version\" ]; then echo 'sing-box version test'; exit 0; fi\nexit 1\n"
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let store = ProfileStore(
+            rootDirectory: root.appending(path: "Profiles"),
+            checker: FixedConfigurationChecker(),
+            keyProvider: TestProfileKeyProvider()
+        )
+        let ownership = EngineRuntimeOwnership(store: FileEngineRuntimeStore(directory: root.appending(path: "Ownership")))
+        let backend = SingBoxBackend(
+            runtimeOwnership: ownership,
+            profileStore: store,
+            engineDirectory: root,
+            executableURL: executable
+        )
+
+        let emptyStatus = try await backend.queryStatus()
+        XCTAssertFalse(emptyStatus.hasSelectedValidProfile)
+        let profile = try store.create(name: "Selected")
+        try store.select(profile.id)
+        let selectedStatus = try await backend.queryStatus()
+        XCTAssertTrue(selectedStatus.hasSelectedValidProfile)
+    }
+
+    func testBackendStatusDecodingMissingProfileReadinessDefaultsToFalse() throws {
+        let legacyPayload = Data(#"{"serviceInstallation":"enabled","engineState":"stopped","engineInstallation":"installed"}"#.utf8)
+        let status = try XPCPayloadCodec.decodeStatus(legacyPayload)
+
+        XCTAssertFalse(status.hasSelectedValidProfile)
+    }
+
     func testServiceRegistrationRejectsDerivedDataBundlePath() {
         let temporaryApp = URL(fileURLWithPath: "/tmp/DerivedData/Target/Build/Products/Release/Target.app")
         XCTAssertFalse(TargetServiceBundleLocation.isStable(temporaryApp))
     }
 
     func testMockBackendStartsAndStopsWhenServiceIsInstalled() async throws {
-        let backend = MockBackend(initialStatus: BackendStatus(serviceInstallation: .enabled, engineState: .stopped))
+        let backend = MockBackend(initialStatus: BackendStatus(serviceInstallation: .enabled, engineState: .stopped, engineInstallation: .installed, hasSelectedValidProfile: true))
 
         let runningStatus = try await backend.startEngine()
         XCTAssertEqual(runningStatus.engineState, .running)
@@ -275,13 +310,46 @@ final class BackendArchitectureTests: XCTestCase {
     }
 
     func testModelPresentsStartErrorWhenDefaultServiceIsMissing() async throws {
-        let model = BackendLifecycleModel(backend: MockBackend())
+        let model = BackendLifecycleModel(backend: MockBackend(initialStatus: BackendStatus(serviceInstallation: .notRegistered, engineState: .stopped, engineInstallation: .installed, hasSelectedValidProfile: true)))
+        model.refresh()
+        try await waitUntil { !model.isBusy }
         model.start()
 
         try await waitUntil { model.error == .serviceNotInstalled }
         XCTAssertEqual(model.status.serviceInstallation, .notRegistered)
         XCTAssertEqual(model.status.engineState, .stopped)
         XCTAssertEqual(model.lifecycleState, .failed(.serviceNotInstalled))
+    }
+
+    func testCanStartIsFalseWhenTrustedRunningStatusHasFailedLifecycle() async throws {
+        let status = BackendStatus(serviceInstallation: .enabled, engineState: .running, engineInstallation: .installed, hasSelectedValidProfile: true)
+        let model = BackendLifecycleModel(backend: ErroringBackend(status: status))
+        model.refresh()
+        try await waitUntil { !model.isBusy }
+        model.validateConfiguration()
+        try await waitUntil { model.lifecycleState == .failed(.serviceUnavailable) }
+
+        XCTAssertEqual(model.status.engineState, .running)
+        XCTAssertFalse(model.canStart)
+        XCTAssertTrue(model.canStop)
+    }
+
+    func testCanStartIsFalseWithoutSelectedValidProfile() async throws {
+        let status = BackendStatus(serviceInstallation: .enabled, engineState: .stopped, engineInstallation: .installed, hasSelectedValidProfile: false)
+        let model = BackendLifecycleModel(backend: MockBackend(initialStatus: status))
+        model.refresh()
+        try await waitUntil { !model.isBusy }
+
+        XCTAssertFalse(model.canStart)
+    }
+
+    func testCanStartIsFalseWhenEngineIsNotInstalled() async throws {
+        let status = BackendStatus(serviceInstallation: .enabled, engineState: .stopped, engineInstallation: .notInstalled, hasSelectedValidProfile: true)
+        let model = BackendLifecycleModel(backend: MockBackend(initialStatus: status))
+        model.refresh()
+        try await waitUntil { !model.isBusy }
+
+        XCTAssertFalse(model.canStart)
     }
 
     func testSuccessfulRefreshClearsOldBackendError() async throws {
@@ -445,6 +513,19 @@ private struct FixedEnginePortProbe: LocalEnginePortProbing {
 
 private struct FixedConfigurationChecker: SingBoxConfigurationChecking {
     func check(configurationURL: URL) -> Result<Void, ConfigurationDiagnostic> { .success(()) }
+}
+
+private actor ErroringBackend: EngineBackend {
+    private let status: BackendStatus
+
+    init(status: BackendStatus) {
+        self.status = status
+    }
+
+    func queryStatus() async throws -> BackendStatus { status }
+    func validateConfiguration(_ request: XPCConfigurationRequest) async throws { throw BackendError.serviceUnavailable }
+    func startEngine() async throws -> BackendStatus { throw BackendError.serviceUnavailable }
+    func stopEngine() async throws -> BackendStatus { throw BackendError.serviceUnavailable }
 }
 
 private final class InMemorySystemProxySystem: SystemProxySystemManaging, @unchecked Sendable {

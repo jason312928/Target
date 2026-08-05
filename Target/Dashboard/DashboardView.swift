@@ -91,6 +91,11 @@ struct DashboardView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!lifecycle.canRestart)
                 .accessibilityHint(Text("dashboard.action.restart.hint"))
+        case .profileRequired:
+            Button { } label: { Text(LocalizedStringKey(presentation.primaryAction.titleKey)) }
+                .buttonStyle(.borderedProminent)
+                .disabled(true)
+                .accessibilityHint(Text("dashboard.action.profile-required.hint"))
         case .unavailable:
             Button { } label: { Text(LocalizedStringKey(presentation.primaryAction.titleKey)) }
                 .disabled(true)

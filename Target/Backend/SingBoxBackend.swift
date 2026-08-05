@@ -57,6 +57,7 @@ actor SingBoxBackend: EngineInstalling {
             serviceInstallation: .notRegistered,
             engineState: verifiedRecord == nil ? .stopped : .running,
             engineInstallation: installation,
+            hasSelectedValidProfile: selected != nil,
             engineVersion: version,
             enginePort: verifiedRecord.map { Int($0.endpoint.port) },
             runningProfileID: verifiedRecord?.profileID,

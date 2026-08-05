@@ -40,11 +40,14 @@ final class BackendLifecycleModel {
     var canInstallEngine: Bool { !isBusy && status.engineInstallation != .installed }
 
     var canStart: Bool {
-        operationTask == nil && lifecycleState != .running
+        !isBusy
+            && status.engineInstallation == .installed
+            && status.engineState == .stopped
+            && status.hasSelectedValidProfile
     }
 
     var canStop: Bool {
-        operationTask == nil && lifecycleState == .running
+        !isBusy && status.engineState == .running
     }
 
     var canRestart: Bool { canStop && status.restartRequired }
@@ -228,14 +231,15 @@ final class BackendLifecycleModel {
     }
 
     func start() {
+        guard canStart else { return }
         begin(.start) { backend in
             try await backend.startEngine()
         }
     }
 
     func stop() {
-        guard operationTask == nil else { return }
-        guard lifecycleState == .running else {
+        guard !isBusy else { return }
+        guard status.engineState == .running else {
             finish(with: .invalidLifecycleTransition)
             return
         }
@@ -290,7 +294,7 @@ final class BackendLifecycleModel {
     }
 
     func stopOnApplicationTermination() {
-        guard lifecycleState == .running else { return }
+        guard status.engineState == .running else { return }
         Task { [backend] in
             _ = try? await backend.stopEngine()
         }

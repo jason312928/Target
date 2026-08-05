@@ -71,11 +71,63 @@ struct BackendStatus: Codable, Equatable, Sendable {
     var serviceInstallation: ServiceInstallationState
     var engineState: EngineState
     var engineInstallation: EngineInstallationState = .notInstalled
+    /// A non-sensitive readiness fact for UI consumers. It deliberately does not
+    /// disclose Profile content, identifiers, storage locations, or credentials.
+    var hasSelectedValidProfile = false
     var engineVersion: String?
     var enginePort: Int?
     var runningProfileID: UUID?
     var runningProfileRevision: Int?
     var restartRequired = false
+
+    init(
+        serviceInstallation: ServiceInstallationState,
+        engineState: EngineState,
+        engineInstallation: EngineInstallationState = .notInstalled,
+        hasSelectedValidProfile: Bool = false,
+        engineVersion: String? = nil,
+        enginePort: Int? = nil,
+        runningProfileID: UUID? = nil,
+        runningProfileRevision: Int? = nil,
+        restartRequired: Bool = false
+    ) {
+        self.serviceInstallation = serviceInstallation
+        self.engineState = engineState
+        self.engineInstallation = engineInstallation
+        self.hasSelectedValidProfile = hasSelectedValidProfile
+        self.engineVersion = engineVersion
+        self.enginePort = enginePort
+        self.runningProfileID = runningProfileID
+        self.runningProfileRevision = runningProfileRevision
+        self.restartRequired = restartRequired
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case serviceInstallation
+        case engineState
+        case engineInstallation
+        case hasSelectedValidProfile
+        case engineVersion
+        case enginePort
+        case runningProfileID
+        case runningProfileRevision
+        case restartRequired
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            serviceInstallation: try container.decodeIfPresent(ServiceInstallationState.self, forKey: .serviceInstallation) ?? .notRegistered,
+            engineState: try container.decodeIfPresent(EngineState.self, forKey: .engineState) ?? .stopped,
+            engineInstallation: try container.decodeIfPresent(EngineInstallationState.self, forKey: .engineInstallation) ?? .notInstalled,
+            hasSelectedValidProfile: try container.decodeIfPresent(Bool.self, forKey: .hasSelectedValidProfile) ?? false,
+            engineVersion: try container.decodeIfPresent(String.self, forKey: .engineVersion),
+            enginePort: try container.decodeIfPresent(Int.self, forKey: .enginePort),
+            runningProfileID: try container.decodeIfPresent(UUID.self, forKey: .runningProfileID),
+            runningProfileRevision: try container.decodeIfPresent(Int.self, forKey: .runningProfileRevision),
+            restartRequired: try container.decodeIfPresent(Bool.self, forKey: .restartRequired) ?? false
+        )
+    }
 
     static let mockDefault = BackendStatus(serviceInstallation: .notRegistered, engineState: .stopped)
 }

@@ -22,8 +22,10 @@ final class DashboardPresentationTests: XCTestCase {
     }
 
     func testInstalledStoppedEngineOffersStart() {
-        let status = BackendStatus(serviceInstallation: .enabled, engineState: .stopped, engineInstallation: .installed)
-        XCTAssertEqual(makePresentation(status: status).primaryAction, .start)
+        let status = BackendStatus(serviceInstallation: .enabled, engineState: .stopped, engineInstallation: .installed, hasSelectedValidProfile: true)
+        let presentation = makePresentation(status: status)
+        XCTAssertEqual(presentation.primaryAction, .start)
+        XCTAssertEqual(presentation.titleKey, "dashboard.status.ready")
     }
 
     func testBusyStateDoesNotOfferDuplicateAction() {
@@ -39,7 +41,7 @@ final class DashboardPresentationTests: XCTestCase {
     }
 
     func testRestartRequirementIsProminentWhenRunning() {
-        let status = BackendStatus(serviceInstallation: .enabled, engineState: .running, engineInstallation: .installed, restartRequired: true)
+        let status = BackendStatus(serviceInstallation: .enabled, engineState: .running, engineInstallation: .installed, hasSelectedValidProfile: true, restartRequired: true)
         let presentation = makePresentation(status: status, lifecycle: .running)
         XCTAssertEqual(presentation.primaryAction, .restart)
         XCTAssertTrue(presentation.showsRestartNotice)
@@ -75,5 +77,46 @@ final class DashboardPresentationTests: XCTestCase {
         let presentation = makePresentation(status: status, lifecycle: .running)
         XCTAssertEqual(presentation.endpoint, "127.0.0.1:51234")
         XCTAssertEqual(presentation.runningRevision, 7)
+    }
+
+    func testStoppedInstalledEngineWithoutSelectedProfileRequiresProfile() {
+        let status = BackendStatus(serviceInstallation: .enabled, engineState: .stopped, engineInstallation: .installed, hasSelectedValidProfile: false)
+        let presentation = makePresentation(status: status)
+
+        XCTAssertEqual(presentation.primaryAction, .profileRequired)
+        XCTAssertEqual(presentation.titleKey, "dashboard.status.profile-required")
+        XCTAssertEqual(presentation.descriptionKey, "dashboard.status.profile-required.description")
+    }
+
+    func testRunningEngineWithBackendErrorOffersStopInsteadOfStart() {
+        let status = BackendStatus(serviceInstallation: .enabled, engineState: .running, engineInstallation: .installed)
+        let presentation = makePresentation(status: status, lifecycle: .failed(.serviceUnavailable), error: .serviceUnavailable)
+
+        XCTAssertEqual(presentation.primaryAction, .stop)
+        XCTAssertEqual(presentation.backendErrorKey, "backend.error.service-unavailable")
+    }
+
+    func testRunningEngineWithServiceRegistrationErrorKeepsEngineAction() {
+        let status = BackendStatus(serviceInstallation: .enabled, engineState: .running, engineInstallation: .installed)
+        let presentation = makePresentation(status: status, lifecycle: .failed(.serviceRegistrationFailed), error: .serviceRegistrationFailed)
+
+        XCTAssertEqual(presentation.primaryAction, .stop)
+        XCTAssertEqual(presentation.backendErrorKey, "backend.error.service-registration-failed")
+    }
+
+    func testRestartRequiredWithErrorDoesNotFallBackToStart() {
+        let status = BackendStatus(serviceInstallation: .enabled, engineState: .running, engineInstallation: .installed, hasSelectedValidProfile: true, restartRequired: true)
+        let presentation = makePresentation(status: status, lifecycle: .failed(.serviceUnavailable), error: .serviceUnavailable)
+
+        XCTAssertEqual(presentation.primaryAction, .restart)
+        XCTAssertNotEqual(presentation.primaryAction, .start)
+    }
+
+    func testStoppedErrorWithoutSelectedProfileDoesNotOfferStart() {
+        let status = BackendStatus(serviceInstallation: .enabled, engineState: .stopped, engineInstallation: .installed)
+        let presentation = makePresentation(status: status, lifecycle: .failed(.profileNotSelected), error: .profileNotSelected)
+
+        XCTAssertEqual(presentation.primaryAction, .profileRequired)
+        XCTAssertEqual(presentation.titleKey, "dashboard.status.profile-required")
     }
 }
