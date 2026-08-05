@@ -286,37 +286,41 @@ final class ProfileTransferService {
         fileDescriptor: inout Int32,
         directoryDescriptor: Int32
     ) throws {
-        var preparationError: Error?
-        var didVerifyTruncation = fileDescriptor < 0
+        var contentWasVerifiedEmpty = false
+        var cleanupPreparationFailed = false
         if fileDescriptor >= 0 {
             do {
                 try exportFileOperations.truncateAndVerifyEmpty(fileDescriptor)
-                didVerifyTruncation = true
+                contentWasVerifiedEmpty = true
                 try exportFileOperations.setOwnerOnlyPermissions(on: fileDescriptor)
                 try exportFileOperations.verifyOwnerOnlyRegularFile(fileDescriptor)
                 try exportFileOperations.synchronize(fileDescriptor)
             } catch {
-                preparationError = error
+                cleanupPreparationFailed = true
             }
             do { try closeWithRetry(&fileDescriptor) }
             catch {
-                throw ProfileTransferError.exportCleanupFailed
+                cleanupPreparationFailed = true
             }
         }
-        guard didVerifyTruncation else { throw ProfileTransferError.exportCleanupFailed }
-        var lastError: Error?
-        var removed = false
+
+        var temporaryWasRemoved = false
         for _ in 0..<3 {
             do {
                 try exportFileOperations.remove(named: temporaryName, in: directoryDescriptor)
-                removed = true
+                temporaryWasRemoved = true
                 break
-            } catch {
-                lastError = error
-            }
+            } catch {}
         }
-        guard removed else { throw lastError ?? ProfileTransferError.exportCleanupFailed }
-        if preparationError != nil { throw ProfileTransferError.exportCleanupFailed }
+
+        // A failed truncate or zero-length verification never skips descriptor-relative
+        // removal. When removal also fails, a verified-empty residue is bounded to the
+        // prior 0600 check; an unverified residue has no de-sensitization guarantee.
+        if !temporaryWasRemoved && !contentWasVerifiedEmpty {
+            throw ProfileTransferError.exportCleanupFailed
+        }
+        guard temporaryWasRemoved else { throw ProfileTransferError.exportCleanupFailed }
+        if cleanupPreparationFailed { throw ProfileTransferError.exportCleanupFailed }
     }
 
     private func closeWithRetry(_ descriptor: inout Int32) throws {

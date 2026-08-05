@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Network
 import XCTest
@@ -1266,6 +1267,101 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertFalse(try containsExportTemporaryFile(in: directory))
     }
 
+    func testTruncateFailureStillRemovesTemporaryProfileJSONAndPreservesTarget() throws {
+        let root = try temporaryDirectory()
+        let directory = root.deletingLastPathComponent().appending(path: "TruncateFailureRemoves", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appending(path: "profile.json")
+        try Data("unchanged-target".utf8).write(to: destination)
+        let operations = ControllableExportFileOperations()
+        operations.failTruncateBeforeEmptyVerification = true
+        let plaintext = Data("{\"secret\":\"synthetic-truncate-failure\"}".utf8)
+        let service = ProfileTransferService(
+            profileRoot: root,
+            checker: TestChecker(result: .success(())),
+            faults: TestTransferFaults(points: [.exportAfterWrite]),
+            exportFileOperations: operations
+        )
+
+        XCTAssertThrowsError(try service.writeExport(plaintext, to: destination)) {
+            XCTAssertEqual($0 as? ProfileTransferError, .exportCleanupFailed)
+        }
+        XCTAssertEqual(operations.truncateAttempts, 1)
+        XCTAssertEqual(operations.removeAttempts, 1)
+        XCTAssertEqual(try Data(contentsOf: destination), Data("unchanged-target".utf8))
+        XCTAssertFalse(try containsExportTemporaryFile(in: directory))
+    }
+
+    func testTruncateFailureRetriesTemporaryUnlinkUntilProfileJSONIsRemoved() throws {
+        let root = try temporaryDirectory()
+        let directory = root.deletingLastPathComponent().appending(path: "TruncateFailureRetry", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let operations = ControllableExportFileOperations()
+        operations.failTruncateBeforeEmptyVerification = true
+        operations.removeFailuresRemaining = 1
+        let service = ProfileTransferService(
+            profileRoot: root,
+            checker: TestChecker(result: .success(())),
+            faults: TestTransferFaults(points: [.exportAfterWrite]),
+            exportFileOperations: operations
+        )
+
+        XCTAssertThrowsError(try service.writeExport(Data("{\"secret\":\"synthetic-retry\"}".utf8), to: directory.appending(path: "profile.json"))) {
+            XCTAssertEqual($0 as? ProfileTransferError, .exportCleanupFailed)
+        }
+        XCTAssertEqual(operations.removeAttempts, 2)
+        XCTAssertFalse(try containsExportTemporaryFile(in: directory))
+    }
+
+    func testTruncateAndUnlinkFailuresReportUnclearedProfileJSONResidueRisk() throws {
+        let root = try temporaryDirectory()
+        let directory = root.deletingLastPathComponent().appending(path: "TruncateAndUnlinkFailure", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let operations = ControllableExportFileOperations()
+        operations.failTruncateBeforeEmptyVerification = true
+        operations.alwaysFailRemove = true
+        let plaintext = Data("{\"secret\":\"synthetic-uncleared-residue\"}".utf8)
+        let service = ProfileTransferService(
+            profileRoot: root,
+            checker: TestChecker(result: .success(())),
+            faults: TestTransferFaults(points: [.exportAfterWrite]),
+            exportFileOperations: operations
+        )
+
+        XCTAssertThrowsError(try service.writeExport(plaintext, to: directory.appending(path: "profile.json"))) {
+            XCTAssertEqual($0 as? ProfileTransferError, .exportCleanupFailed)
+        }
+        XCTAssertEqual(operations.removeAttempts, 3)
+        let temporary = try XCTUnwrap(try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).first {
+            $0.lastPathComponent.hasPrefix(".target-profile-export-")
+        })
+        let residual = try Data(contentsOf: temporary)
+        XCTAssertEqual(residual, plaintext)
+        XCTAssertNotEqual(residual.count, 0)
+        XCTAssertNotNil(residual.range(of: plaintext))
+    }
+
+    func testZeroLengthVerificationFailureStillRemovesTemporaryFile() throws {
+        let root = try temporaryDirectory()
+        let directory = root.deletingLastPathComponent().appending(path: "EmptyVerificationFailure", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let operations = ControllableExportFileOperations()
+        operations.failZeroLengthVerificationAfterTruncate = true
+        let service = ProfileTransferService(
+            profileRoot: root,
+            checker: TestChecker(result: .success(())),
+            faults: TestTransferFaults(points: [.exportAfterWrite]),
+            exportFileOperations: operations
+        )
+
+        XCTAssertThrowsError(try service.writeExport(Data("{\"secret\":\"synthetic-empty-verification\"}".utf8), to: directory.appending(path: "profile.json"))) {
+            XCTAssertEqual($0 as? ProfileTransferError, .exportCleanupFailed)
+        }
+        XCTAssertEqual(operations.truncateAttempts, 1)
+        XCTAssertEqual(operations.removeAttempts, 1)
+        XCTAssertFalse(try containsExportTemporaryFile(in: directory))
+    }
+
     func testPersistentTemporaryUnlinkFailureReturnsCleanupErrorAndLeavesZeroByteOwnerOnlyFile() throws {
         let root = try temporaryDirectory()
         let directory = root.deletingLastPathComponent().appending(path: "PersistentUnlink", directoryHint: .isDirectory)
@@ -1762,8 +1858,11 @@ private final class ControllableExportFileOperations: ProfileExportFileOperating
     var removeFailuresRemaining = 0
     var alwaysFailRemove = false
     var fileCloseFailuresRemaining = 0
+    var failTruncateBeforeEmptyVerification = false
+    var failZeroLengthVerificationAfterTruncate = false
     private(set) var removeAttempts = 0
     private(set) var fileCloseAttempts = 0
+    private(set) var truncateAttempts = 0
     private var temporaryDescriptor: Int32 = -1
 
     func openDirectory(atPath path: String) throws -> Int32 {
@@ -1789,6 +1888,12 @@ private final class ControllableExportFileOperations: ProfileExportFileOperating
     }
 
     func truncateAndVerifyEmpty(_ descriptor: Int32) throws {
+        truncateAttempts += 1
+        if failTruncateBeforeEmptyVerification { throw TemporaryTestError.expected }
+        if failZeroLengthVerificationAfterTruncate {
+            guard Darwin.ftruncate(descriptor, 0) == 0 else { throw TemporaryTestError.expected }
+            throw TemporaryTestError.expected
+        }
         try base.truncateAndVerifyEmpty(descriptor)
     }
 
