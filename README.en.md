@@ -18,7 +18,9 @@ Recovery is disabled unless Target has a validated, Target-owned snapshot. A rec
 
 ## Profiles and configuration
 
-Profiles are stored only in Target's Application Support container. A Profile can hold local JSON and optional remote subscription metadata; this release never fetches or parses subscriptions. The selected Profile, validation result, update timestamp, and valid configuration revisions are retained locally.
+Profiles are stored only in Target's Application Support container. A Profile can hold local JSON and an optional remote configuration URL. Target fetches that URL only when you explicitly start an update; it has no automatic, background, or scheduled updates. The production download path allows only public HTTPS addresses that meet Target's safety policy, enforces time and size limits, and rejects unsafe sources and redirects. When available, conditional requests use `ETag` and `Last-Modified` metadata, including HTTP 304 semantics.
+
+Downloaded content is treated only as UTF-8 JSON sing-box configuration, then must pass JSON validation and `sing-box check`. Target first shows a redacted structural preview; until you confirm, it neither replaces the current valid configuration nor creates a new revision. After confirmation, the configuration is saved as a new valid version in the existing history and can use the usual restore flow. You can cancel an update in progress. Target does not parse provider-specific non-JSON subscription formats, link-aggregation formats, or generic node-subscription formats.
 
 The editor provides JSON syntax highlighting, line numbers, formatting, validation diagnostics, and previous-valid-version restore. Target stores configuration text as raw UTF-8 JSON, so fields unknown to this app remain intact. Each save first runs the official `sing-box check` command against a Target-managed staging file. A failed syntax or sing-box check never replaces the last valid JSON. Diagnostic and engine log handling redacts credentials, URLs, passwords, UUIDs, private keys, and local paths.
 

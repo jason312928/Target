@@ -12,7 +12,9 @@ Target 默认进入宿主安全模式：仅观测本地监听和服务健康状�
 
 ## Profile 与配置
 
-Profile 仅存放在 Target 的 Application Support 容器中。Profile 可保存本地 JSON 和可选的远程订阅元数据；本版本不会联网更新或解析订阅。本地会保留当前选中的 Profile、验证结果、更新时间和有效配置版本。
+Profile 仅存放在 Target 的 Application Support 容器中。Profile 可保存本地 JSON 和可选的远程配置地址。Target 仅在用户明确发起更新时下载该地址；不会自动、后台或定时更新。生产下载路径只接受符合 Target 安全策略的公共 HTTPS 地址，具有超时和响应大小限制，并会拒绝不安全来源或重定向。可用时，条件请求会使用 `ETag`、`Last-Modified` 元数据及 HTTP 304 语义。
+
+下载内容仅按 UTF-8 JSON 的 sing-box 配置处理，随后必须通过 JSON 验证和 `sing-box check`。Target 会先显示脱敏的结构变化预览；用户确认前，既不会替换当前有效配置，也不会创建新版本。确认后，配置会作为新的有效版本写入既有历史，并可使用原有恢复流程。用户可以取消正在进行的更新。Target 不解析服务商专用的非 JSON 订阅格式、链接聚合格式或通用节点订阅格式。
 
 编辑器提供 JSON 语法高亮、行号、格式化、验证诊断及上一有效版本恢复。Target 将配置按原始 UTF-8 JSON 保存，因此不会丢失本 App 不认识的字段。每次保存都先在 Target 管理的临时文件上调用官方 `sing-box check`；JSON 语法或 sing-box 验证失败都不会覆盖上一份有效配置。诊断与内核日志会脱敏认证信息、URL、密码、UUID、私钥和本机路径。
 
