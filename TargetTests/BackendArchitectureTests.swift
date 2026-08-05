@@ -277,14 +277,25 @@ final class BackendArchitectureTests: XCTestCase {
     }
 
     func testBackendStatusDecodingMissingProfileReadinessDefaultsToFalse() throws {
-        let legacyPayload = Data(#"{"serviceInstallation":"enabled","engineState":"stopped","engineInstallation":"installed","restartRequired":false}"#.utf8)
-        let status = try XPCPayloadCodec.decodeStatus(legacyPayload)
+        let status = try XPCPayloadCodec.decodeStatus(statusPayload(removing: "hasSelectedValidProfile"))
 
         XCTAssertEqual(status.serviceInstallation, .enabled)
         XCTAssertEqual(status.engineState, .stopped)
         XCTAssertEqual(status.engineInstallation, .installed)
         XCTAssertFalse(status.restartRequired)
         XCTAssertFalse(status.hasSelectedValidProfile)
+    }
+
+    func testBackendStatusDecodingFalseProfileReadiness() throws {
+        let status = try XPCPayloadCodec.decodeStatus(statusPayload(replacing: "hasSelectedValidProfile", with: false))
+
+        XCTAssertFalse(status.hasSelectedValidProfile)
+    }
+
+    func testBackendStatusDecodingTrueProfileReadiness() throws {
+        let status = try XPCPayloadCodec.decodeStatus(statusPayload(replacing: "hasSelectedValidProfile", with: true))
+
+        XCTAssertTrue(status.hasSelectedValidProfile)
     }
 
     func testBackendStatusDecodingRejectsEmptyPayload() {
@@ -307,8 +318,16 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(removing: "restartRequired")))
     }
 
-    func testBackendStatusDecodingRejectsNonBooleanProfileReadiness() {
-        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(replacing: "hasSelectedValidProfile", with: "\"true\"")))
+    func testBackendStatusDecodingRejectsNullProfileReadiness() {
+        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(replacing: "hasSelectedValidProfile", with: NSNull())))
+    }
+
+    func testBackendStatusDecodingRejectsStringProfileReadiness() {
+        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(replacing: "hasSelectedValidProfile", with: "true")))
+    }
+
+    func testBackendStatusDecodingRejectsNumberProfileReadiness() {
+        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(replacing: "hasSelectedValidProfile", with: 1)))
     }
 
     func testBackendStatusDecodingRejectsUnknownExistingEnumValue() {
@@ -316,7 +335,7 @@ final class BackendArchitectureTests: XCTestCase {
     }
 
     func testBackendStatusDecodingRejectsMalformedOptionalField() {
-        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(replacing: "enginePort", with: "\"invalid\"")))
+        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(replacing: "enginePort", with: "invalid")))
     }
 
     func testServiceRegistrationRejectsDerivedDataBundlePath() {
@@ -334,21 +353,26 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertEqual(stoppedStatus.engineState, .stopped)
     }
 
-    private func statusPayload(removing keyToRemove: String? = nil, replacing keyToReplace: String? = nil, with replacement: String? = nil) -> Data {
-        let fields = [
-            "serviceInstallation": "\"enabled\"",
-            "engineState": "\"stopped\"",
-            "engineInstallation": "\"installed\"",
-            "restartRequired": "false",
-            "hasSelectedValidProfile": "false",
-            "enginePort": "51234"
+    private func statusPayload(
+        removing keyToRemove: String? = nil,
+        replacing keyToReplace: String? = nil,
+        with replacement: Any? = nil
+    ) -> Data {
+        var fields: [String: Any] = [
+            "serviceInstallation": "enabled",
+            "engineState": "stopped",
+            "engineInstallation": "installed",
+            "restartRequired": false,
+            "hasSelectedValidProfile": false,
+            "enginePort": 51_234
         ]
-        let payload = fields.compactMap { key, value -> String? in
-            guard key != keyToRemove else { return nil }
-            let resolvedValue = key == keyToReplace ? replacement! : value
-            return "\"\(key)\":\(resolvedValue)"
-        }.joined(separator: ",")
-        return Data("{\(payload)}".utf8)
+        if let keyToRemove {
+            fields.removeValue(forKey: keyToRemove)
+        }
+        if let keyToReplace, let replacement {
+            fields[keyToReplace] = replacement
+        }
+        return try! JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])
     }
 
     func testMockBackendReportsServiceNotInstalled() async throws {
