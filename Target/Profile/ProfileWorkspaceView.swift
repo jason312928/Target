@@ -4,10 +4,15 @@ import UniformTypeIdentifiers
 
 struct ProfileWorkspaceView: View {
     var lifecycle: BackendLifecycleModel? = nil
-    @State private var model = ProfileViewModel()
+    @Bindable var model: ProfileViewModel
     @State private var sheet: ProfileSheet?
     @State private var isImporting = false
     @State private var showDeleteConfirmation = false
+
+    init(lifecycle: BackendLifecycleModel?, model: ProfileViewModel) {
+        self.lifecycle = lifecycle
+        self.model = model
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -24,7 +29,7 @@ struct ProfileWorkspaceView: View {
                 }
             }
             .listStyle(.sidebar)
-            .navigationTitle("profile.title")
+            .navigationTitle("profile.list.title")
             .toolbar {
                 ToolbarItemGroup {
                     Button("profile.action.create", systemImage: "plus") { sheet = .create }
@@ -299,9 +304,25 @@ private struct ProfileRow: View {
 
 private struct ValidationBadge: View {
     let validation: ProfileValidation
+
     var body: some View {
-        let key: LocalizedStringKey = validation.status == .valid ? "profile.validation.valid" : validation.status == .invalid ? "profile.validation.invalid" : "profile.validation.not-checked"
-        Text(key).font(.caption).padding(.horizontal, 8).padding(.vertical, 4).background(.quaternary, in: Capsule())
+        TargetStatusBadge(level: statusLevel, titleKey: titleKey)
+    }
+
+    private var titleKey: String {
+        switch validation.status {
+        case .valid: "profile.validation.valid"
+        case .invalid: "profile.validation.invalid"
+        case .notChecked: "profile.validation.not-checked"
+        }
+    }
+
+    private var statusLevel: TargetStatusLevel {
+        switch validation.status {
+        case .valid: .positive
+        case .invalid: .critical
+        case .notChecked: .neutral
+        }
     }
 }
 

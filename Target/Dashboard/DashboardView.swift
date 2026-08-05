@@ -2,6 +2,15 @@ import SwiftUI
 
 struct DashboardView: View {
     @Bindable var lifecycle: BackendLifecycleModel
+    let onRoute: (DashboardRouteIntent) -> Void
+
+    init(
+        lifecycle: BackendLifecycleModel,
+        onRoute: @escaping (DashboardRouteIntent) -> Void = { _ in }
+    ) {
+        self.lifecycle = lifecycle
+        self.onRoute = onRoute
+    }
 
     private var presentation: DashboardPresentation {
         DashboardPresentation(
@@ -19,23 +28,35 @@ struct DashboardView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                Text("dashboard.title")
+                    .font(.largeTitle.weight(.semibold))
+                Text("dashboard.subtitle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                 statusCard
                 if let errorKey = presentation.backendErrorKey {
-                    DashboardNotice(level: .critical, messageKey: errorKey)
+                    TargetNotice(level: .critical, messageKey: errorKey)
                 }
                 if presentation.showsRestartNotice {
-                    DashboardNotice(level: .warning, messageKey: "engine.restart.required")
+                    TargetNotice(level: .warning, messageKey: "engine.restart.required")
                 }
-                HStack(alignment: .top, spacing: 20) {
-                    runtimeCard
-                    serviceCard
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 20) {
+                        runtimeCard
+                        serviceCard
+                    }
+                    VStack(alignment: .leading, spacing: 20) {
+                        runtimeCard
+                        serviceCard
+                    }
                 }
                 safetyCard
             }
             .frame(maxWidth: 900, alignment: .leading)
             .padding(24)
         }
-        .frame(minWidth: 620, minHeight: 460)
+        .frame(minWidth: 500, minHeight: 460)
+        .navigationTitle("dashboard.title")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button("service.action.refresh", systemImage: "arrow.clockwise") { lifecycle.refresh() }
@@ -44,13 +65,12 @@ struct DashboardView: View {
                     .accessibilityHint(Text("dashboard.refresh.hint"))
             }
         }
-        .onAppear { lifecycle.refresh() }
     }
 
     private var statusCard: some View {
-        DashboardCard {
+        TargetCard {
             VStack(alignment: .leading, spacing: 14) {
-                DashboardStatusBadge(level: presentation.statusLevel, titleKey: presentation.titleKey)
+                TargetStatusBadge(level: presentation.statusLevel, titleKey: presentation.titleKey)
                 Text(LocalizedStringKey(presentation.descriptionKey))
                     .font(.title2)
                     .fixedSize(horizontal: false, vertical: true)
@@ -92,10 +112,13 @@ struct DashboardView: View {
                 .disabled(!lifecycle.canRestart)
                 .accessibilityHint(Text("dashboard.action.restart.hint"))
         case .profileRequired:
-            Button { } label: { Text(LocalizedStringKey(presentation.primaryAction.titleKey)) }
+            Button("dashboard.action.open-profiles") {
+                if let route = DashboardActionRouter.route(for: presentation.primaryAction) {
+                    onRoute(route)
+                }
+            }
                 .buttonStyle(.borderedProminent)
-                .disabled(true)
-                .accessibilityHint(Text("dashboard.action.profile-required.hint"))
+                .accessibilityHint(Text("dashboard.action.open-profiles.hint"))
         case .unavailable:
             Button { } label: { Text(LocalizedStringKey(presentation.primaryAction.titleKey)) }
                 .disabled(true)
@@ -104,30 +127,30 @@ struct DashboardView: View {
     }
 
     private var runtimeCard: some View {
-        DashboardCard {
+        TargetCard {
             VStack(alignment: .leading, spacing: 12) {
                 Label("dashboard.section.runtime", systemImage: "bolt")
                     .font(.headline)
-                DashboardStatusRow(labelKey: "engine.label.installation", valueKey: presentation.engineInstallationKey, value: nil)
-                DashboardStatusRow(labelKey: "engine.label.version", valueKey: nil, value: presentation.engineVersion)
-                DashboardStatusRow(labelKey: "backend.label.engine", valueKey: presentation.engineStateKey, value: nil)
-                DashboardStatusRow(labelKey: "dashboard.label.endpoint", valueKey: nil, value: presentation.endpoint)
-                DashboardStatusRow(labelKey: "dashboard.label.revision", valueKey: nil, value: presentation.runningRevision.map(String.init))
+                TargetStatusRow(labelKey: "engine.label.installation", valueKey: presentation.engineInstallationKey, value: nil)
+                TargetStatusRow(labelKey: "engine.label.version", valueKey: nil, value: presentation.engineVersion)
+                TargetStatusRow(labelKey: "backend.label.engine", valueKey: presentation.engineStateKey, value: nil)
+                TargetStatusRow(labelKey: "dashboard.label.endpoint", valueKey: nil, value: presentation.endpoint)
+                TargetStatusRow(labelKey: "dashboard.label.revision", valueKey: nil, value: presentation.runningRevision.map(String.init))
                 Button("engine.action.validate") { lifecycle.validateConfiguration() }
                     .disabled(lifecycle.isBusy || lifecycle.status.engineInstallation != .installed)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity)
+        .frame(minWidth: 280, maxWidth: .infinity)
     }
 
     private var serviceCard: some View {
-        DashboardCard {
+        TargetCard {
             VStack(alignment: .leading, spacing: 12) {
                 Label("dashboard.section.service", systemImage: "shield")
                     .font(.headline)
-                DashboardStatusRow(labelKey: "backend.label.service", valueKey: presentation.serviceInstallationKey, value: nil)
-                DashboardStatusRow(labelKey: "xpc.label.status", valueKey: presentation.xpcStateKey, value: nil)
+                TargetStatusRow(labelKey: "backend.label.service", valueKey: presentation.serviceInstallationKey, value: nil)
+                TargetStatusRow(labelKey: "xpc.label.status", valueKey: presentation.xpcStateKey, value: nil)
                 HStack {
                     Button("service.action.install") { lifecycle.installService() }
                         .disabled(!lifecycle.canManageService || lifecycle.serviceInstallation == .enabled)
@@ -137,21 +160,21 @@ struct DashboardView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity)
+        .frame(minWidth: 280, maxWidth: .infinity)
     }
 
     private var safetyCard: some View {
-        DashboardCard {
+        TargetCard {
             VStack(alignment: .leading, spacing: 12) {
                 Label("dashboard.section.network", systemImage: "lock")
                     .font(.headline)
                 if presentation.isHostSafeMode {
-                    DashboardNotice(level: .warning, messageKey: "host-safety.status.safe")
+                    TargetNotice(level: .warning, messageKey: "host-safety.status.safe")
                 }
-                DashboardStatusRow(labelKey: "system-proxy.label.status", valueKey: presentation.systemProxyStateKey, value: nil)
-                DashboardStatusRow(labelKey: "system-proxy.label.engine", valueKey: presentation.systemProxyEngineKey, value: nil)
+                TargetStatusRow(labelKey: "system-proxy.label.status", valueKey: presentation.systemProxyStateKey, value: nil)
+                TargetStatusRow(labelKey: "system-proxy.label.engine", valueKey: presentation.systemProxyEngineKey, value: nil)
                 if let errorKey = presentation.systemProxyErrorKey {
-                    DashboardNotice(level: .critical, messageKey: errorKey)
+                    TargetNotice(level: .critical, messageKey: errorKey)
                 }
                 HStack {
                     Toggle("system-proxy.action.toggle", isOn: Binding(

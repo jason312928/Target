@@ -1,12 +1,5 @@
 import Foundation
 
-enum DashboardStatusLevel: Equatable {
-    case neutral
-    case positive
-    case warning
-    case critical
-}
-
 enum DashboardPrimaryAction: Equatable {
     case installEngine
     case start
@@ -28,7 +21,7 @@ enum DashboardPrimaryAction: Equatable {
 }
 
 struct DashboardPresentation: Equatable {
-    let statusLevel: DashboardStatusLevel
+    let statusLevel: TargetStatusLevel
     let titleKey: String
     let descriptionKey: String
     let primaryAction: DashboardPrimaryAction
