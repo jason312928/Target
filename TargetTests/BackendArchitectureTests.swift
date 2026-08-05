@@ -277,10 +277,46 @@ final class BackendArchitectureTests: XCTestCase {
     }
 
     func testBackendStatusDecodingMissingProfileReadinessDefaultsToFalse() throws {
-        let legacyPayload = Data(#"{"serviceInstallation":"enabled","engineState":"stopped","engineInstallation":"installed"}"#.utf8)
+        let legacyPayload = Data(#"{"serviceInstallation":"enabled","engineState":"stopped","engineInstallation":"installed","restartRequired":false}"#.utf8)
         let status = try XPCPayloadCodec.decodeStatus(legacyPayload)
 
+        XCTAssertEqual(status.serviceInstallation, .enabled)
+        XCTAssertEqual(status.engineState, .stopped)
+        XCTAssertEqual(status.engineInstallation, .installed)
+        XCTAssertFalse(status.restartRequired)
         XCTAssertFalse(status.hasSelectedValidProfile)
+    }
+
+    func testBackendStatusDecodingRejectsEmptyPayload() {
+        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(Data("{}".utf8)))
+    }
+
+    func testBackendStatusDecodingRejectsMissingServiceInstallation() {
+        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(removing: "serviceInstallation")))
+    }
+
+    func testBackendStatusDecodingRejectsMissingEngineState() {
+        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(removing: "engineState")))
+    }
+
+    func testBackendStatusDecodingRejectsMissingEngineInstallation() {
+        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(removing: "engineInstallation")))
+    }
+
+    func testBackendStatusDecodingRejectsMissingRestartRequired() {
+        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(removing: "restartRequired")))
+    }
+
+    func testBackendStatusDecodingRejectsNonBooleanProfileReadiness() {
+        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(replacing: "hasSelectedValidProfile", with: "\"true\"")))
+    }
+
+    func testBackendStatusDecodingRejectsUnknownExistingEnumValue() {
+        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(replacing: "engineState", with: "unknown")))
+    }
+
+    func testBackendStatusDecodingRejectsMalformedOptionalField() {
+        XCTAssertThrowsError(try XPCPayloadCodec.decodeStatus(statusPayload(replacing: "enginePort", with: "\"invalid\"")))
     }
 
     func testServiceRegistrationRejectsDerivedDataBundlePath() {
@@ -296,6 +332,23 @@ final class BackendArchitectureTests: XCTestCase {
 
         let stoppedStatus = try await backend.stopEngine()
         XCTAssertEqual(stoppedStatus.engineState, .stopped)
+    }
+
+    private func statusPayload(removing keyToRemove: String? = nil, replacing keyToReplace: String? = nil, with replacement: String? = nil) -> Data {
+        let fields = [
+            "serviceInstallation": "\"enabled\"",
+            "engineState": "\"stopped\"",
+            "engineInstallation": "\"installed\"",
+            "restartRequired": "false",
+            "hasSelectedValidProfile": "false",
+            "enginePort": "51234"
+        ]
+        let payload = fields.compactMap { key, value -> String? in
+            guard key != keyToRemove else { return nil }
+            let resolvedValue = key == keyToReplace ? replacement! : value
+            return "\"\(key)\":\(resolvedValue)"
+        }.joined(separator: ",")
+        return Data("{\(payload)}".utf8)
     }
 
     func testMockBackendReportsServiceNotInstalled() async throws {

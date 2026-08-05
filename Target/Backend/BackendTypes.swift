@@ -117,15 +117,15 @@ struct BackendStatus: Codable, Equatable, Sendable {
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
-            serviceInstallation: try container.decodeIfPresent(ServiceInstallationState.self, forKey: .serviceInstallation) ?? .notRegistered,
-            engineState: try container.decodeIfPresent(EngineState.self, forKey: .engineState) ?? .stopped,
-            engineInstallation: try container.decodeIfPresent(EngineInstallationState.self, forKey: .engineInstallation) ?? .notInstalled,
+            serviceInstallation: try container.decode(ServiceInstallationState.self, forKey: .serviceInstallation),
+            engineState: try container.decode(EngineState.self, forKey: .engineState),
+            engineInstallation: try container.decode(EngineInstallationState.self, forKey: .engineInstallation),
             hasSelectedValidProfile: try container.decodeIfPresent(Bool.self, forKey: .hasSelectedValidProfile) ?? false,
             engineVersion: try container.decodeIfPresent(String.self, forKey: .engineVersion),
             enginePort: try container.decodeIfPresent(Int.self, forKey: .enginePort),
             runningProfileID: try container.decodeIfPresent(UUID.self, forKey: .runningProfileID),
             runningProfileRevision: try container.decodeIfPresent(Int.self, forKey: .runningProfileRevision),
-            restartRequired: try container.decodeIfPresent(Bool.self, forKey: .restartRequired) ?? false
+            restartRequired: try container.decode(Bool.self, forKey: .restartRequired)
         )
     }
 
