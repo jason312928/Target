@@ -18,6 +18,7 @@ enum ProfileTransferError: LocalizedError, Equatable {
     case importValidationFailed
     case unsafeExportDestination
     case exportFailed
+    case exportCleanupFailed
 
     var errorDescription: String? {
         switch self {
@@ -25,7 +26,7 @@ enum ProfileTransferError: LocalizedError, Equatable {
         case .importTooLarge: "The selected file is too large to import."
         case .importInvalidUTF8, .importInvalidJSON, .importValidationFailed:
             "The selected configuration could not be validated."
-        case .unsafeExportDestination, .exportFailed:
+        case .unsafeExportDestination, .exportFailed, .exportCleanupFailed:
             "The configuration could not be exported safely."
         }
     }
@@ -69,6 +70,7 @@ protocol ProfileExportFileOperating {
     func write(_ data: Data, to descriptor: Int32) throws
     func setOwnerOnlyPermissions(on descriptor: Int32) throws
     func verifyOwnerOnlyRegularFile(_ descriptor: Int32) throws
+    func truncateAndVerifyEmpty(_ descriptor: Int32) throws
     func synchronize(_ descriptor: Int32) throws
     func destinationKind(named name: String, in directoryDescriptor: Int32) throws -> ProfileExportDestinationKind
     func rename(_ sourceName: String, to destinationName: String, in directoryDescriptor: Int32) throws
@@ -124,8 +126,21 @@ struct ProfileExportFileOperations: ProfileExportFileOperating {
         }
     }
 
+    func truncateAndVerifyEmpty(_ descriptor: Int32) throws {
+        while Darwin.ftruncate(descriptor, 0) != 0 {
+            guard errno == EINTR else { throw ProfileTransferError.exportCleanupFailed }
+        }
+        var metadata = stat()
+        while Darwin.fstat(descriptor, &metadata) != 0 {
+            guard errno == EINTR else { throw ProfileTransferError.exportCleanupFailed }
+        }
+        guard metadata.st_size == 0 else { throw ProfileTransferError.exportCleanupFailed }
+    }
+
     func synchronize(_ descriptor: Int32) throws {
-        guard Darwin.fsync(descriptor) == 0 else { throw ProfileTransferError.exportFailed }
+        while Darwin.fsync(descriptor) != 0 {
+            guard errno == EINTR else { throw ProfileTransferError.exportFailed }
+        }
     }
 
     func destinationKind(named name: String, in directoryDescriptor: Int32) throws -> ProfileExportDestinationKind {
@@ -144,13 +159,18 @@ struct ProfileExportFileOperations: ProfileExportFileOperating {
     }
 
     func remove(named name: String, in directoryDescriptor: Int32) throws {
-        guard Darwin.unlinkat(directoryDescriptor, name, 0) == 0 || errno == ENOENT else {
-            throw ProfileTransferError.exportFailed
+        while Darwin.unlinkat(directoryDescriptor, name, 0) != 0 {
+            guard errno == EINTR else {
+                if errno == ENOENT { return }
+                throw ProfileTransferError.exportCleanupFailed
+            }
         }
     }
 
     func close(_ descriptor: Int32) throws {
-        guard Darwin.close(descriptor) == 0 else { throw ProfileTransferError.exportFailed }
+        while Darwin.close(descriptor) != 0 {
+            guard errno == EINTR else { throw ProfileTransferError.exportCleanupFailed }
+        }
     }
 }
 
@@ -204,34 +224,117 @@ final class ProfileTransferService {
         guard !destinationName.isEmpty, destinationName != ".", destinationName != ".." else {
             throw ProfileTransferError.unsafeExportDestination
         }
-        let directoryDescriptor = try exportFileOperations.openDirectory(atPath: directory.path)
-        defer { try? exportFileOperations.close(directoryDescriptor) }
-        try checkExportFault(.exportAfterDirectoryOpen)
-
+        var directoryDescriptor = try exportFileOperations.openDirectory(atPath: directory.path)
         let temporaryName = ".target-profile-export-\(UUID().uuidString)"
-        var fileDescriptor = try exportFileOperations.createExclusiveFile(named: temporaryName, in: directoryDescriptor)
-        var temporaryExists = true
-        defer {
-            if fileDescriptor >= 0 { try? exportFileOperations.close(fileDescriptor) }
-            if temporaryExists { try? exportFileOperations.remove(named: temporaryName, in: directoryDescriptor) }
+        var fileDescriptor: Int32 = -1
+        var temporaryExists = false
+        var renamed = false
+
+        do {
+            try checkExportFault(.exportAfterDirectoryOpen)
+            fileDescriptor = try exportFileOperations.createExclusiveFile(named: temporaryName, in: directoryDescriptor)
+            temporaryExists = true
+            try exportFileOperations.setOwnerOnlyPermissions(on: fileDescriptor)
+            try exportFileOperations.verifyOwnerOnlyRegularFile(fileDescriptor)
+            try checkExportFault(.exportAfterTemporaryCreate)
+            try exportFileOperations.write(data, to: fileDescriptor)
+            try checkExportFault(.exportAfterWrite)
+            try checkExportFault(.exportAfterPermissionValidation)
+            try exportFileOperations.synchronize(fileDescriptor)
+            try checkExportFault(.exportAfterFileSync)
+            try checkExportFault(.exportBeforeCommit)
+            guard try exportFileOperations.destinationKind(named: destinationName, in: directoryDescriptor) != .unsafe else {
+                throw ProfileTransferError.unsafeExportDestination
+            }
+            try exportFileOperations.rename(temporaryName, to: destinationName, in: directoryDescriptor)
+            temporaryExists = false
+            renamed = true
+            try exportFileOperations.synchronize(directoryDescriptor)
+            try exportFileOperations.close(fileDescriptor)
+            fileDescriptor = -1
+            try exportFileOperations.close(directoryDescriptor)
+            directoryDescriptor = -1
+        } catch {
+            let originalError = normalizedExportError(error)
+            var cleanupFailed = false
+            if !renamed, temporaryExists {
+                do {
+                    try cleanFailedExport(
+                        temporaryName: temporaryName,
+                        fileDescriptor: &fileDescriptor,
+                        directoryDescriptor: directoryDescriptor
+                    )
+                    temporaryExists = false
+                } catch {
+                    cleanupFailed = true
+                }
+            } else if fileDescriptor >= 0 {
+                do { try closeWithRetry(&fileDescriptor) }
+                catch { cleanupFailed = true }
+            }
+            if directoryDescriptor >= 0 {
+                do { try closeWithRetry(&directoryDescriptor) }
+                catch { cleanupFailed = true }
+            }
+            if cleanupFailed { throw ProfileTransferError.exportCleanupFailed }
+            throw originalError
         }
-        try checkExportFault(.exportAfterTemporaryCreate)
-        try exportFileOperations.write(data, to: fileDescriptor)
-        try checkExportFault(.exportAfterWrite)
-        try exportFileOperations.setOwnerOnlyPermissions(on: fileDescriptor)
-        try exportFileOperations.verifyOwnerOnlyRegularFile(fileDescriptor)
-        try checkExportFault(.exportAfterPermissionValidation)
-        try exportFileOperations.synchronize(fileDescriptor)
-        try checkExportFault(.exportAfterFileSync)
-        try exportFileOperations.close(fileDescriptor)
-        fileDescriptor = -1
-        try checkExportFault(.exportBeforeCommit)
-        guard try exportFileOperations.destinationKind(named: destinationName, in: directoryDescriptor) != .unsafe else {
-            throw ProfileTransferError.unsafeExportDestination
+    }
+
+    private func cleanFailedExport(
+        temporaryName: String,
+        fileDescriptor: inout Int32,
+        directoryDescriptor: Int32
+    ) throws {
+        var preparationError: Error?
+        var didVerifyTruncation = fileDescriptor < 0
+        if fileDescriptor >= 0 {
+            do {
+                try exportFileOperations.truncateAndVerifyEmpty(fileDescriptor)
+                didVerifyTruncation = true
+                try exportFileOperations.setOwnerOnlyPermissions(on: fileDescriptor)
+                try exportFileOperations.verifyOwnerOnlyRegularFile(fileDescriptor)
+                try exportFileOperations.synchronize(fileDescriptor)
+            } catch {
+                preparationError = error
+            }
+            do { try closeWithRetry(&fileDescriptor) }
+            catch {
+                throw ProfileTransferError.exportCleanupFailed
+            }
         }
-        try exportFileOperations.rename(temporaryName, to: destinationName, in: directoryDescriptor)
-        temporaryExists = false
-        try exportFileOperations.synchronize(directoryDescriptor)
+        guard didVerifyTruncation else { throw ProfileTransferError.exportCleanupFailed }
+        var lastError: Error?
+        var removed = false
+        for _ in 0..<3 {
+            do {
+                try exportFileOperations.remove(named: temporaryName, in: directoryDescriptor)
+                removed = true
+                break
+            } catch {
+                lastError = error
+            }
+        }
+        guard removed else { throw lastError ?? ProfileTransferError.exportCleanupFailed }
+        if preparationError != nil { throw ProfileTransferError.exportCleanupFailed }
+    }
+
+    private func closeWithRetry(_ descriptor: inout Int32) throws {
+        var lastError: Error?
+        for _ in 0..<3 {
+            do {
+                try exportFileOperations.close(descriptor)
+                descriptor = -1
+                return
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? ProfileTransferError.exportCleanupFailed
+    }
+
+    private func normalizedExportError(_ error: Error) -> ProfileTransferError {
+        error as? ProfileTransferError ?? .exportFailed
     }
 
     static func defaultExportFileName(for profileName: String) -> String {

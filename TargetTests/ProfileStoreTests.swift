@@ -1006,6 +1006,97 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertFalse(importTransactionContainerExists(for: root))
     }
 
+    func testRollbackAuthenticatedCleanupDoesNotRequireDeletedManifestEnvelopeOnRestart() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let operations = ControllableImportFileOperations(profileRoot: root)
+        let originalStore = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        let existing = try originalStore.create(name: "Existing")
+        let originalBytes = Data("{ \"preserved\" : true }\n".utf8)
+        try originalStore.save(json: String(decoding: originalBytes, as: UTF8.self), for: existing.id)
+        try originalStore.select(nil)
+        let liveSnapshot = try treeSnapshot(root)
+        let interrupted = ProfileStore(
+            rootDirectory: root,
+            checker: TestChecker(result: .success(())),
+            keyProvider: keys,
+            transferFaults: ActionTransferFaults { point in
+                if point == .importAfterSelectionCommit { throw ProfileImportInterruption.simulated }
+            },
+            importFileOperations: operations
+        )
+        let candidate = try ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(())))
+            .prepareImport(data: Data("{\"imported\":true}".utf8), suggestedName: "Imported")
+        XCTAssertThrowsError(try interrupted.importCandidate(candidate, name: "Imported"))
+
+        operations.failingRemoveName = "selection.envelope"
+        let firstRecovery = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, importFileOperations: operations)
+        XCTAssertThrowsError(try firstRecovery.listProfiles()) {
+            XCTAssertEqual($0 as? ProfileStoreError, .profileImportRecoveryFailed)
+        }
+        let transaction = try XCTUnwrap(importTransactionDirectories(for: root).first)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: transaction.appending(path: "manifest.envelope").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: transaction.appending(path: "selection.envelope").path))
+        XCTAssertEqual(try importJournalStage(in: transaction), "rollbackAuthenticated")
+        XCTAssertEqual(try treeSnapshot(root), liveSnapshot)
+
+        let repeatedRecovery = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, importFileOperations: operations)
+        XCTAssertThrowsError(try repeatedRecovery.listProfiles())
+        XCTAssertEqual(try treeSnapshot(root), liveSnapshot)
+        operations.failingRemoveName = nil
+
+        let recovered = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, importFileOperations: operations)
+        XCTAssertEqual(try recovered.listProfiles().map(\.id), [existing.id])
+        XCTAssertNil(try recovered.selectedProfileID())
+        XCTAssertEqual(try recovered.validVersion(for: existing.id, revision: 2).data, originalBytes)
+        XCTAssertEqual(try treeSnapshot(root), liveSnapshot)
+        XCTAssertFalse(importTransactionContainerExists(for: root))
+    }
+
+    func testRollbackAuthenticatedJournalWriteFailurePreservesBothEnvelopesForRetry() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let operations = ControllableImportFileOperations(profileRoot: root)
+        let originalStore = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        let existing = try originalStore.create(name: "Existing")
+        let liveSnapshot = try treeSnapshot(root)
+        let interrupted = ProfileStore(
+            rootDirectory: root,
+            checker: TestChecker(result: .success(())),
+            keyProvider: keys,
+            transferFaults: ActionTransferFaults { point in
+                if point == .importAfterManifestCommit { throw ProfileImportInterruption.simulated }
+            },
+            importFileOperations: operations
+        )
+        let candidate = try ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(())))
+            .prepareImport(data: Data("{\"imported\":true}".utf8), suggestedName: "Imported")
+        XCTAssertThrowsError(try interrupted.importCandidate(candidate, name: "Imported"))
+
+        operations.failingWriteName = "journal.json"
+        let failedRecovery = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, importFileOperations: operations)
+        XCTAssertThrowsError(try failedRecovery.listProfiles())
+        let transaction = try XCTUnwrap(importTransactionDirectories(for: root).first)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: transaction.appending(path: "manifest.envelope").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: transaction.appending(path: "selection.envelope").path))
+        XCTAssertNotEqual(try importJournalStage(in: transaction), "rollbackAuthenticated")
+        XCTAssertEqual(try treeSnapshot(root), liveSnapshot)
+
+        operations.failingWriteName = nil
+        let recovered = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, importFileOperations: operations)
+        XCTAssertEqual(try recovered.listProfiles().map(\.id), [existing.id])
+        XCTAssertEqual(try treeSnapshot(root), liveSnapshot)
+        XCTAssertFalse(importTransactionContainerExists(for: root))
+    }
+
+    func testRollbackAuthenticatedCleanupRetriesAfterJournalRemovalFailure() throws {
+        try assertRollbackCleanupRecoversAfterRemovalFailure(named: "journal.json")
+    }
+
+    func testRollbackAuthenticatedCleanupRetriesAfterTransactionDirectoryRemovalFailure() throws {
+        try assertRollbackCleanupRecoversAfterRemovalFailure(named: nil)
+    }
+
     func testConfirmedImportCanExportIdenticalInputBytesWithoutResidue() throws {
         let root = try temporaryDirectory()
         let keys = TestProfileKeyProvider()
@@ -1155,6 +1246,74 @@ final class ProfileStoreTests: XCTestCase {
         }
     }
 
+    func testPreRenameFailureRetriesTemporaryUnlinkAndLeavesNoPlaintextFile() throws {
+        let root = try temporaryDirectory()
+        let directory = root.deletingLastPathComponent().appending(path: "RetryUnlink", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let operations = ControllableExportFileOperations()
+        operations.removeFailuresRemaining = 1
+        let service = ProfileTransferService(
+            profileRoot: root,
+            checker: TestChecker(result: .success(())),
+            faults: TestTransferFaults(points: [.exportAfterWrite]),
+            exportFileOperations: operations
+        )
+
+        XCTAssertThrowsError(try service.writeExport(Data("plaintext-profile-json".utf8), to: directory.appending(path: "profile.json"))) {
+            XCTAssertEqual($0 as? ProfileTransferError, .exportFailed)
+        }
+        XCTAssertEqual(operations.removeAttempts, 2)
+        XCTAssertFalse(try containsExportTemporaryFile(in: directory))
+    }
+
+    func testPersistentTemporaryUnlinkFailureReturnsCleanupErrorAndLeavesZeroByteOwnerOnlyFile() throws {
+        let root = try temporaryDirectory()
+        let directory = root.deletingLastPathComponent().appending(path: "PersistentUnlink", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let operations = ControllableExportFileOperations()
+        operations.alwaysFailRemove = true
+        let plaintext = Data("{\"secret\":\"synthetic\"}".utf8)
+        let service = ProfileTransferService(
+            profileRoot: root,
+            checker: TestChecker(result: .success(())),
+            faults: TestTransferFaults(points: [.exportAfterWrite]),
+            exportFileOperations: operations
+        )
+
+        XCTAssertThrowsError(try service.writeExport(plaintext, to: directory.appending(path: "profile.json"))) {
+            XCTAssertEqual($0 as? ProfileTransferError, .exportCleanupFailed)
+        }
+        XCTAssertEqual(operations.removeAttempts, 3)
+        let temporary = try XCTUnwrap(try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).first {
+            $0.lastPathComponent.hasPrefix(".target-profile-export-")
+        })
+        let residual = try Data(contentsOf: temporary)
+        XCTAssertEqual(residual.count, 0)
+        XCTAssertNil(residual.range(of: plaintext))
+        let permissions = (try FileManager.default.attributesOfItem(atPath: temporary.path)[.posixPermissions] as? NSNumber)?.intValue
+        XCTAssertEqual((permissions ?? 0) & 0o777, 0o600)
+    }
+
+    func testPreRenameCleanupRetriesTemporaryDescriptorCloseFailure() throws {
+        let root = try temporaryDirectory()
+        let directory = root.deletingLastPathComponent().appending(path: "RetryClose", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let operations = ControllableExportFileOperations()
+        operations.fileCloseFailuresRemaining = 1
+        let service = ProfileTransferService(
+            profileRoot: root,
+            checker: TestChecker(result: .success(())),
+            faults: TestTransferFaults(points: [.exportAfterWrite]),
+            exportFileOperations: operations
+        )
+
+        XCTAssertThrowsError(try service.writeExport(Data("plaintext-profile-json".utf8), to: directory.appending(path: "profile.json"))) {
+            XCTAssertEqual($0 as? ProfileTransferError, .exportFailed)
+        }
+        XCTAssertEqual(operations.fileCloseAttempts, 2)
+        XCTAssertFalse(try containsExportTemporaryFile(in: directory))
+    }
+
     func testExportPerformsNoTargetOperationAfterDescriptorRelativeRename() throws {
         let root = try temporaryDirectory()
         let directory = root.deletingLastPathComponent().appending(path: "RecordedExport", directoryHint: .isDirectory)
@@ -1170,7 +1329,7 @@ final class ProfileStoreTests: XCTestCase {
         guard let renameIndex = operations.events.lastIndex(of: .rename) else {
             return XCTFail("Expected descriptor-relative rename")
         }
-        XCTAssertEqual(Array(operations.events.suffix(from: operations.events.index(after: renameIndex))), [.synchronize, .close])
+        XCTAssertEqual(Array(operations.events.suffix(from: operations.events.index(after: renameIndex))), [.synchronize, .close, .close])
         XCTAssertFalse(try containsExportTemporaryFile(in: directory))
     }
 
@@ -1247,6 +1406,55 @@ final class ProfileStoreTests: XCTestCase {
     private func importJournalExists(for profileRoot: URL) -> Bool {
         guard let enumerator = FileManager.default.enumerator(at: importTransactionRoot(for: profileRoot), includingPropertiesForKeys: nil) else { return false }
         return enumerator.compactMap { ($0 as? URL)?.lastPathComponent }.contains("journal.json")
+    }
+
+    private func importTransactionDirectories(for profileRoot: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: importTransactionRoot(for: profileRoot), includingPropertiesForKeys: nil)
+    }
+
+    private func importJournalStage(in transaction: URL) throws -> String {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: transaction.appending(path: "journal.json"))) as? [String: Any])
+        return try XCTUnwrap(object["stage"] as? String)
+    }
+
+    private func assertRollbackCleanupRecoversAfterRemovalFailure(named failureName: String?) throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let operations = ControllableImportFileOperations(profileRoot: root)
+        let originalStore = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        let existing = try originalStore.create(name: "Existing")
+        let liveSnapshot = try treeSnapshot(root)
+        let interrupted = ProfileStore(
+            rootDirectory: root,
+            checker: TestChecker(result: .success(())),
+            keyProvider: keys,
+            transferFaults: ActionTransferFaults { point in
+                if point == .importAfterDirectoryMove { throw ProfileImportInterruption.simulated }
+            },
+            importFileOperations: operations
+        )
+        let candidate = try ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(())))
+            .prepareImport(data: Data("{\"imported\":true}".utf8), suggestedName: "Imported")
+        XCTAssertThrowsError(try interrupted.importCandidate(candidate, name: "Imported"))
+        let transaction = try XCTUnwrap(importTransactionDirectories(for: root).first)
+        if let failureName {
+            operations.failingRemoveName = failureName
+        } else {
+            operations.failingRemoveURL = transaction
+        }
+
+        let failedRecovery = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, importFileOperations: operations)
+        XCTAssertThrowsError(try failedRecovery.listProfiles())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: transaction.appending(path: "manifest.envelope").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: transaction.appending(path: "selection.envelope").path))
+        XCTAssertEqual(try treeSnapshot(root), liveSnapshot)
+
+        operations.failingRemoveName = nil
+        operations.failingRemoveURL = nil
+        let recovered = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, importFileOperations: operations)
+        XCTAssertEqual(try recovered.listProfiles().map(\.id), [existing.id])
+        XCTAssertEqual(try treeSnapshot(root), liveSnapshot)
+        XCTAssertFalse(importTransactionContainerExists(for: root))
     }
 
     private func containsExportTemporaryFile(in directory: URL) throws -> Bool {
@@ -1459,6 +1667,7 @@ private final class ControllableImportFileOperations: ProfileImportFileOperating
     private let profileRoot: URL
     var failingWriteName: String?
     var failingRemoveName: String?
+    var failingRemoveURL: URL?
     var failProfileDirectoryRemoval = false
 
     init(profileRoot: URL) { self.profileRoot = profileRoot.standardizedFileURL }
@@ -1471,6 +1680,7 @@ private final class ControllableImportFileOperations: ProfileImportFileOperating
     }
     func moveItem(at source: URL, to destination: URL) throws { try base.moveItem(at: source, to: destination) }
     func removeItem(at url: URL) throws {
+        if url.standardizedFileURL == failingRemoveURL?.standardizedFileURL { throw TemporaryTestError.expected }
         if url.lastPathComponent == failingRemoveName { throw TemporaryTestError.expected }
         if failProfileDirectoryRemoval,
            url.deletingLastPathComponent().standardizedFileURL == profileRoot,
@@ -1490,6 +1700,7 @@ private final class RecordingExportFileOperations: ProfileExportFileOperating {
         case write
         case setPermissions
         case verify
+        case truncate
         case synchronize
         case destinationInspection
         case rename
@@ -1520,6 +1731,10 @@ private final class RecordingExportFileOperations: ProfileExportFileOperating {
         events.append(.verify)
         try base.verifyOwnerOnlyRegularFile(descriptor)
     }
+    func truncateAndVerifyEmpty(_ descriptor: Int32) throws {
+        events.append(.truncate)
+        try base.truncateAndVerifyEmpty(descriptor)
+    }
     func synchronize(_ descriptor: Int32) throws {
         events.append(.synchronize)
         try base.synchronize(descriptor)
@@ -1538,6 +1753,76 @@ private final class RecordingExportFileOperations: ProfileExportFileOperating {
     }
     func close(_ descriptor: Int32) throws {
         events.append(.close)
+        try base.close(descriptor)
+    }
+}
+
+private final class ControllableExportFileOperations: ProfileExportFileOperating {
+    private let base = ProfileExportFileOperations()
+    var removeFailuresRemaining = 0
+    var alwaysFailRemove = false
+    var fileCloseFailuresRemaining = 0
+    private(set) var removeAttempts = 0
+    private(set) var fileCloseAttempts = 0
+    private var temporaryDescriptor: Int32 = -1
+
+    func openDirectory(atPath path: String) throws -> Int32 {
+        try base.openDirectory(atPath: path)
+    }
+
+    func createExclusiveFile(named name: String, in directoryDescriptor: Int32) throws -> Int32 {
+        let descriptor = try base.createExclusiveFile(named: name, in: directoryDescriptor)
+        temporaryDescriptor = descriptor
+        return descriptor
+    }
+
+    func write(_ data: Data, to descriptor: Int32) throws {
+        try base.write(data, to: descriptor)
+    }
+
+    func setOwnerOnlyPermissions(on descriptor: Int32) throws {
+        try base.setOwnerOnlyPermissions(on: descriptor)
+    }
+
+    func verifyOwnerOnlyRegularFile(_ descriptor: Int32) throws {
+        try base.verifyOwnerOnlyRegularFile(descriptor)
+    }
+
+    func truncateAndVerifyEmpty(_ descriptor: Int32) throws {
+        try base.truncateAndVerifyEmpty(descriptor)
+    }
+
+    func synchronize(_ descriptor: Int32) throws {
+        try base.synchronize(descriptor)
+    }
+
+    func destinationKind(named name: String, in directoryDescriptor: Int32) throws -> ProfileExportDestinationKind {
+        try base.destinationKind(named: name, in: directoryDescriptor)
+    }
+
+    func rename(_ sourceName: String, to destinationName: String, in directoryDescriptor: Int32) throws {
+        try base.rename(sourceName, to: destinationName, in: directoryDescriptor)
+    }
+
+    func remove(named name: String, in directoryDescriptor: Int32) throws {
+        removeAttempts += 1
+        if alwaysFailRemove { throw TemporaryTestError.expected }
+        if removeFailuresRemaining > 0 {
+            removeFailuresRemaining -= 1
+            throw TemporaryTestError.expected
+        }
+        try base.remove(named: name, in: directoryDescriptor)
+    }
+
+    func close(_ descriptor: Int32) throws {
+        if descriptor == temporaryDescriptor {
+            fileCloseAttempts += 1
+            if fileCloseFailuresRemaining > 0 {
+                fileCloseFailuresRemaining -= 1
+                throw TemporaryTestError.expected
+            }
+            temporaryDescriptor = -1
+        }
         try base.close(descriptor)
     }
 }

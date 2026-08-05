@@ -80,6 +80,7 @@ private enum ProfileImportTransactionStage: String, Codable {
     case manifestCommitted
     case selectionCommitted
     case completed
+    case rollbackAuthenticated
 }
 
 private struct ProfileImportTransactionJournal: Codable {
@@ -451,7 +452,7 @@ final class ProfileStore {
         catch { throw ProfileStoreError.profileImportRecoveryFailed }
     }
     private func recoverImportTransaction(in transaction: URL, journal: ProfileImportTransactionJournal) throws {
-        if journal.stage != .completed {
+        if journal.stage != .completed, journal.stage != .rollbackAuthenticated {
             let manifest = try importFileOperations.readFile(at: transaction.appending(path: "manifest.envelope"))
             let selection = try importFileOperations.readFile(at: transaction.appending(path: "selection.envelope"))
             try importFileOperations.writeOwnerOnly(manifest, to: safeRootFile(Self.manifestName))
@@ -461,8 +462,13 @@ final class ProfileStore {
                 try transferFaults.check(.importRollbackCleanup)
                 try importFileOperations.removeItem(at: finalDirectory)
             }
+            try encryptedStorage.authenticateExistingTree()
+            var cleanupJournal = journal
+            cleanupJournal.stage = .rollbackAuthenticated
+            try persistImportJournal(cleanupJournal, in: transaction)
+        } else if journal.stage == .completed {
+            try encryptedStorage.authenticateExistingTree()
         }
-        try encryptedStorage.authenticateExistingTree()
         try cleanupImportTransaction(transaction)
     }
     private func cleanupImportTransaction(_ transaction: URL) throws {

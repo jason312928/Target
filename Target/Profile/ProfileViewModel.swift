@@ -302,7 +302,7 @@ final class ProfileViewModel {
         case .importInvalidJSON: "profile.import.error.invalid-json"
         case .importValidationFailed: "profile.import.error.validation"
         case .unsafeExportDestination: "profile.export.error.unsafe-destination"
-        case .exportFailed: "profile.export.error.failed"
+        case .exportFailed, .exportCleanupFailed: "profile.export.error.failed"
         }
     }
 }
