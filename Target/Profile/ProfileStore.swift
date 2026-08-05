@@ -87,10 +87,10 @@ final class ProfileStore {
     func rename(_ id: UUID, to name: String) throws { let name = try validatedName(name); try update(id) { $0.name = name } }
 
     func delete(_ id: UUID) throws {
-        guard try profile(id) != nil else { throw ProfileStoreError.profileNotFound }
+        var profiles = try loadManifest()
+        guard profiles.contains(where: { $0.id == id }) else { throw ProfileStoreError.profileNotFound }
         guard !runtimeUsage.isProfileInUse(id) else { throw ProfileStoreError.profileInUse }
         try fileManager.removeItem(at: try safeProfileDirectory(id))
-        var profiles = try loadManifest()
         profiles.removeAll { $0.id == id }
         try saveManifest(profiles)
         if try selectedProfileID() == id { try select(profiles.first?.id) }
@@ -119,25 +119,35 @@ final class ProfileStore {
     }
 
     func save(json: String, for id: UUID) throws {
-        guard try profile(id) != nil else { throw ProfileStoreError.profileNotFound }
+        var profiles = try loadManifest()
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else { throw ProfileStoreError.profileNotFound }
         if let syntaxError = JSONSyntaxChecker.validate(json) { try markInvalid(id, diagnostic: syntaxError); throw ProfileStoreError.invalidJSON(syntaxError) }
         let data = Data(json.utf8)
         let result = try validationTemporaryStorage.withTemporaryConfiguration(data) { checker.check(configurationURL: $0) }
         switch result {
         case .failure(let diagnostic): try markInvalid(id, diagnostic: diagnostic); throw ProfileStoreError.validationFailed(diagnostic)
         case .success:
-            let previous = try profile(id)!
-            let nextRevision = previous.validRevision + 1
+            let nextRevision = profiles[index].validRevision + 1
             try writeConfiguration(data, for: id)
             try writeVersion(data, for: id, revision: nextRevision)
-            try update(id) { $0.validation = ProfileValidation(status: .valid, checkedAt: now(), error: nil); $0.validRevision = nextRevision }
+            profiles[index].validation = ProfileValidation(status: .valid, checkedAt: now(), error: nil)
+            profiles[index].validRevision = nextRevision
+            profiles[index].updatedAt = now()
+            try saveManifest(profiles)
         }
     }
 
     func restorePreviousValidVersion(for id: UUID) throws {
-        guard let current = try profile(id), current.validRevision > 1 else { return }
-        try writeConfiguration(try versionData(for: id, revision: current.validRevision - 1), for: id)
-        try update(id) { $0.validRevision -= 1; $0.validation = ProfileValidation(status: .valid, checkedAt: now(), error: nil) }
+        var profiles = try loadManifest()
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else { throw ProfileStoreError.profileNotFound }
+        guard profiles[index].validRevision > 1 else { return }
+        let previousRevision = profiles[index].validRevision - 1
+        let previous = try versionData(for: id, revision: previousRevision)
+        try writeConfiguration(previous, for: id)
+        profiles[index].validRevision = previousRevision
+        profiles[index].validation = ProfileValidation(status: .valid, checkedAt: now(), error: nil)
+        profiles[index].updatedAt = now()
+        try saveManifest(profiles)
     }
 
     func availableValidVersions(for id: UUID) throws -> [ProfileVersionSummary] {
