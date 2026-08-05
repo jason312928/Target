@@ -1,4 +1,92 @@
+import Darwin
 import Foundation
+
+protocol ProfileImportFileOperating {
+    func createDirectory(at url: URL) throws
+    func readFile(at url: URL) throws -> Data
+    func writeOwnerOnly(_ data: Data, to url: URL) throws
+    func moveItem(at source: URL, to destination: URL) throws
+    func removeItem(at url: URL) throws
+    func fileExists(at url: URL) -> Bool
+    func directoryContents(at url: URL) throws -> [URL]
+}
+
+struct ProfileImportFileOperations: ProfileImportFileOperating {
+    private let fileManager: FileManager
+
+    init(fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+    }
+
+    func createDirectory(at url: URL) throws {
+        try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+    }
+
+    func readFile(at url: URL) throws -> Data { try Data(contentsOf: url) }
+
+    func writeOwnerOnly(_ data: Data, to url: URL) throws {
+        try createDirectory(at: url.deletingLastPathComponent())
+        let temporaryName = ".import-write-\(UUID().uuidString)"
+        let temporary = url.deletingLastPathComponent().appending(path: temporaryName)
+        var descriptor = Darwin.open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(0o600))
+        guard descriptor >= 0 else { throw ProfileStoreError.profileImportTransactionFailed }
+        var temporaryExists = true
+        defer {
+            if descriptor >= 0 { _ = Darwin.close(descriptor) }
+            if temporaryExists { _ = Darwin.unlink(temporary.path) }
+        }
+        try data.withUnsafeBytes { buffer in
+            guard var address = buffer.baseAddress else { return }
+            var remaining = buffer.count
+            while remaining > 0 {
+                let count = Darwin.write(descriptor, address, remaining)
+                guard count > 0 else { throw ProfileStoreError.profileImportTransactionFailed }
+                address = address.advanced(by: Int(count))
+                remaining -= Int(count)
+            }
+        }
+        guard Darwin.fchmod(descriptor, mode_t(0o600)) == 0,
+              Darwin.fsync(descriptor) == 0,
+              Darwin.close(descriptor) == 0 else {
+            throw ProfileStoreError.profileImportTransactionFailed
+        }
+        descriptor = -1
+        guard Darwin.rename(temporary.path, url.path) == 0 else {
+            throw ProfileStoreError.profileImportTransactionFailed
+        }
+        temporaryExists = false
+        let parentDescriptor = Darwin.open(url.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY)
+        guard parentDescriptor >= 0 else { throw ProfileStoreError.profileImportTransactionFailed }
+        defer { _ = Darwin.close(parentDescriptor) }
+        guard Darwin.fsync(parentDescriptor) == 0 else { throw ProfileStoreError.profileImportTransactionFailed }
+    }
+
+    func moveItem(at source: URL, to destination: URL) throws { try fileManager.moveItem(at: source, to: destination) }
+    func removeItem(at url: URL) throws { try fileManager.removeItem(at: url) }
+    func fileExists(at url: URL) -> Bool { fileManager.fileExists(atPath: url.path) }
+    func directoryContents(at url: URL) throws -> [URL] {
+        try fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
+    }
+}
+
+enum ProfileImportInterruption: Error {
+    case simulated
+}
+
+private enum ProfileImportTransactionStage: String, Codable {
+    case stagingPrepared
+    case profileDirectoryMoved
+    case manifestCommitted
+    case selectionCommitted
+    case completed
+}
+
+private struct ProfileImportTransactionJournal: Codable {
+    let formatVersion: Int
+    let profileID: UUID
+    var stage: ProfileImportTransactionStage
+}
 
 /// Owns encrypted Profile persistence. Configuration bytes stay opaque UTF-8 JSON;
 /// only the storage boundary encrypts/decrypts them, never Codable round-trips them.
@@ -17,6 +105,7 @@ final class ProfileStore {
     private let validationTemporaryStorage: ProfileValidationTemporaryStorage
     private let transferService: ProfileTransferService
     private let transferFaults: any ProfileTransferFaultInjecting
+    private let importFileOperations: any ProfileImportFileOperating
 
     init(
         rootDirectory: URL = ProfileStore.defaultRootDirectory(),
@@ -26,7 +115,8 @@ final class ProfileStore {
         runtimeUsage: any ProfileRuntimeUsageChecking = EngineRuntimeOwnership(),
         keyProvider: any ProfileEncryptionKeyProviding = KeychainProfileEncryptionKeyProvider(),
         storageFaults: any ProfileStorageFaultInjecting = NoProfileStorageFaults(),
-        transferFaults: any ProfileTransferFaultInjecting = NoProfileTransferFaults()
+        transferFaults: any ProfileTransferFaultInjecting = NoProfileTransferFaults(),
+        importFileOperations: (any ProfileImportFileOperating)? = nil
     ) {
         self.rootDirectory = rootDirectory.standardizedFileURL
         self.checker = checker
@@ -37,6 +127,7 @@ final class ProfileStore {
         validationTemporaryStorage = ProfileValidationTemporaryStorage(profileRoot: rootDirectory, fileManager: fileManager)
         transferService = ProfileTransferService(profileRoot: rootDirectory, checker: checker, fileManager: fileManager, faults: transferFaults)
         self.transferFaults = transferFaults
+        self.importFileOperations = importFileOperations ?? ProfileImportFileOperations(fileManager: fileManager)
     }
 
     static func defaultRootDirectory() -> URL {
@@ -90,27 +181,24 @@ final class ProfileStore {
         let normalizedName = try validatedName(name)
         try ensureRoot()
         let originalProfiles = try loadManifest()
-        let originalSelection = try loadSelection()
-        let originalManifestEnvelope = try Data(contentsOf: safeRootFile(Self.manifestName))
-        let originalSelectionEnvelope = try Data(contentsOf: safeRootFile(Self.selectionName))
+        let originalManifestEnvelope = try importFileOperations.readFile(at: safeRootFile(Self.manifestName))
+        let originalSelectionEnvelope = try importFileOperations.readFile(at: safeRootFile(Self.selectionName))
         let timestamp = now()
         let profile = Profile(
             id: UUID(), name: normalizedName, subscription: nil,
             createdAt: timestamp, updatedAt: timestamp,
             validation: candidate.validation, validRevision: 1
         )
-        let staging = importStagingDirectory(for: profile.id)
+        let transaction = importTransactionDirectory(for: profile.id)
+        let staging = transaction.appending(path: "staging", directoryHint: .isDirectory)
         let finalDirectory = try safeProfileDirectory(profile.id)
-        var movedToLiveRoot = false
-        var manifestWasWritten = false
-        var selectionWasAttempted = false
-        defer {
-            try? fileManager.removeItem(at: staging)
-            try? fileManager.removeItem(at: staging.deletingLastPathComponent())
-        }
+        var journal = ProfileImportTransactionJournal(formatVersion: 1, profileID: profile.id, stage: .stagingPrepared)
+        var journalPersisted = false
 
         do {
             try transferFaults.check(.importDirectoryCreation)
+            try importFileOperations.createDirectory(at: importTransactionRoot)
+            try importFileOperations.createDirectory(at: transaction)
             try encryptedStorage.createProfileDirectory(staging)
             try transferFaults.check(.importCurrentConfigurationWrite)
             try encryptedStorage.write(
@@ -126,29 +214,59 @@ final class ProfileStore {
                 logicalPath: "\(profile.id.uuidString)/versions/1.json",
                 url: staging.appending(path: "versions/1.json")
             )
-            try fileManager.moveItem(at: staging, to: finalDirectory)
-            movedToLiveRoot = true
+            try importFileOperations.writeOwnerOnly(originalManifestEnvelope, to: transaction.appending(path: "manifest.envelope"))
+            try importFileOperations.writeOwnerOnly(originalSelectionEnvelope, to: transaction.appending(path: "selection.envelope"))
+            try persistImportJournal(journal, in: transaction)
+            journalPersisted = true
+
+            try importFileOperations.moveItem(at: staging, to: finalDirectory)
+            journal.stage = .profileDirectoryMoved
+            try persistImportJournal(journal, in: transaction)
+            try transferFaults.check(.importAfterDirectoryMove)
 
             var updatedProfiles = originalProfiles
             updatedProfiles.append(profile)
             try transferFaults.check(.importManifestWrite)
             try saveManifest(updatedProfiles)
-            manifestWasWritten = true
+            journal.stage = .manifestCommitted
+            try persistImportJournal(journal, in: transaction)
+            try transferFaults.check(.importAfterManifestCommit)
             try transferFaults.check(.importSelectionWrite)
-            selectionWasAttempted = true
-            try select(profile.id)
+            try encryptedStorage.write(
+                try JSONEncoder().encode(profile.id.uuidString),
+                kind: .selection,
+                logicalPath: Self.selectionName,
+                url: safeRootFile(Self.selectionName)
+            )
+            journal.stage = .selectionCommitted
+            try persistImportJournal(journal, in: transaction)
+            try transferFaults.check(.importAfterSelectionCommit)
+            try encryptedStorage.authenticateExistingTree()
+            journal.stage = .completed
+            try persistImportJournal(journal, in: transaction)
+            do { try cleanupImportTransaction(transaction) }
+            catch { throw ProfileStoreError.profileImportRecoveryFailed }
             return profile
+        } catch is ProfileImportInterruption {
+            throw ProfileStoreError.profileImportTransactionFailed
         } catch {
-            if manifestWasWritten { try? restoreEncryptedRecord(originalManifestEnvelope, to: safeRootFile(Self.manifestName)) }
-            if selectionWasAttempted { try? restoreEncryptedRecord(originalSelectionEnvelope, to: safeRootFile(Self.selectionName)) }
-            if movedToLiveRoot {
-                // A fault may model the first cleanup attempt failing. Retry the
-                // concrete cleanup so a recoverable transaction never leaves an
-                // unreferenced directory in the authenticated Profile tree.
-                _ = try? transferFaults.check(.importRollbackCleanup)
-                try? fileManager.removeItem(at: finalDirectory)
+            if journal.stage == .completed {
+                throw ProfileStoreError.profileImportRecoveryFailed
             }
-            throw error
+            if journalPersisted {
+                do { try recoverImportTransaction(in: transaction, journal: journal) }
+                catch { throw ProfileStoreError.profileImportRecoveryFailed }
+            } else {
+                do {
+                    if importFileOperations.fileExists(at: transaction) {
+                        try importFileOperations.removeItem(at: transaction)
+                    }
+                    try removeImportContainerIfEmpty()
+                } catch {
+                    throw ProfileStoreError.profileImportTransactionFailed
+                }
+            }
+            throw ProfileStoreError.profileImportTransactionFailed
         }
     }
 
@@ -280,24 +398,87 @@ final class ProfileStore {
 
     private func loadManifest() throws -> [Profile] { try ensureRoot(); do { return try JSONDecoder().decode([Profile].self, from: encryptedStorage.read(kind: .manifest, logicalPath: Self.manifestName, url: safeRootFile(Self.manifestName))) } catch let error as ProfileStoreError { throw error } catch { throw ProfileStoreError.invalidStoredMetadata } }
     private func saveManifest(_ profiles: [Profile]) throws { try encryptedStorage.write(try JSONEncoder().encode(profiles), kind: .manifest, logicalPath: Self.manifestName, url: safeRootFile(Self.manifestName)) }
-    private func restoreEncryptedRecord(_ envelope: Data, to url: URL) throws {
-        try envelope.write(to: url, options: .atomic)
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-    }
     private func loadSelection() throws -> UUID? { try ensureRoot(); do { let text = try JSONDecoder().decode(String?.self, from: encryptedStorage.read(kind: .selection, logicalPath: Self.selectionName, url: safeRootFile(Self.selectionName))); return text.flatMap(UUID.init(uuidString:)) } catch let error as ProfileStoreError { throw error } catch { throw ProfileStoreError.invalidStoredMetadata } }
     private func configurationData(for id: UUID) throws -> Data { try encryptedStorage.read(kind: .currentConfiguration, logicalPath: "\(id.uuidString)/\(Self.configurationName)", url: try configurationURL(for: id)) }
     private func versionData(for id: UUID, revision: Int) throws -> Data { try encryptedStorage.read(kind: .version, logicalPath: "\(id.uuidString)/versions/\(revision).json", url: try versionURL(for: id, revision: revision)) }
     private func writeConfiguration(_ data: Data, for id: UUID) throws { try encryptedStorage.write(data, kind: .currentConfiguration, logicalPath: "\(id.uuidString)/\(Self.configurationName)", url: try configurationURL(for: id)) }
     private func writeVersion(_ data: Data, for id: UUID, revision: Int) throws { try encryptedStorage.write(data, kind: .version, logicalPath: "\(id.uuidString)/versions/\(revision).json", url: try versionURL(for: id, revision: revision)) }
-    private func ensureRoot() throws { try encryptedStorage.prepare(); try validationTemporaryStorage.prepare() }
+    private func ensureRoot() throws {
+        try recoverInterruptedImports()
+        try encryptedStorage.prepare()
+        try validationTemporaryStorage.prepare()
+    }
     private func validatedName(_ name: String) throws -> String { let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines); guard !normalized.isEmpty, normalized.count <= 80 else { throw ProfileStoreError.invalidName }; return normalized }
     private func configurationURL(for id: UUID) throws -> URL { try safeProfileDirectory(id).appending(path: Self.configurationName) }
     private func versionURL(for id: UUID, revision: Int) throws -> URL { guard revision > 0 else { throw ProfileStoreError.unsafePath }; return try safeProfileDirectory(id).appending(path: "versions/\(revision).json") }
     private func safeProfileDirectory(_ id: UUID) throws -> URL { try safeRootFile(id.uuidString, directory: true) }
-    private func importStagingDirectory(for id: UUID) -> URL {
-        rootDirectory.deletingLastPathComponent()
-            .appending(path: ".TargetProfileImport", directoryHint: .isDirectory)
-            .appending(path: id.uuidString, directoryHint: .isDirectory)
+    private var importTransactionRoot: URL {
+        rootDirectory.deletingLastPathComponent().appending(path: ".TargetProfileImport", directoryHint: .isDirectory)
+    }
+    private func importTransactionDirectory(for id: UUID) -> URL {
+        importTransactionRoot.appending(path: id.uuidString, directoryHint: .isDirectory)
+    }
+    private func persistImportJournal(_ journal: ProfileImportTransactionJournal, in transaction: URL) throws {
+        try importFileOperations.writeOwnerOnly(
+            try JSONEncoder().encode(journal),
+            to: transaction.appending(path: "journal.json")
+        )
+    }
+    private func recoverInterruptedImports() throws {
+        guard importFileOperations.fileExists(at: importTransactionRoot) else { return }
+        let transactions: [URL]
+        do { transactions = try importFileOperations.directoryContents(at: importTransactionRoot).sorted { $0.lastPathComponent < $1.lastPathComponent } }
+        catch { throw ProfileStoreError.profileImportRecoveryFailed }
+        for transaction in transactions {
+            let journalURL = transaction.appending(path: "journal.json")
+            guard importFileOperations.fileExists(at: journalURL) else {
+                do { try importFileOperations.removeItem(at: transaction) }
+                catch { throw ProfileStoreError.profileImportRecoveryFailed }
+                continue
+            }
+            let journal: ProfileImportTransactionJournal
+            do {
+                journal = try JSONDecoder().decode(ProfileImportTransactionJournal.self, from: importFileOperations.readFile(at: journalURL))
+                guard journal.formatVersion == 1, transaction.lastPathComponent == journal.profileID.uuidString else {
+                    throw ProfileStoreError.profileImportRecoveryFailed
+                }
+                try recoverImportTransaction(in: transaction, journal: journal)
+            } catch {
+                throw ProfileStoreError.profileImportRecoveryFailed
+            }
+        }
+        do { try removeImportContainerIfEmpty() }
+        catch { throw ProfileStoreError.profileImportRecoveryFailed }
+    }
+    private func recoverImportTransaction(in transaction: URL, journal: ProfileImportTransactionJournal) throws {
+        if journal.stage != .completed {
+            let manifest = try importFileOperations.readFile(at: transaction.appending(path: "manifest.envelope"))
+            let selection = try importFileOperations.readFile(at: transaction.appending(path: "selection.envelope"))
+            try importFileOperations.writeOwnerOnly(manifest, to: safeRootFile(Self.manifestName))
+            try importFileOperations.writeOwnerOnly(selection, to: safeRootFile(Self.selectionName))
+            let finalDirectory = try safeProfileDirectory(journal.profileID)
+            if importFileOperations.fileExists(at: finalDirectory) {
+                try transferFaults.check(.importRollbackCleanup)
+                try importFileOperations.removeItem(at: finalDirectory)
+            }
+        }
+        try encryptedStorage.authenticateExistingTree()
+        try cleanupImportTransaction(transaction)
+    }
+    private func cleanupImportTransaction(_ transaction: URL) throws {
+        for name in ["staging", "manifest.envelope", "selection.envelope"] {
+            let item = transaction.appending(path: name)
+            if importFileOperations.fileExists(at: item) { try importFileOperations.removeItem(at: item) }
+        }
+        let journal = transaction.appending(path: "journal.json")
+        if importFileOperations.fileExists(at: journal) { try importFileOperations.removeItem(at: journal) }
+        if importFileOperations.fileExists(at: transaction) { try importFileOperations.removeItem(at: transaction) }
+        try removeImportContainerIfEmpty()
+    }
+    private func removeImportContainerIfEmpty() throws {
+        guard importFileOperations.fileExists(at: importTransactionRoot),
+              try importFileOperations.directoryContents(at: importTransactionRoot).isEmpty else { return }
+        try importFileOperations.removeItem(at: importTransactionRoot)
     }
     private func safeRootFile(_ relativePath: String, directory: Bool = false) throws -> URL { guard !relativePath.isEmpty, !relativePath.hasPrefix("/"), !relativePath.split(separator: "/").contains(where: { $0 == ".." || $0 == "." }) else { throw ProfileStoreError.unsafePath }; let url = rootDirectory.appending(path: relativePath, directoryHint: directory ? .isDirectory : .notDirectory).standardizedFileURL; guard url.path.hasPrefix(rootDirectory.path + "/") else { throw ProfileStoreError.unsafePath }; return url }
     private func recordSubscriptionResult(for id: UUID, response: SubscriptionResponse, error: String?) throws { try update(id) { guard var subscription = $0.subscription else { return }; let timestamp = now(); subscription.lastCheckedAt = timestamp; if response.cacheStatus == .updated { subscription.lastUpdatedAt = timestamp }; subscription.etag = response.etag; subscription.lastModified = response.lastModified; subscription.cacheStatus = response.cacheStatus; subscription.lastErrorKey = error; $0.subscription = subscription } }

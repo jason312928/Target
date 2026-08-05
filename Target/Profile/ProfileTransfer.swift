@@ -38,6 +38,14 @@ enum ProfileTransferFaultPoint: Sendable, Hashable {
     case importManifestWrite
     case importSelectionWrite
     case importRollbackCleanup
+    case importAfterDirectoryMove
+    case importAfterManifestCommit
+    case importAfterSelectionCommit
+    case exportAfterDirectoryOpen
+    case exportAfterTemporaryCreate
+    case exportAfterWrite
+    case exportAfterPermissionValidation
+    case exportAfterFileSync
     case exportBeforeCommit
 }
 
@@ -49,6 +57,103 @@ struct NoProfileTransferFaults: ProfileTransferFaultInjecting {
     func check(_ point: ProfileTransferFaultPoint) throws {}
 }
 
+enum ProfileExportDestinationKind {
+    case missing
+    case regularFile
+    case unsafe
+}
+
+protocol ProfileExportFileOperating {
+    func openDirectory(atPath path: String) throws -> Int32
+    func createExclusiveFile(named name: String, in directoryDescriptor: Int32) throws -> Int32
+    func write(_ data: Data, to descriptor: Int32) throws
+    func setOwnerOnlyPermissions(on descriptor: Int32) throws
+    func verifyOwnerOnlyRegularFile(_ descriptor: Int32) throws
+    func synchronize(_ descriptor: Int32) throws
+    func destinationKind(named name: String, in directoryDescriptor: Int32) throws -> ProfileExportDestinationKind
+    func rename(_ sourceName: String, to destinationName: String, in directoryDescriptor: Int32) throws
+    func remove(named name: String, in directoryDescriptor: Int32) throws
+    func close(_ descriptor: Int32) throws
+}
+
+struct ProfileExportFileOperations: ProfileExportFileOperating {
+    func openDirectory(atPath path: String) throws -> Int32 {
+        let descriptor = Darwin.open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw ProfileTransferError.unsafeExportDestination }
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0, (metadata.st_mode & S_IFMT) == S_IFDIR else {
+            _ = Darwin.close(descriptor)
+            throw ProfileTransferError.unsafeExportDestination
+        }
+        return descriptor
+    }
+
+    func createExclusiveFile(named name: String, in directoryDescriptor: Int32) throws -> Int32 {
+        let descriptor = Darwin.openat(
+            directoryDescriptor, name,
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            mode_t(0o600)
+        )
+        guard descriptor >= 0 else { throw ProfileTransferError.exportFailed }
+        return descriptor
+    }
+
+    func write(_ data: Data, to descriptor: Int32) throws {
+        try data.withUnsafeBytes { buffer in
+            guard var address = buffer.baseAddress else { return }
+            var remaining = buffer.count
+            while remaining > 0 {
+                let written = Darwin.write(descriptor, address, remaining)
+                guard written > 0 else { throw ProfileTransferError.exportFailed }
+                remaining -= Int(written)
+                address = address.advanced(by: Int(written))
+            }
+        }
+    }
+
+    func setOwnerOnlyPermissions(on descriptor: Int32) throws {
+        guard Darwin.fchmod(descriptor, mode_t(0o600)) == 0 else { throw ProfileTransferError.exportFailed }
+    }
+
+    func verifyOwnerOnlyRegularFile(_ descriptor: Int32) throws {
+        var metadata = stat()
+        guard Darwin.fstat(descriptor, &metadata) == 0,
+              (metadata.st_mode & S_IFMT) == S_IFREG,
+              (metadata.st_mode & 0o777) == 0o600 else {
+            throw ProfileTransferError.exportFailed
+        }
+    }
+
+    func synchronize(_ descriptor: Int32) throws {
+        guard Darwin.fsync(descriptor) == 0 else { throw ProfileTransferError.exportFailed }
+    }
+
+    func destinationKind(named name: String, in directoryDescriptor: Int32) throws -> ProfileExportDestinationKind {
+        var metadata = stat()
+        if Darwin.fstatat(directoryDescriptor, name, &metadata, AT_SYMLINK_NOFOLLOW) == 0 {
+            return (metadata.st_mode & S_IFMT) == S_IFREG ? .regularFile : .unsafe
+        }
+        guard errno == ENOENT else { throw ProfileTransferError.exportFailed }
+        return .missing
+    }
+
+    func rename(_ sourceName: String, to destinationName: String, in directoryDescriptor: Int32) throws {
+        guard Darwin.renameat(directoryDescriptor, sourceName, directoryDescriptor, destinationName) == 0 else {
+            throw ProfileTransferError.exportFailed
+        }
+    }
+
+    func remove(named name: String, in directoryDescriptor: Int32) throws {
+        guard Darwin.unlinkat(directoryDescriptor, name, 0) == 0 || errno == ENOENT else {
+            throw ProfileTransferError.exportFailed
+        }
+    }
+
+    func close(_ descriptor: Int32) throws {
+        guard Darwin.close(descriptor) == 0 else { throw ProfileTransferError.exportFailed }
+    }
+}
+
 final class ProfileTransferService {
     /// A single Profile is intentionally bounded so user-selected input is never
     /// read without a known limit. Ten MiB accommodates ordinary sing-box files.
@@ -56,19 +161,20 @@ final class ProfileTransferService {
 
     private let checker: any SingBoxConfigurationChecking
     private let validationStorage: ProfileValidationTemporaryStorage
-    private let fileManager: FileManager
     private let faults: any ProfileTransferFaultInjecting
+    private let exportFileOperations: any ProfileExportFileOperating
 
     init(
         profileRoot: URL,
         checker: any SingBoxConfigurationChecking,
         fileManager: FileManager = .default,
-        faults: any ProfileTransferFaultInjecting = NoProfileTransferFaults()
+        faults: any ProfileTransferFaultInjecting = NoProfileTransferFaults(),
+        exportFileOperations: any ProfileExportFileOperating = ProfileExportFileOperations()
     ) {
         self.checker = checker
         validationStorage = ProfileValidationTemporaryStorage(profileRoot: profileRoot, fileManager: fileManager)
-        self.fileManager = fileManager
         self.faults = faults
+        self.exportFileOperations = exportFileOperations
     }
 
     func prepareImport(from url: URL) throws -> ProfileImportCandidate {
@@ -94,37 +200,38 @@ final class ProfileTransferService {
 
     func writeExport(_ data: Data, to destination: URL) throws {
         let directory = destination.deletingLastPathComponent().standardizedFileURL
-        guard isDirectory(directory), !isSymlink(destination), !isDirectory(destination) else {
+        let destinationName = destination.lastPathComponent
+        guard !destinationName.isEmpty, destinationName != ".", destinationName != ".." else {
             throw ProfileTransferError.unsafeExportDestination
         }
+        let directoryDescriptor = try exportFileOperations.openDirectory(atPath: directory.path)
+        defer { try? exportFileOperations.close(directoryDescriptor) }
+        try checkExportFault(.exportAfterDirectoryOpen)
 
-        let temporary = directory.appending(path: ".target-profile-export-\(UUID().uuidString)")
-        var fileDescriptor: Int32 = -1
-        var temporaryCreated = false
+        let temporaryName = ".target-profile-export-\(UUID().uuidString)"
+        var fileDescriptor = try exportFileOperations.createExclusiveFile(named: temporaryName, in: directoryDescriptor)
+        var temporaryExists = true
         defer {
-            if fileDescriptor >= 0 { _ = Darwin.close(fileDescriptor) }
-            if temporaryCreated { try? fileManager.removeItem(at: temporary) }
+            if fileDescriptor >= 0 { try? exportFileOperations.close(fileDescriptor) }
+            if temporaryExists { try? exportFileOperations.remove(named: temporaryName, in: directoryDescriptor) }
         }
-
-        fileDescriptor = Darwin.open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(0o600))
-        guard fileDescriptor >= 0 else { throw ProfileTransferError.exportFailed }
-        temporaryCreated = true
-        guard Darwin.fchmod(fileDescriptor, mode_t(0o600)) == 0 else { throw ProfileTransferError.exportFailed }
-        try writeAll(data, to: fileDescriptor)
-        guard Darwin.fsync(fileDescriptor) == 0 else { throw ProfileTransferError.exportFailed }
-        guard Darwin.close(fileDescriptor) == 0 else { throw ProfileTransferError.exportFailed }
+        try checkExportFault(.exportAfterTemporaryCreate)
+        try exportFileOperations.write(data, to: fileDescriptor)
+        try checkExportFault(.exportAfterWrite)
+        try exportFileOperations.setOwnerOnlyPermissions(on: fileDescriptor)
+        try exportFileOperations.verifyOwnerOnlyRegularFile(fileDescriptor)
+        try checkExportFault(.exportAfterPermissionValidation)
+        try exportFileOperations.synchronize(fileDescriptor)
+        try checkExportFault(.exportAfterFileSync)
+        try exportFileOperations.close(fileDescriptor)
         fileDescriptor = -1
-
-        do {
-            try faults.check(.exportBeforeCommit)
-        } catch {
-            throw ProfileTransferError.exportFailed
+        try checkExportFault(.exportBeforeCommit)
+        guard try exportFileOperations.destinationKind(named: destinationName, in: directoryDescriptor) != .unsafe else {
+            throw ProfileTransferError.unsafeExportDestination
         }
-        guard !isSymlink(destination), !isDirectory(destination) else { throw ProfileTransferError.unsafeExportDestination }
-        guard Darwin.rename(temporary.path, destination.path) == 0 else { throw ProfileTransferError.exportFailed }
-        temporaryCreated = false
-        try setOwnerOnlyPermissions(destination)
-        try synchronizeDirectory(directory)
+        try exportFileOperations.rename(temporaryName, to: destinationName, in: directoryDescriptor)
+        temporaryExists = false
+        try exportFileOperations.synchronize(directoryDescriptor)
     }
 
     static func defaultExportFileName(for profileName: String) -> String {
@@ -183,41 +290,8 @@ final class ProfileTransferService {
         return result
     }
 
-    private func isDirectory(_ url: URL) -> Bool {
-        var metadata = stat()
-        return Darwin.lstat(url.path, &metadata) == 0 && (metadata.st_mode & S_IFMT) == S_IFDIR
-    }
-
-    private func isSymlink(_ url: URL) -> Bool {
-        var metadata = stat()
-        return Darwin.lstat(url.path, &metadata) == 0 && (metadata.st_mode & S_IFMT) == S_IFLNK
-    }
-
-    private func writeAll(_ data: Data, to descriptor: Int32) throws {
-        try data.withUnsafeBytes { buffer in
-            guard var address = buffer.baseAddress else { return }
-            var remaining = buffer.count
-            while remaining > 0 {
-                let written = Darwin.write(descriptor, address, remaining)
-                guard written > 0 else { throw ProfileTransferError.exportFailed }
-                remaining -= Int(written)
-                address = address.advanced(by: Int(written))
-            }
-        }
-    }
-
-    private func setOwnerOnlyPermissions(_ url: URL) throws {
-        guard Darwin.chmod(url.path, mode_t(0o600)) == 0 else { throw ProfileTransferError.exportFailed }
-        var metadata = stat()
-        guard Darwin.lstat(url.path, &metadata) == 0, (metadata.st_mode & 0o777) == 0o600 else {
-            throw ProfileTransferError.exportFailed
-        }
-    }
-
-    private func synchronizeDirectory(_ directory: URL) throws {
-        let descriptor = Darwin.open(directory.path, O_RDONLY)
-        guard descriptor >= 0 else { throw ProfileTransferError.exportFailed }
-        defer { _ = Darwin.close(descriptor) }
-        guard Darwin.fsync(descriptor) == 0 else { throw ProfileTransferError.exportFailed }
+    private func checkExportFault(_ point: ProfileTransferFaultPoint) throws {
+        do { try faults.check(point) }
+        catch { throw ProfileTransferError.exportFailed }
     }
 }

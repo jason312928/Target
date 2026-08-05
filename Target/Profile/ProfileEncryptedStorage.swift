@@ -151,6 +151,13 @@ final class ProfileEncryptedStorage {
         try setDirectoryPermissions(directory.appending(path: "versions"))
     }
 
+    /// Used only after an interrupted import has been resolved. Import recovery
+    /// runs before `prepare()` so an incomplete live tree is never authenticated
+    /// as authoritative state.
+    func authenticateExistingTree() throws {
+        _ = try validateEncryptedTree()
+    }
+
     private func createNewEncryptedStore() throws {
         try createKeyIfAllowed()
         try writeMarker(to: root)

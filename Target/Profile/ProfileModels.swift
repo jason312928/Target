@@ -118,6 +118,8 @@ enum ProfileStoreError: LocalizedError, Equatable {
     case plaintextMigrationValidationFailed
     case plaintextMigrationCommitFailed
     case plaintextMigrationRecoveryFailed
+    case profileImportTransactionFailed
+    case profileImportRecoveryFailed
 
     var errorDescription: String? {
         switch self {
@@ -134,7 +136,8 @@ enum ProfileStoreError: LocalizedError, Equatable {
              .encryptedStorageAuthenticationFailed, .encryptedStorageAADMismatch,
              .mixedOrDowngradedStorage, .missingEncryptedRecord,
              .plaintextMigrationValidationFailed, .plaintextMigrationCommitFailed,
-             .plaintextMigrationRecoveryFailed:
+             .plaintextMigrationRecoveryFailed, .profileImportTransactionFailed,
+             .profileImportRecoveryFailed:
             "Profile storage could not be loaded safely."
         }
     }

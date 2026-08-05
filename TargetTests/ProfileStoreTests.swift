@@ -863,18 +863,164 @@ final class ProfileStoreTests: XCTestCase {
         }
     }
 
-    func testImportRollbackCleanupFaultStillLeavesNoOrphanDirectory() throws {
+    func testManifestEnvelopeRestoreFailureKeepsJournalAndRecoversOnRestart() throws {
         let root = try temporaryDirectory()
         let keys = TestProfileKeyProvider()
-        let faults = TestTransferFaults(points: [.importManifestWrite, .importRollbackCleanup])
-        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, transferFaults: faults)
+        let operations = ControllableImportFileOperations(profileRoot: root)
+        let faults = ActionTransferFaults { point in
+            if point == .importManifestWrite {
+                operations.failingWriteName = "profiles.json"
+                throw TemporaryTestError.expected
+            }
+        }
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, transferFaults: faults, importFileOperations: operations)
+        let existing = try store.create(name: "Existing")
+        let before = try treeSnapshot(root)
+        let selection = try store.selectedProfileID()
+        let candidate = try ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(()))).prepareImport(data: Data("{}".utf8), suggestedName: "Imported")
+
+        XCTAssertThrowsError(try store.importCandidate(candidate, name: "Imported")) {
+            XCTAssertEqual($0 as? ProfileStoreError, .profileImportRecoveryFailed)
+        }
+        XCTAssertTrue(importJournalExists(for: root))
+        operations.failingWriteName = nil
+        let restored = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, importFileOperations: operations)
+        XCTAssertEqual(try restored.listProfiles().map(\.id), [existing.id])
+        XCTAssertEqual(try restored.selectedProfileID(), selection)
+        XCTAssertEqual(try treeSnapshot(root), before)
+        XCTAssertFalse(importTransactionContainerExists(for: root))
+    }
+
+    func testSelectionEnvelopeRestoreFailureKeepsJournalAndRecoversOnRestart() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let operations = ControllableImportFileOperations(profileRoot: root)
+        let faults = ActionTransferFaults { point in
+            if point == .importSelectionWrite {
+                operations.failingWriteName = "selected-profile.json"
+                throw TemporaryTestError.expected
+            }
+        }
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, transferFaults: faults, importFileOperations: operations)
+        let existing = try store.create(name: "Existing")
+        try store.select(nil)
+        let before = try treeSnapshot(root)
+        let candidate = try ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(()))).prepareImport(data: Data("{}".utf8), suggestedName: "Imported")
+
+        XCTAssertThrowsError(try store.importCandidate(candidate, name: "Imported")) {
+            XCTAssertEqual($0 as? ProfileStoreError, .profileImportRecoveryFailed)
+        }
+        XCTAssertTrue(importJournalExists(for: root))
+        operations.failingWriteName = nil
+        let restored = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, importFileOperations: operations)
+        XCTAssertEqual(try restored.listProfiles().map(\.id), [existing.id])
+        XCTAssertNil(try restored.selectedProfileID())
+        XCTAssertEqual(try treeSnapshot(root), before)
+        XCTAssertFalse(importTransactionContainerExists(for: root))
+    }
+
+    func testProfileDirectoryRemovalFailureKeepsJournalAndRecoversOnRestart() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let operations = ControllableImportFileOperations(profileRoot: root)
+        let faults = ActionTransferFaults { point in
+            if point == .importManifestWrite {
+                operations.failProfileDirectoryRemoval = true
+                throw TemporaryTestError.expected
+            }
+        }
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, transferFaults: faults, importFileOperations: operations)
         let existing = try store.create(name: "Existing")
         let before = try treeSnapshot(root)
         let candidate = try ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(()))).prepareImport(data: Data("{}".utf8), suggestedName: "Imported")
 
-        XCTAssertThrowsError(try store.importCandidate(candidate, name: "Imported"))
+        XCTAssertThrowsError(try store.importCandidate(candidate, name: "Imported")) {
+            XCTAssertEqual($0 as? ProfileStoreError, .profileImportRecoveryFailed)
+        }
+        XCTAssertTrue(importJournalExists(for: root))
+        operations.failProfileDirectoryRemoval = false
+        let restored = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, importFileOperations: operations)
+        XCTAssertEqual(try restored.listProfiles().map(\.id), [existing.id])
         XCTAssertEqual(try treeSnapshot(root), before)
-        XCTAssertEqual(try ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys).listProfiles().map(\.id), [existing.id])
+        XCTAssertFalse(importTransactionContainerExists(for: root))
+    }
+
+    func testInterruptedImportStagesRollbackDeterministicallyOnNewStore() throws {
+        for point in [
+            ProfileTransferFaultPoint.importAfterDirectoryMove,
+            .importAfterManifestCommit,
+            .importAfterSelectionCommit
+        ] {
+            let root = try temporaryDirectory()
+            let keys = TestProfileKeyProvider()
+            let existingStore = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+            let existing = try existingStore.create(name: "Existing")
+            let original = Data("{ \"preserved\" : true }\n".utf8)
+            try existingStore.save(json: String(decoding: original, as: UTF8.self), for: existing.id)
+            let selection = try existingStore.selectedProfileID()
+            let before = try treeSnapshot(root)
+            let faults = ActionTransferFaults { current in
+                if current == point { throw ProfileImportInterruption.simulated }
+            }
+            let interrupted = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, transferFaults: faults)
+            let candidate = try ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(()))).prepareImport(data: Data("{\"imported\":true}".utf8), suggestedName: "Imported")
+
+            XCTAssertThrowsError(try interrupted.importCandidate(candidate, name: "Imported")) {
+                XCTAssertEqual($0 as? ProfileStoreError, .profileImportTransactionFailed)
+            }
+            XCTAssertTrue(importJournalExists(for: root))
+            try assertImportTransactionIsOwnerOnlyAndJournalOmits(candidate.data, profileRoot: root)
+            let restored = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+            XCTAssertEqual(try restored.listProfiles().map(\.id), [existing.id])
+            XCTAssertEqual(try restored.selectedProfileID(), selection)
+            XCTAssertEqual(try restored.validVersion(for: existing.id, revision: 2).data, original)
+            XCTAssertEqual(try treeSnapshot(root), before)
+            XCTAssertFalse(importTransactionContainerExists(for: root))
+        }
+    }
+
+    func testCompletedImportJournalRollsForwardAfterCleanupFailure() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let operations = ControllableImportFileOperations(profileRoot: root)
+        let faults = ActionTransferFaults { point in
+            if point == .importAfterSelectionCommit {
+                operations.failingRemoveName = "manifest.envelope"
+            }
+        }
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, transferFaults: faults, importFileOperations: operations)
+        _ = try store.create(name: "Existing")
+        let importedBytes = Data("{\"completed\":true}".utf8)
+        let candidate = try ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(()))).prepareImport(data: importedBytes, suggestedName: "Imported")
+
+        XCTAssertThrowsError(try store.importCandidate(candidate, name: "Imported")) {
+            XCTAssertEqual($0 as? ProfileStoreError, .profileImportRecoveryFailed)
+        }
+        XCTAssertTrue(importJournalExists(for: root))
+        operations.failingRemoveName = nil
+        let restored = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, importFileOperations: operations)
+        let profiles = try restored.listProfiles()
+        let imported = try XCTUnwrap(profiles.first { $0.name == "Imported" })
+        XCTAssertEqual(try restored.selectedProfileID(), imported.id)
+        XCTAssertEqual(try restored.validVersion(for: imported.id, revision: 1).data, importedBytes)
+        XCTAssertFalse(importTransactionContainerExists(for: root))
+    }
+
+    func testConfirmedImportCanExportIdenticalInputBytesWithoutResidue() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        let input = Data("{\n \"unknown\": [3, true], \"secret\": \"synthetic\"\n}\n".utf8)
+        let candidate = try ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(()))).prepareImport(data: input, suggestedName: "Round Trip")
+        _ = try store.importCandidate(candidate, name: "Round Trip")
+        let destinationDirectory = root.deletingLastPathComponent().appending(path: "RoundTripExport", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
+        let destination = destinationDirectory.appending(path: "profile.json")
+
+        try store.exportSelectedProfile(to: destination)
+        XCTAssertEqual(try Data(contentsOf: destination), input)
+        XCTAssertFalse(importTransactionContainerExists(for: root))
+        XCTAssertFalse(try containsExportTemporaryFile(in: destinationDirectory))
     }
 
     func testExportUsesLastPersistedRevisionAndCreatesOwnerOnlyFile() throws {
@@ -917,6 +1063,117 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: directory.path).contains(where: { $0.hasPrefix(".target-profile-export-") }))
     }
 
+    func testExportRejectsDestinationReplacedBySymlinkWithoutTouchingLinkTarget() throws {
+        let root = try temporaryDirectory()
+        let directory = root.deletingLastPathComponent().appending(path: "SymlinkRace", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appending(path: "profile.json")
+        let linkTarget = directory.appending(path: "link-target.json")
+        try Data("target-bytes".utf8).write(to: linkTarget)
+        try FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: linkTarget.path)
+        let originalPermissions = (try FileManager.default.attributesOfItem(atPath: linkTarget.path)[.posixPermissions] as? NSNumber)?.intValue
+        let faults = ActionTransferFaults { point in
+            if point == .exportBeforeCommit {
+                try FileManager.default.createSymbolicLink(at: destination, withDestinationURL: linkTarget)
+            }
+        }
+        let service = ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(())), faults: faults)
+
+        XCTAssertThrowsError(try service.writeExport(Data("new".utf8), to: destination)) {
+            XCTAssertEqual($0 as? ProfileTransferError, .unsafeExportDestination)
+        }
+        XCTAssertEqual(try Data(contentsOf: linkTarget), Data("target-bytes".utf8))
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: linkTarget.path)[.posixPermissions] as? NSNumber)?.intValue, originalPermissions)
+        XCTAssertFalse(try containsExportTemporaryFile(in: directory))
+    }
+
+    func testExportRejectsDestinationReplacedByDirectory() throws {
+        let root = try temporaryDirectory()
+        let directory = root.deletingLastPathComponent().appending(path: "DirectoryRace", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appending(path: "profile.json")
+        let faults = ActionTransferFaults { point in
+            if point == .exportBeforeCommit {
+                try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+            }
+        }
+        let service = ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(())), faults: faults)
+
+        XCTAssertThrowsError(try service.writeExport(Data("new".utf8), to: destination)) {
+            XCTAssertEqual($0 as? ProfileTransferError, .unsafeExportDestination)
+        }
+        XCTAssertTrue((try destination.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true)
+        XCTAssertFalse(try containsExportTemporaryFile(in: directory))
+    }
+
+    func testExportRemainsBoundToOpenedDirectoryWhenParentPathIsReplaced() throws {
+        let root = try temporaryDirectory()
+        let parent = root.deletingLastPathComponent()
+        let directory = parent.appending(path: "PinnedExport", directoryHint: .isDirectory)
+        let openedDirectory = parent.appending(path: "PinnedExportOpened", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appending(path: "profile.json")
+        let faults = ActionTransferFaults { point in
+            if point == .exportAfterDirectoryOpen {
+                try FileManager.default.moveItem(at: directory, to: openedDirectory)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            }
+        }
+        let service = ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(())), faults: faults)
+
+        try service.writeExport(Data("pinned".utf8), to: destination)
+        XCTAssertEqual(try Data(contentsOf: openedDirectory.appending(path: "profile.json")), Data("pinned".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        XCTAssertFalse(try containsExportTemporaryFile(in: openedDirectory))
+        XCTAssertFalse(try containsExportTemporaryFile(in: directory))
+    }
+
+    func testEveryInjectedPreRenameFailurePreservesExistingTargetAndCleansTemporaryFile() throws {
+        for point in [
+            ProfileTransferFaultPoint.exportAfterDirectoryOpen,
+            .exportAfterTemporaryCreate,
+            .exportAfterWrite,
+            .exportAfterPermissionValidation,
+            .exportAfterFileSync,
+            .exportBeforeCommit
+        ] {
+            let root = try temporaryDirectory()
+            let directory = root.deletingLastPathComponent().appending(path: "ExportFailure-\(UUID().uuidString)", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let destination = directory.appending(path: "profile.json")
+            try Data("unchanged".utf8).write(to: destination)
+            let faults = ActionTransferFaults { current in
+                if current == point { throw TemporaryTestError.expected }
+            }
+            let service = ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(())), faults: faults)
+
+            XCTAssertThrowsError(try service.writeExport(Data("replacement".utf8), to: destination)) {
+                XCTAssertEqual($0 as? ProfileTransferError, .exportFailed)
+            }
+            XCTAssertEqual(try Data(contentsOf: destination), Data("unchanged".utf8))
+            XCTAssertFalse(try containsExportTemporaryFile(in: directory))
+        }
+    }
+
+    func testExportPerformsNoTargetOperationAfterDescriptorRelativeRename() throws {
+        let root = try temporaryDirectory()
+        let directory = root.deletingLastPathComponent().appending(path: "RecordedExport", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let operations = RecordingExportFileOperations()
+        let service = ProfileTransferService(
+            profileRoot: root,
+            checker: TestChecker(result: .success(())),
+            exportFileOperations: operations
+        )
+
+        try service.writeExport(Data("recorded".utf8), to: directory.appending(path: "profile.json"))
+        guard let renameIndex = operations.events.lastIndex(of: .rename) else {
+            return XCTFail("Expected descriptor-relative rename")
+        }
+        XCTAssertEqual(Array(operations.events.suffix(from: operations.events.index(after: renameIndex))), [.synchronize, .close])
+        XCTAssertFalse(try containsExportTemporaryFile(in: directory))
+    }
+
     @MainActor
     func testViewModelDisablesExportForUnsavedEditorChanges() throws {
         let root = try temporaryDirectory()
@@ -930,6 +1187,85 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertFalse(model.canExport)
         model.requestExport()
         XCTAssertEqual(model.messageKey, "profile.export.unsaved-changes")
+    }
+
+    @MainActor
+    func testViewModelCancelsPreflightAndSelectionChangeDiscardsPreparedCandidate() async throws {
+        let root = try temporaryDirectory()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
+        let first = try store.create(name: "First")
+        let second = try store.create(name: "Second")
+        let input = root.deletingLastPathComponent().appending(path: "candidate.json")
+        try Data("{}".utf8).write(to: input)
+        let model = ProfileViewModel(store: store)
+        let beforeCancellation = try treeSnapshot(root)
+
+        model.prepareImport(from: input)
+        model.cancelPreparedImport()
+        await Task.yield()
+        XCTAssertNil(model.pendingImportCandidate)
+        XCTAssertEqual(try treeSnapshot(root), beforeCancellation)
+
+        model.prepareImport(from: input)
+        for _ in 0..<100 where model.pendingImportCandidate == nil { await Task.yield() }
+        XCTAssertNotNil(model.pendingImportCandidate)
+        model.selectedID = model.selectedID == first.id ? second.id : first.id
+        XCTAssertNil(model.pendingImportCandidate)
+    }
+
+    @MainActor
+    func testViewModelExportSuccessCancellationAndFailureMessages() throws {
+        let root = try temporaryDirectory()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
+        _ = try store.create(name: "Messages")
+        let model = ProfileViewModel(store: store)
+        let directory = root.deletingLastPathComponent().appending(path: "MessageExport", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        model.requestExport()
+        model.exportCancelled()
+        XCTAssertEqual(model.messageKey, "profile.export.cancelled")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appending(path: "cancelled.json").path))
+
+        model.requestExport()
+        model.exportSelectedProfile(to: directory.appending(path: "success.json"))
+        XCTAssertEqual(model.messageKey, "profile.export.success")
+
+        model.requestExport()
+        model.exportSelectedProfile(to: directory)
+        XCTAssertEqual(model.messageKey, "profile.export.error.unsafe-destination")
+    }
+
+    private func importTransactionRoot(for profileRoot: URL) -> URL {
+        profileRoot.deletingLastPathComponent().appending(path: ".TargetProfileImport", directoryHint: .isDirectory)
+    }
+
+    private func importTransactionContainerExists(for profileRoot: URL) -> Bool {
+        FileManager.default.fileExists(atPath: importTransactionRoot(for: profileRoot).path)
+    }
+
+    private func importJournalExists(for profileRoot: URL) -> Bool {
+        guard let enumerator = FileManager.default.enumerator(at: importTransactionRoot(for: profileRoot), includingPropertiesForKeys: nil) else { return false }
+        return enumerator.compactMap { ($0 as? URL)?.lastPathComponent }.contains("journal.json")
+    }
+
+    private func containsExportTemporaryFile(in directory: URL) throws -> Bool {
+        try FileManager.default.contentsOfDirectory(atPath: directory.path).contains { $0.hasPrefix(".target-profile-export-") }
+    }
+
+    private func assertImportTransactionIsOwnerOnlyAndJournalOmits(_ plaintext: Data, profileRoot: URL) throws {
+        let transactionRoot = importTransactionRoot(for: profileRoot)
+        let transaction = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: transactionRoot, includingPropertiesForKeys: nil).first)
+        for directory in [transactionRoot, transaction] {
+            let permissions = (try FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber)?.intValue
+            XCTAssertEqual((permissions ?? 0) & 0o777, 0o700)
+        }
+        for name in ["journal.json", "manifest.envelope", "selection.envelope"] {
+            let file = transaction.appending(path: name)
+            let permissions = (try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)?.intValue
+            XCTAssertEqual((permissions ?? 0) & 0o777, 0o600)
+        }
+        XCTAssertNil(try Data(contentsOf: transaction.appending(path: "journal.json")).range(of: plaintext))
     }
 
     private func makeStore(checker: TestChecker = TestChecker(result: .success(()))) throws -> ProfileStore {
@@ -1109,6 +1445,100 @@ private final class TestTransferFaults: ProfileTransferFaultInjecting {
     init(points: Set<ProfileTransferFaultPoint>) { self.points = points }
     func check(_ point: ProfileTransferFaultPoint) throws {
         if points.contains(point) { throw NSError(domain: "TestTransferFaults", code: 1) }
+    }
+}
+
+private final class ActionTransferFaults: ProfileTransferFaultInjecting {
+    private let action: (ProfileTransferFaultPoint) throws -> Void
+    init(_ action: @escaping (ProfileTransferFaultPoint) throws -> Void) { self.action = action }
+    func check(_ point: ProfileTransferFaultPoint) throws { try action(point) }
+}
+
+private final class ControllableImportFileOperations: ProfileImportFileOperating {
+    private let base = ProfileImportFileOperations()
+    private let profileRoot: URL
+    var failingWriteName: String?
+    var failingRemoveName: String?
+    var failProfileDirectoryRemoval = false
+
+    init(profileRoot: URL) { self.profileRoot = profileRoot.standardizedFileURL }
+
+    func createDirectory(at url: URL) throws { try base.createDirectory(at: url) }
+    func readFile(at url: URL) throws -> Data { try base.readFile(at: url) }
+    func writeOwnerOnly(_ data: Data, to url: URL) throws {
+        if url.lastPathComponent == failingWriteName { throw TemporaryTestError.expected }
+        try base.writeOwnerOnly(data, to: url)
+    }
+    func moveItem(at source: URL, to destination: URL) throws { try base.moveItem(at: source, to: destination) }
+    func removeItem(at url: URL) throws {
+        if url.lastPathComponent == failingRemoveName { throw TemporaryTestError.expected }
+        if failProfileDirectoryRemoval,
+           url.deletingLastPathComponent().standardizedFileURL == profileRoot,
+           UUID(uuidString: url.lastPathComponent) != nil {
+            throw TemporaryTestError.expected
+        }
+        try base.removeItem(at: url)
+    }
+    func fileExists(at url: URL) -> Bool { base.fileExists(at: url) }
+    func directoryContents(at url: URL) throws -> [URL] { try base.directoryContents(at: url) }
+}
+
+private final class RecordingExportFileOperations: ProfileExportFileOperating {
+    enum Event: Equatable {
+        case openDirectory
+        case create
+        case write
+        case setPermissions
+        case verify
+        case synchronize
+        case destinationInspection
+        case rename
+        case remove
+        case close
+    }
+
+    private let base = ProfileExportFileOperations()
+    private(set) var events: [Event] = []
+
+    func openDirectory(atPath path: String) throws -> Int32 {
+        events.append(.openDirectory)
+        return try base.openDirectory(atPath: path)
+    }
+    func createExclusiveFile(named name: String, in directoryDescriptor: Int32) throws -> Int32 {
+        events.append(.create)
+        return try base.createExclusiveFile(named: name, in: directoryDescriptor)
+    }
+    func write(_ data: Data, to descriptor: Int32) throws {
+        events.append(.write)
+        try base.write(data, to: descriptor)
+    }
+    func setOwnerOnlyPermissions(on descriptor: Int32) throws {
+        events.append(.setPermissions)
+        try base.setOwnerOnlyPermissions(on: descriptor)
+    }
+    func verifyOwnerOnlyRegularFile(_ descriptor: Int32) throws {
+        events.append(.verify)
+        try base.verifyOwnerOnlyRegularFile(descriptor)
+    }
+    func synchronize(_ descriptor: Int32) throws {
+        events.append(.synchronize)
+        try base.synchronize(descriptor)
+    }
+    func destinationKind(named name: String, in directoryDescriptor: Int32) throws -> ProfileExportDestinationKind {
+        events.append(.destinationInspection)
+        return try base.destinationKind(named: name, in: directoryDescriptor)
+    }
+    func rename(_ sourceName: String, to destinationName: String, in directoryDescriptor: Int32) throws {
+        events.append(.rename)
+        try base.rename(sourceName, to: destinationName, in: directoryDescriptor)
+    }
+    func remove(named name: String, in directoryDescriptor: Int32) throws {
+        events.append(.remove)
+        try base.remove(named: name, in: directoryDescriptor)
+    }
+    func close(_ descriptor: Int32) throws {
+        events.append(.close)
+        try base.close(descriptor)
     }
 }
 
