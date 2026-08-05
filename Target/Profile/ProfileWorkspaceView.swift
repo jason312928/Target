@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -6,7 +7,6 @@ struct ProfileWorkspaceView: View {
     @State private var model = ProfileViewModel()
     @State private var sheet: ProfileSheet?
     @State private var isImporting = false
-    @State private var pendingImport = ""
     @State private var showDeleteConfirmation = false
 
     var body: some View {
@@ -29,29 +29,48 @@ struct ProfileWorkspaceView: View {
                 ToolbarItemGroup {
                     Button("profile.action.create", systemImage: "plus") { sheet = .create }
                     Button("profile.action.import", systemImage: "square.and.arrow.down") { isImporting = true }
+                        .disabled(model.isPreparingImport || model.isCommittingImport)
+                        .accessibilityLabel(Text("profile.accessibility.import"))
+                    Button("profile.action.export", systemImage: "square.and.arrow.up") { model.requestExport() }
+                        .disabled(!model.canExport)
+                        .accessibilityLabel(Text("profile.accessibility.export"))
                 }
             }
         } detail: {
             if let profile = model.selectedProfile {
                 editor(for: profile)
             } else {
-                ContentUnavailableView("profile.empty.title", systemImage: "doc.text", description: Text("profile.empty.description"))
+                VStack(spacing: 12) {
+                    ContentUnavailableView("profile.empty.title", systemImage: "doc.text", description: Text("profile.empty.description"))
+                    if model.isPreparingImport { ProgressView("profile.import.preparing") }
+                    if let messageKey = model.messageKey { Text(LocalizedStringKey(messageKey)).foregroundStyle(.secondary) }
+                }
             }
         }
         .fileImporter(isPresented: $isImporting, allowedContentTypes: [.json]) { result in
-            guard case .success(let url) = result else { return }
-            let access = url.startAccessingSecurityScopedResource()
-            defer { if access { url.stopAccessingSecurityScopedResource() } }
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
-            pendingImport = text
-            sheet = .importConfiguration
+            switch result {
+            case .success(let url): model.prepareImport(from: url)
+            case .failure: model.importPickerCancelled()
+            }
         }
         .sheet(item: $sheet) { sheet in
             ProfileNameSheet(sheet: sheet) { name, url in
                 switch sheet {
                 case .create: model.create(name: name, subscriptionURL: url)
                 case .rename: model.renameSelected(to: name)
-                case .importConfiguration: model.importConfiguration(name: name, json: pendingImport)
+                }
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { model.pendingImportCandidate != nil },
+            set: { if !$0 { model.cancelPreparedImport() } }
+        )) {
+            if let candidate = model.pendingImportCandidate {
+                ProfileImportConfirmation(candidate: candidate, isCommitting: model.isCommittingImport) { name in
+                    model.commitPreparedImport(name: name)
+                    lifecycle?.refresh()
+                } cancel: {
+                    model.cancelPreparedImport()
                 }
             }
         }
@@ -74,6 +93,15 @@ struct ProfileWorkspaceView: View {
             Button("profile.action.cancel", role: .cancel) { }
         } message: {
             Text("profile.delete.message")
+        }
+        .alert("profile.export.warning.title", isPresented: Binding(
+            get: { model.isShowingExportWarning },
+            set: { if !$0 { model.dismissExportWarning() } }
+        )) {
+            Button("profile.action.cancel", role: .cancel) { model.dismissExportWarning() }
+            Button("profile.export.warning.confirm") { presentExportPanel() }
+        } message: {
+            Text("profile.export.warning.message")
         }
     }
 
@@ -143,6 +171,10 @@ struct ProfileWorkspaceView: View {
                 Button("profile.action.rename") { sheet = .rename(profile.name) }
                 Button("profile.action.duplicate") { model.duplicateSelected() }
                 Button("profile.action.delete", role: .destructive) { showDeleteConfirmation = true }
+                Button("profile.action.export") { model.requestExport() }
+                    .disabled(!model.canExport)
+                    .help(model.isDirty ? "profile.export.unsaved-changes" : "")
+                    .accessibilityHint(Text(model.isDirty ? "profile.export.unsaved-changes" : "profile.accessibility.export"))
                 Button("profile.action.save") { model.save(); lifecycle?.refresh() }
                     .keyboardShortcut("s")
                     .disabled(!model.isDirty)
@@ -150,6 +182,25 @@ struct ProfileWorkspaceView: View {
         }
         .padding(20)
         .navigationTitle("profile.editor.title")
+        .overlay(alignment: .top) {
+            if model.isPreparingImport || model.isCommittingImport {
+                ProgressView(model.isCommittingImport ? "profile.import.committing" : "profile.import.preparing")
+                    .padding(10)
+                    .background(.regularMaterial, in: Capsule())
+            }
+        }
+    }
+
+    private func presentExportPanel() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = model.defaultExportFileName
+        if panel.runModal() == .OK, let destination = panel.url {
+            model.exportSelectedProfile(to: destination)
+        } else {
+            model.exportCancelled()
+        }
     }
 
 }
@@ -257,8 +308,7 @@ private struct ValidationBadge: View {
 private enum ProfileSheet: Identifiable {
     case create
     case rename(String)
-    case importConfiguration
-    var id: String { switch self { case .create: "create"; case .rename: "rename"; case .importConfiguration: "import" } }
+    var id: String { switch self { case .create: "create"; case .rename: "rename" } }
 }
 
 private struct ProfileNameSheet: View {
@@ -287,6 +337,45 @@ private struct ProfileNameSheet: View {
     }
 
     private var titleKey: LocalizedStringKey {
-        switch sheet { case .create: "profile.create.title"; case .rename: "profile.rename.title"; case .importConfiguration: "profile.import.title" }
+        switch sheet { case .create: "profile.create.title"; case .rename: "profile.rename.title" }
+    }
+}
+
+private struct ProfileImportConfirmation: View {
+    let candidate: ProfileImportCandidate
+    let isCommitting: Bool
+    let confirm: (String) -> Void
+    let cancel: () -> Void
+    @State private var name: String
+
+    init(candidate: ProfileImportCandidate, isCommitting: Bool, confirm: @escaping (String) -> Void, cancel: @escaping () -> Void) {
+        self.candidate = candidate
+        self.isCommitting = isCommitting
+        self.confirm = confirm
+        self.cancel = cancel
+        _name = State(initialValue: candidate.suggestedName)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("profile.import.confirm.title").font(.headline)
+            Text("profile.import.confirm.description").foregroundStyle(.secondary)
+            Text("profile.import.confirm.size") + Text(" \(candidate.fileSize)")
+                .font(.caption).foregroundStyle(.secondary)
+            TextField("profile.field.name", text: $name)
+                .accessibilityLabel(Text("profile.field.name"))
+            HStack {
+                Spacer()
+                Button("profile.action.cancel") { cancel() }.disabled(isCommitting)
+                Button("profile.action.confirm") { confirm(name) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(isCommitting || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if isCommitting { ProgressView("profile.import.committing") }
+        }
+        .padding(20)
+        .frame(width: 420)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text("profile.import.confirm.title"))
     }
 }

@@ -7,15 +7,26 @@ final class ProfileViewModel {
     private let store: ProfileStore
     private let subscriptionFetcher: SecureSubscriptionFetcher
     private var subscriptionTask: Task<Void, Never>?
+    private var importTask: Task<Void, Never>?
 
     private(set) var profiles: [Profile] = []
-    var selectedID: UUID? { didSet { selectProfile() } }
+    var selectedID: UUID? {
+        didSet {
+            if oldValue != selectedID { cancelPreparedImport() }
+            selectProfile()
+        }
+    }
     var editorText = ""
     private(set) var diagnostic: ConfigurationDiagnostic?
     private(set) var isDirty = false
     private(set) var messageKey: String?
     private(set) var pendingSubscriptionUpdate: PendingSubscriptionUpdate?
     private(set) var isUpdatingSubscription = false
+    private(set) var pendingImportCandidate: ProfileImportCandidate?
+    private(set) var isPreparingImport = false
+    private(set) var isCommittingImport = false
+    private(set) var isShowingExportWarning = false
+    private(set) var isExporting = false
 
     init(store: ProfileStore = ProfileStore(), subscriptionFetcher: SecureSubscriptionFetcher = SecureSubscriptionFetcher()) {
         self.store = store
@@ -24,6 +35,8 @@ final class ProfileViewModel {
     }
 
     var selectedProfile: Profile? { profiles.first { $0.id == selectedID } }
+    var canExport: Bool { selectedProfile != nil && !isDirty && !isExporting }
+    var defaultExportFileName: String { store.defaultExportFileNameForSelectedProfile() ?? "Profile.json" }
 
     func reload() {
         do {
@@ -46,14 +59,88 @@ final class ProfileViewModel {
         } catch { messageKey = "profile.message.operation-failed" }
     }
 
-    func importConfiguration(name: String, json: String) {
+    func prepareImport(from url: URL) {
+        cancelPreparedImport()
+        isPreparingImport = true
+        messageKey = nil
+        importTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.importTask = nil
+                self.isPreparingImport = false
+            }
+            do {
+                let candidate = try self.store.prepareImportCandidate(from: url)
+                guard !Task.isCancelled else { return }
+                self.pendingImportCandidate = candidate
+            } catch let error as ProfileTransferError {
+                guard !Task.isCancelled else { return }
+                self.messageKey = self.transferMessageKey(for: error)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.messageKey = "profile.import.error.unreadable"
+            }
+        }
+    }
+
+    func commitPreparedImport(name: String) {
+        guard let candidate = pendingImportCandidate, !isCommittingImport else { return }
+        isCommittingImport = true
+        messageKey = nil
         do {
-            let profile = try store.import(name: name, json: json)
+            let profile = try store.importCandidate(candidate, name: name)
+            pendingImportCandidate = nil
             reload()
             selectedID = profile.id
+            messageKey = "profile.import.success"
         } catch let error as ProfileStoreError {
             present(error)
         } catch { messageKey = "profile.message.operation-failed" }
+        isCommittingImport = false
+    }
+
+    func cancelPreparedImport() {
+        importTask?.cancel()
+        importTask = nil
+        isPreparingImport = false
+        pendingImportCandidate = nil
+    }
+
+    func importPickerCancelled() {
+        cancelPreparedImport()
+        messageKey = "profile.import.cancelled"
+    }
+
+    func requestExport() {
+        guard canExport else {
+            if isDirty { messageKey = "profile.export.unsaved-changes" }
+            return
+        }
+        isShowingExportWarning = true
+    }
+
+    func dismissExportWarning() {
+        isShowingExportWarning = false
+    }
+
+    func exportSelectedProfile(to destination: URL) {
+        guard canExport else { return }
+        isShowingExportWarning = false
+        isExporting = true
+        defer { isExporting = false }
+        do {
+            try store.exportSelectedProfile(to: destination)
+            messageKey = "profile.export.success"
+        } catch let error as ProfileTransferError {
+            messageKey = transferMessageKey(for: error)
+        } catch {
+            messageKey = "profile.export.error.failed"
+        }
+    }
+
+    func exportCancelled() {
+        isShowingExportWarning = false
+        messageKey = "profile.export.cancelled"
     }
 
     func duplicateSelected() {
@@ -204,6 +291,18 @@ final class ProfileViewModel {
             self.messageKey = "profile.message.stop-before-delete"
         default:
             self.messageKey = "profile.message.operation-failed"
+        }
+    }
+
+    private func transferMessageKey(for error: ProfileTransferError) -> String {
+        switch error {
+        case .unreadableImport: "profile.import.error.unreadable"
+        case .importTooLarge: "profile.import.error.too-large"
+        case .importInvalidUTF8: "profile.import.error.invalid-utf8"
+        case .importInvalidJSON: "profile.import.error.invalid-json"
+        case .importValidationFailed: "profile.import.error.validation"
+        case .unsafeExportDestination: "profile.export.error.unsafe-destination"
+        case .exportFailed: "profile.export.error.failed"
         }
     }
 }

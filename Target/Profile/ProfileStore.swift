@@ -15,6 +15,8 @@ final class ProfileStore {
     private let runtimeUsage: any ProfileRuntimeUsageChecking
     private let encryptedStorage: ProfileEncryptedStorage
     private let validationTemporaryStorage: ProfileValidationTemporaryStorage
+    private let transferService: ProfileTransferService
+    private let transferFaults: any ProfileTransferFaultInjecting
 
     init(
         rootDirectory: URL = ProfileStore.defaultRootDirectory(),
@@ -23,7 +25,8 @@ final class ProfileStore {
         now: @escaping () -> Date = Date.init,
         runtimeUsage: any ProfileRuntimeUsageChecking = EngineRuntimeOwnership(),
         keyProvider: any ProfileEncryptionKeyProviding = KeychainProfileEncryptionKeyProvider(),
-        storageFaults: any ProfileStorageFaultInjecting = NoProfileStorageFaults()
+        storageFaults: any ProfileStorageFaultInjecting = NoProfileStorageFaults(),
+        transferFaults: any ProfileTransferFaultInjecting = NoProfileTransferFaults()
     ) {
         self.rootDirectory = rootDirectory.standardizedFileURL
         self.checker = checker
@@ -32,6 +35,8 @@ final class ProfileStore {
         self.runtimeUsage = runtimeUsage
         encryptedStorage = ProfileEncryptedStorage(root: rootDirectory, fileManager: fileManager, keyProvider: keyProvider, faults: storageFaults)
         validationTemporaryStorage = ProfileValidationTemporaryStorage(profileRoot: rootDirectory, fileManager: fileManager)
+        transferService = ProfileTransferService(profileRoot: rootDirectory, checker: checker, fileManager: fileManager, faults: transferFaults)
+        self.transferFaults = transferFaults
     }
 
     static func defaultRootDirectory() -> URL {
@@ -68,9 +73,92 @@ final class ProfileStore {
 
     @discardableResult
     func `import`(name: String, json: String, subscriptionURL: URL? = nil) throws -> Profile {
-        let profile = try create(name: name, subscriptionURL: subscriptionURL)
-        do { try save(json: json, for: profile.id); return try self.profile(profile.id) ?? profile }
-        catch { try? delete(profile.id); throw error }
+        guard subscriptionURL == nil else { throw ProfileStoreError.invalidStoredMetadata }
+        let candidate = try transferService.prepareImport(data: Data(json.utf8), suggestedName: name)
+        return try importCandidate(candidate, name: name)
+    }
+
+    /// Performs all external-file checks before it changes Profile persistence.
+    func prepareImportCandidate(from url: URL) throws -> ProfileImportCandidate {
+        try transferService.prepareImport(from: url)
+    }
+
+    /// A preflighted import becomes revision 1 directly; no example configuration or
+    /// RemoteSubscription metadata is created as part of this transaction.
+    @discardableResult
+    func importCandidate(_ candidate: ProfileImportCandidate, name: String) throws -> Profile {
+        let normalizedName = try validatedName(name)
+        try ensureRoot()
+        let originalProfiles = try loadManifest()
+        let originalSelection = try loadSelection()
+        let originalManifestEnvelope = try Data(contentsOf: safeRootFile(Self.manifestName))
+        let originalSelectionEnvelope = try Data(contentsOf: safeRootFile(Self.selectionName))
+        let timestamp = now()
+        let profile = Profile(
+            id: UUID(), name: normalizedName, subscription: nil,
+            createdAt: timestamp, updatedAt: timestamp,
+            validation: candidate.validation, validRevision: 1
+        )
+        let staging = importStagingDirectory(for: profile.id)
+        let finalDirectory = try safeProfileDirectory(profile.id)
+        var movedToLiveRoot = false
+        var manifestWasWritten = false
+        var selectionWasAttempted = false
+        defer {
+            try? fileManager.removeItem(at: staging)
+            try? fileManager.removeItem(at: staging.deletingLastPathComponent())
+        }
+
+        do {
+            try transferFaults.check(.importDirectoryCreation)
+            try encryptedStorage.createProfileDirectory(staging)
+            try transferFaults.check(.importCurrentConfigurationWrite)
+            try encryptedStorage.write(
+                candidate.data,
+                kind: .currentConfiguration,
+                logicalPath: "\(profile.id.uuidString)/\(Self.configurationName)",
+                url: staging.appending(path: Self.configurationName)
+            )
+            try transferFaults.check(.importRevisionWrite)
+            try encryptedStorage.write(
+                candidate.data,
+                kind: .version,
+                logicalPath: "\(profile.id.uuidString)/versions/1.json",
+                url: staging.appending(path: "versions/1.json")
+            )
+            try fileManager.moveItem(at: staging, to: finalDirectory)
+            movedToLiveRoot = true
+
+            var updatedProfiles = originalProfiles
+            updatedProfiles.append(profile)
+            try transferFaults.check(.importManifestWrite)
+            try saveManifest(updatedProfiles)
+            manifestWasWritten = true
+            try transferFaults.check(.importSelectionWrite)
+            selectionWasAttempted = true
+            try select(profile.id)
+            return profile
+        } catch {
+            if manifestWasWritten { try? restoreEncryptedRecord(originalManifestEnvelope, to: safeRootFile(Self.manifestName)) }
+            if selectionWasAttempted { try? restoreEncryptedRecord(originalSelectionEnvelope, to: safeRootFile(Self.selectionName)) }
+            if movedToLiveRoot {
+                // A fault may model the first cleanup attempt failing. Retry the
+                // concrete cleanup so a recoverable transaction never leaves an
+                // unreferenced directory in the authenticated Profile tree.
+                _ = try? transferFaults.check(.importRollbackCleanup)
+                try? fileManager.removeItem(at: finalDirectory)
+            }
+            throw error
+        }
+    }
+
+    /// Exports only the selected Profile's last persisted valid revision.
+    func exportSelectedProfile(to destination: URL) throws {
+        try transferService.writeExport(try selectedValidVersion().data, to: destination)
+    }
+
+    func defaultExportFileNameForSelectedProfile() -> String? {
+        selectedProfile().map { ProfileTransferService.defaultExportFileName(for: $0.name) }
     }
 
     @discardableResult
@@ -106,6 +194,15 @@ final class ProfileStore {
         guard let id = try selectedProfileID() else { throw ProfileStoreError.noSelectedProfile }
         guard let profile = try profile(id) else { throw ProfileStoreError.profileNotFound }
         return try validVersion(for: profile, revision: profile.validRevision)
+    }
+
+    func selectedProfile() -> Profile? {
+        do {
+            guard let id = try selectedProfileID() else { return nil }
+            return try profile(id)
+        } catch {
+            return nil
+        }
     }
 
     func validVersion(for id: UUID, revision: Int) throws -> ProfileConfigurationVersion {
@@ -183,6 +280,10 @@ final class ProfileStore {
 
     private func loadManifest() throws -> [Profile] { try ensureRoot(); do { return try JSONDecoder().decode([Profile].self, from: encryptedStorage.read(kind: .manifest, logicalPath: Self.manifestName, url: safeRootFile(Self.manifestName))) } catch let error as ProfileStoreError { throw error } catch { throw ProfileStoreError.invalidStoredMetadata } }
     private func saveManifest(_ profiles: [Profile]) throws { try encryptedStorage.write(try JSONEncoder().encode(profiles), kind: .manifest, logicalPath: Self.manifestName, url: safeRootFile(Self.manifestName)) }
+    private func restoreEncryptedRecord(_ envelope: Data, to url: URL) throws {
+        try envelope.write(to: url, options: .atomic)
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
     private func loadSelection() throws -> UUID? { try ensureRoot(); do { let text = try JSONDecoder().decode(String?.self, from: encryptedStorage.read(kind: .selection, logicalPath: Self.selectionName, url: safeRootFile(Self.selectionName))); return text.flatMap(UUID.init(uuidString:)) } catch let error as ProfileStoreError { throw error } catch { throw ProfileStoreError.invalidStoredMetadata } }
     private func configurationData(for id: UUID) throws -> Data { try encryptedStorage.read(kind: .currentConfiguration, logicalPath: "\(id.uuidString)/\(Self.configurationName)", url: try configurationURL(for: id)) }
     private func versionData(for id: UUID, revision: Int) throws -> Data { try encryptedStorage.read(kind: .version, logicalPath: "\(id.uuidString)/versions/\(revision).json", url: try versionURL(for: id, revision: revision)) }
@@ -193,6 +294,11 @@ final class ProfileStore {
     private func configurationURL(for id: UUID) throws -> URL { try safeProfileDirectory(id).appending(path: Self.configurationName) }
     private func versionURL(for id: UUID, revision: Int) throws -> URL { guard revision > 0 else { throw ProfileStoreError.unsafePath }; return try safeProfileDirectory(id).appending(path: "versions/\(revision).json") }
     private func safeProfileDirectory(_ id: UUID) throws -> URL { try safeRootFile(id.uuidString, directory: true) }
+    private func importStagingDirectory(for id: UUID) -> URL {
+        rootDirectory.deletingLastPathComponent()
+            .appending(path: ".TargetProfileImport", directoryHint: .isDirectory)
+            .appending(path: id.uuidString, directoryHint: .isDirectory)
+    }
     private func safeRootFile(_ relativePath: String, directory: Bool = false) throws -> URL { guard !relativePath.isEmpty, !relativePath.hasPrefix("/"), !relativePath.split(separator: "/").contains(where: { $0 == ".." || $0 == "." }) else { throw ProfileStoreError.unsafePath }; let url = rootDirectory.appending(path: relativePath, directoryHint: directory ? .isDirectory : .notDirectory).standardizedFileURL; guard url.path.hasPrefix(rootDirectory.path + "/") else { throw ProfileStoreError.unsafePath }; return url }
     private func recordSubscriptionResult(for id: UUID, response: SubscriptionResponse, error: String?) throws { try update(id) { guard var subscription = $0.subscription else { return }; let timestamp = now(); subscription.lastCheckedAt = timestamp; if response.cacheStatus == .updated { subscription.lastUpdatedAt = timestamp }; subscription.etag = response.etag; subscription.lastModified = response.lastModified; subscription.cacheStatus = response.cacheStatus; subscription.lastErrorKey = error; $0.subscription = subscription } }
 }

@@ -779,6 +779,159 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertTrue(EngineRuntimeProfileState.requiresRestart(record: record, selected: try store.selectedValidVersion()))
     }
 
+    func testPreflightedImportBecomesRevisionOneAndPreservesRawBytes() throws {
+        let root = try temporaryDirectory()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
+        let existing = try store.create(name: "Existing")
+        let source = Data("{\n  \"unknown_field\" : [ true, 7 ],\n  \"inbounds\" : [], \"outbounds\" : [], \"route\" : {}\n}\n".utf8)
+        let candidate = try ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(()))).prepareImport(data: source, suggestedName: "  Imported  ")
+
+        let profile = try store.importCandidate(candidate, name: "  Imported  ")
+        let restored = try ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider()).validVersion(for: profile.id, revision: 1)
+
+        XCTAssertEqual(profile.validRevision, 1)
+        XCTAssertEqual(profile.validation.status, .valid)
+        XCTAssertNil(profile.subscription)
+        XCTAssertEqual(restored.data, source)
+        XCTAssertEqual(try store.configurationText(for: profile.id).data(using: .utf8), source)
+        XCTAssertEqual(try store.availableValidVersions(for: profile.id).map(\.revision), [1])
+        XCTAssertEqual(try store.selectedProfileID(), profile.id)
+        XCTAssertNotEqual(try store.selectedProfileID(), existing.id)
+    }
+
+    func testImportPreflightRejectsInvalidInputsWithoutChangingProfileTree() throws {
+        let root = try temporaryDirectory()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
+        _ = try store.create(name: "Existing")
+        let before = try treeSnapshot(root)
+        let service = ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(())))
+
+        XCTAssertThrowsError(try service.prepareImport(data: Data([0xFF]), suggestedName: "bad")) { XCTAssertEqual($0 as? ProfileTransferError, .importInvalidUTF8) }
+        XCTAssertThrowsError(try service.prepareImport(data: Data("{\"inbounds\":[}".utf8), suggestedName: "bad")) { XCTAssertEqual($0 as? ProfileTransferError, .importInvalidJSON) }
+        XCTAssertEqual(try treeSnapshot(root), before)
+
+        let failing = ProfileTransferService(profileRoot: root, checker: TestChecker(result: .failure(ConfigurationDiagnostic(messageKey: "profile.validation.check-failed", line: nil, column: nil))))
+        XCTAssertThrowsError(try failing.prepareImport(data: Data("{}".utf8), suggestedName: "bad")) { XCTAssertEqual($0 as? ProfileTransferError, .importValidationFailed) }
+        XCTAssertEqual(try treeSnapshot(root), before)
+    }
+
+    func testImportFileRejectsDirectorySymlinkAndSizeBoundary() throws {
+        let root = try temporaryDirectory()
+        let inputDirectory = root.deletingLastPathComponent().appending(path: "Input", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: inputDirectory, withIntermediateDirectories: true)
+        let service = ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(())))
+        XCTAssertThrowsError(try service.prepareImport(from: inputDirectory)) { XCTAssertEqual($0 as? ProfileTransferError, .unreadableImport) }
+
+        let source = inputDirectory.appending(path: "source.json")
+        try Data("{}".utf8).write(to: source)
+        let link = inputDirectory.appending(path: "link.json")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: source)
+        XCTAssertThrowsError(try service.prepareImport(from: link)) { XCTAssertEqual($0 as? ProfileTransferError, .unreadableImport) }
+
+        let exact = Data("{}".utf8) + Data(repeating: 0x20, count: ProfileTransferService.maximumImportBytes - 2)
+        let exactFile = inputDirectory.appending(path: "exact.json")
+        try exact.write(to: exactFile)
+        XCTAssertEqual(try service.prepareImport(from: exactFile).fileSize, ProfileTransferService.maximumImportBytes)
+
+        let oversized = inputDirectory.appending(path: "oversized.json")
+        try (exact + Data([0x20])).write(to: oversized)
+        XCTAssertThrowsError(try service.prepareImport(from: oversized)) { XCTAssertEqual($0 as? ProfileTransferError, .importTooLarge) }
+    }
+
+    func testImportTransactionFailuresRestoreExistingTreeAndSelection() throws {
+        for point in [
+            ProfileTransferFaultPoint.importDirectoryCreation,
+            .importCurrentConfigurationWrite,
+            .importRevisionWrite,
+            .importManifestWrite,
+            .importSelectionWrite
+        ] {
+            let root = try temporaryDirectory()
+            let keys = TestProfileKeyProvider()
+            let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, transferFaults: TestTransferFaults(points: [point]))
+            let existing = try store.create(name: "Existing")
+            if point == .importSelectionWrite { try store.select(nil) }
+            let before = try treeSnapshot(root)
+            let selection = try store.selectedProfileID()
+            let candidate = try ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(()))).prepareImport(data: Data("{}".utf8), suggestedName: "Imported")
+
+            XCTAssertThrowsError(try store.importCandidate(candidate, name: "Imported"))
+            XCTAssertEqual(try treeSnapshot(root), before)
+            let restored = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+            XCTAssertEqual(try restored.listProfiles().map(\.id), [existing.id])
+            XCTAssertEqual(try restored.selectedProfileID(), selection)
+        }
+    }
+
+    func testImportRollbackCleanupFaultStillLeavesNoOrphanDirectory() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let faults = TestTransferFaults(points: [.importManifestWrite, .importRollbackCleanup])
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, transferFaults: faults)
+        let existing = try store.create(name: "Existing")
+        let before = try treeSnapshot(root)
+        let candidate = try ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(()))).prepareImport(data: Data("{}".utf8), suggestedName: "Imported")
+
+        XCTAssertThrowsError(try store.importCandidate(candidate, name: "Imported"))
+        XCTAssertEqual(try treeSnapshot(root), before)
+        XCTAssertEqual(try ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys).listProfiles().map(\.id), [existing.id])
+    }
+
+    func testExportUsesLastPersistedRevisionAndCreatesOwnerOnlyFile() throws {
+        let root = try temporaryDirectory()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
+        let profile = try store.create(name: "Export / Test")
+        let persisted = Data("{ \"inbounds\" : [], \"outbounds\" : [], \"route\" : {}, \"secret\" : \"synthetic\" }\n".utf8)
+        try store.save(json: String(decoding: persisted, as: UTF8.self), for: profile.id)
+        let directory = root.deletingLastPathComponent().appending(path: "Export", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appending(path: "profile.json")
+
+        try store.exportSelectedProfile(to: destination)
+        XCTAssertEqual(try Data(contentsOf: destination), persisted)
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: destination.path)[.posixPermissions] as? NSNumber)?.intValue ?? 0 & 0o777, 0o600)
+        XCTAssertEqual(ProfileTransferService.defaultExportFileName(for: " /Unsafe:\\Name\u{0000} "), "UnsafeName.json")
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: directory.path).contains(where: { $0.hasPrefix(".target-profile-export-") }))
+    }
+
+    func testExportRejectsUnsafeDestinationsAndPreservesExistingFileOnFailure() throws {
+        let root = try temporaryDirectory()
+        let directory = root.deletingLastPathComponent().appending(path: "Export", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let data = Data("{\"synthetic\":true}".utf8)
+        let service = ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(())))
+        XCTAssertThrowsError(try service.writeExport(data, to: directory)) { XCTAssertEqual($0 as? ProfileTransferError, .unsafeExportDestination) }
+
+        let target = directory.appending(path: "target.json")
+        let linked = directory.appending(path: "linked.json")
+        try Data("old".utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: target)
+        XCTAssertThrowsError(try service.writeExport(data, to: linked)) { XCTAssertEqual($0 as? ProfileTransferError, .unsafeExportDestination) }
+        XCTAssertEqual(try Data(contentsOf: target), Data("old".utf8))
+
+        let existing = directory.appending(path: "existing.json")
+        try Data("unchanged".utf8).write(to: existing)
+        let failing = ProfileTransferService(profileRoot: root, checker: TestChecker(result: .success(())), faults: TestTransferFaults(points: [.exportBeforeCommit]))
+        XCTAssertThrowsError(try failing.writeExport(data, to: existing)) { XCTAssertEqual($0 as? ProfileTransferError, .exportFailed) }
+        XCTAssertEqual(try Data(contentsOf: existing), Data("unchanged".utf8))
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: directory.path).contains(where: { $0.hasPrefix(".target-profile-export-") }))
+    }
+
+    @MainActor
+    func testViewModelDisablesExportForUnsavedEditorChanges() throws {
+        let root = try temporaryDirectory()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
+        let profile = try store.create(name: "Editor")
+        let model = ProfileViewModel(store: store)
+
+        XCTAssertEqual(model.selectedProfile?.id, profile.id)
+        XCTAssertTrue(model.canExport)
+        model.updateEditor("{\"changed\":true}")
+        XCTAssertFalse(model.canExport)
+        model.requestExport()
+        XCTAssertEqual(model.messageKey, "profile.export.unsaved-changes")
+    }
+
     private func makeStore(checker: TestChecker = TestChecker(result: .success(()))) throws -> ProfileStore {
         ProfileStore(rootDirectory: try temporaryDirectory(), checker: checker, keyProvider: TestProfileKeyProvider())
     }
@@ -949,6 +1102,14 @@ private final class TestStorageFaults: ProfileStorageFaultInjecting {
     let failing: ProfileStorageFaultPoint
     init(failing: ProfileStorageFaultPoint) { self.failing = failing }
     func check(_ point: ProfileStorageFaultPoint) throws { if point == failing { throw NSError(domain: "TestStorageFaults", code: 1) } }
+}
+
+private final class TestTransferFaults: ProfileTransferFaultInjecting {
+    let points: Set<ProfileTransferFaultPoint>
+    init(points: Set<ProfileTransferFaultPoint>) { self.points = points }
+    func check(_ point: ProfileTransferFaultPoint) throws {
+        if points.contains(point) { throw NSError(domain: "TestTransferFaults", code: 1) }
+    }
 }
 
 private struct FixedPortSelector: LocalEnginePortSelecting {
