@@ -1,5 +1,81 @@
 import Foundation
 
+/// Presentation-only facts for the Profile workspace. This keeps display
+/// decisions deterministic without creating another source of Profile state.
+struct ProfileWorkspacePresentation: Equatable {
+    enum Source: Equatable {
+        case local
+        case remote
+    }
+
+    let source: Source
+    let validationTitleKey: String
+    let validationLevel: ProfileWorkspaceStatusLevel
+    let subscriptionTitleKey: String?
+    let subscriptionLevel: ProfileWorkspaceStatusLevel?
+    let hasSubscriptionError: Bool
+
+    init(profile: Profile) {
+        source = profile.hasRemoteSubscription ? .remote : .local
+
+        switch profile.validation.status {
+        case .valid:
+            validationTitleKey = "profile.validation.valid"
+            validationLevel = .positive
+        case .invalid:
+            validationTitleKey = "profile.validation.invalid"
+            validationLevel = .critical
+        case .notChecked:
+            validationTitleKey = "profile.validation.not-checked"
+            validationLevel = .neutral
+        }
+
+        if let subscription = profile.subscription {
+            subscriptionTitleKey = subscription.cacheStatus == .notModified
+                ? "profile.subscription.cache.not-modified"
+                : "profile.subscription.cache.\(subscription.cacheStatus.rawValue)"
+            subscriptionLevel = Self.subscriptionLevel(for: subscription.cacheStatus)
+            hasSubscriptionError = subscription.lastErrorKey != nil
+        } else {
+            subscriptionTitleKey = nil
+            subscriptionLevel = nil
+            hasSubscriptionError = false
+        }
+    }
+
+    private static func subscriptionLevel(for status: SubscriptionCacheStatus) -> ProfileWorkspaceStatusLevel {
+        switch status {
+        case .updated:
+            .positive
+        case .failed:
+            .critical
+        case .cancelled:
+            .warning
+        case .notChecked, .notModified:
+            .neutral
+        }
+    }
+}
+
+enum ProfileWorkspaceStatusLevel: Equatable {
+    case neutral
+    case positive
+    case warning
+    case critical
+}
+
+enum ProfileWorkspaceLayout {
+    static let minimumEditorHeight: CGFloat = 180
+    static let preferredEditorHeight: CGFloat = 260
+    static let sidebarMinimumWidth: CGFloat = 140
+    static let sidebarIdealWidth: CGFloat = 170
+    static let sidebarMaximumWidth: CGFloat = 210
+
+    static func usesCompactMetadata(for availableWidth: CGFloat) -> Bool {
+        availableWidth < 430
+    }
+}
+
 /// An auditable description of a Profile action that must not replace a dirty
 /// editor until the user explicitly resolves its changes. It intentionally
 /// carries data, not arbitrary deferred closures.

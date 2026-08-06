@@ -16,49 +16,28 @@ struct ProfileWorkspaceView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: Binding(get: { model.selectedID }, set: model.requestSelection)) {
-                ForEach(model.profiles) { profile in
-                    ProfileRow(profile: profile)
-                        .accessibilityElement(children: .combine)
-                        .accessibilityIdentifier("profile.row.\(profile.id.uuidString)")
-                        .tag(profile.id)
-                        .contextMenu {
-                            Button("profile.action.duplicate") { model.requestDuplicate(profile.id) }
-                            Button("profile.action.rename") { sheet = .rename(profile.id, profile.name) }
-                            Divider()
-                            Button("profile.action.delete", role: .destructive) { deleteTarget = profile.id }
-                        }
-                }
-            }
-            .listStyle(.sidebar)
-            .navigationTitle("profile.list.title")
-            .toolbar {
-                ToolbarItemGroup {
-                    Button("profile.action.create", systemImage: "plus") { sheet = .create }
-                    Button("profile.action.import", systemImage: "square.and.arrow.down") { isImporting = true }
-                        .disabled(model.isPreparingImport || model.isCommittingImport)
-                        .accessibilityLabel(Text("profile.accessibility.import"))
-                    Button("profile.action.export", systemImage: "square.and.arrow.up") { model.requestExport() }
-                        .disabled(!model.canExport)
-                        .accessibilityLabel(Text("profile.accessibility.export"))
-                }
-            }
+            profileList
         } detail: {
             if let profile = model.selectedProfile {
-                editor(for: profile)
+                ProfileWorkspaceDetailView(
+                    profile: profile,
+                    model: model,
+                    showRename: { sheet = .rename(profile.id, profile.name) },
+                    requestDelete: { deleteTarget = profile.id },
+                    requestExport: { model.requestExport() }
+                )
             } else {
-                TargetPageLayout {
-                    TargetPageHeader("profile.title")
-                    VStack(spacing: 12) {
-                        ContentUnavailableView("profile.empty.title", systemImage: "doc.text", description: Text("profile.empty.description"))
-                        if model.isPreparingImport { ProgressView("profile.import.preparing") }
-                        if let messageKey = model.messageKey { Text(LocalizedStringKey(messageKey)).foregroundStyle(.secondary) }
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 260)
-                }
+                ProfileWorkspaceEmptyState(
+                    isPreparingImport: model.isPreparingImport,
+                    messageKey: model.messageKey
+                )
             }
         }
-        .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 220)
+        .navigationSplitViewColumnWidth(
+            min: ProfileWorkspaceLayout.sidebarMinimumWidth,
+            ideal: ProfileWorkspaceLayout.sidebarIdealWidth,
+            max: ProfileWorkspaceLayout.sidebarMaximumWidth
+        )
         .fileImporter(isPresented: $isImporting, allowedContentTypes: [.json]) { result in
             switch result {
             case .success(let url): model.prepareImport(from: url)
@@ -152,96 +131,40 @@ struct ProfileWorkspaceView: View {
         }
     }
 
-    @ViewBuilder
-    private func editor(for profile: Profile) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(profile.name).font(.title2)
-                    Text(profile.hasRemoteSubscription ? "profile.source.remote" : "profile.source.local")
-                        .font(.caption).foregroundStyle(.secondary)
+    private var profileList: some View {
+        List(selection: Binding(get: { model.selectedID }, set: model.requestSelection)) {
+            Section {
+                ForEach(model.profiles) { profile in
+                    ProfileRow(profile: profile)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("profile.row.\(profile.id.uuidString)")
+                        .tag(profile.id)
+                        .contextMenu {
+                            Button("profile.action.duplicate") { model.requestDuplicate(profile.id) }
+                            Button("profile.action.rename") { sheet = .rename(profile.id, profile.name) }
+                            Divider()
+                            Button("profile.action.delete", role: .destructive) { deleteTarget = profile.id }
+                        }
                 }
-                Spacer()
-                ValidationBadge(validation: profile.validation)
-            }
-
-            HStack(spacing: 14) {
-                Label { Text(profile.updatedAt, style: .relative) } icon: { Image(systemName: "clock") }
-                Text("profile.revision") + Text(" \(profile.validRevision)")
-                if let checkedAt = profile.validation.checkedAt { Text(checkedAt, style: .relative) }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-
-            if model.isDirty {
-                Label("profile.unsaved.indicator", systemImage: "circle.fill")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.orange)
-                    .accessibilityLabel(Text("profile.unsaved.indicator"))
-                    .accessibilityHint(Text("profile.unsaved.accessibility.hint"))
-            }
-
-            if let subscription = profile.subscription {
-                HStack(spacing: 10) {
-                    Label {
-                        Text(LocalizedStringKey(subscription.cacheStatus == .notModified ? "profile.subscription.cache.not-modified" : "profile.subscription.cache.\(subscription.cacheStatus.rawValue)"))
-                    } icon: { Image(systemName: "arrow.triangle.2.circlepath") }
-                    if let checked = subscription.lastCheckedAt { Text(checked, style: .relative) }
-                    if let error = subscription.lastErrorKey { Text(LocalizedStringKey(error)).foregroundStyle(.red) }
-                    Spacer()
-                    if model.isUpdatingSubscription {
-                        ProgressView().controlSize(.small)
-                        Button("profile.subscription.cancel") { model.cancelSubscriptionUpdate() }
-                    } else {
-                        Button("profile.subscription.update") { model.updateSubscription() }
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-
-            JSONCodeEditor(text: Binding(get: { model.editorText }, set: model.updateEditor)) { model.updateEditor($0) }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            if let diagnostic = model.diagnostic {
-                Label {
-                    Text(LocalizedStringKey(diagnostic.messageKey))
-                    if let line = diagnostic.line, let column = diagnostic.column {
-                        Text("profile.validation.location") + Text(" \(line):\(column)")
-                    }
-                } icon: { Image(systemName: "exclamationmark.triangle.fill") }
-                .foregroundStyle(.red)
-                .font(.callout)
-            } else if let messageKey = model.messageKey {
-                Text(LocalizedStringKey(messageKey)).foregroundStyle(.secondary).font(.callout)
-            }
-
-            HStack {
-                Button("profile.action.format") { model.format() }
-                Button("profile.action.restore") { model.requestRestore(profile.id) }
-                    .disabled(profile.validRevision <= 1)
-                Text("profile.history.available") + Text(" \(profile.validRevision)")
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("profile.action.rename") { sheet = .rename(profile.id, profile.name) }
-                Button("profile.action.duplicate") { model.requestDuplicate(profile.id) }
-                Button("profile.action.delete", role: .destructive) { deleteTarget = profile.id }
-                Button("profile.action.export") { model.requestExport() }
-                    .disabled(!model.canExport)
-                    .help(model.isDirty ? "profile.export.unsaved-changes" : "")
-                    .accessibilityHint(Text(model.isDirty ? "profile.export.unsaved-changes" : "profile.accessibility.export"))
-                Button("profile.action.save") { model.save() }
-                    .keyboardShortcut("s")
-                    .disabled(!model.isDirty)
+            } header: {
+                Text("profile.list.section")
             }
         }
-        .padding(20)
-        .navigationTitle("profile.editor.title")
-        .overlay(alignment: .top) {
-            if model.isPreparingImport || model.isCommittingImport {
-                ProgressView(model.isCommittingImport ? "profile.import.committing" : "profile.import.preparing")
-                    .padding(10)
-                    .background(.regularMaterial, in: Capsule())
+        .listStyle(.sidebar)
+        .navigationTitle("profile.list.title")
+        .accessibilityIdentifier("profile.list")
+        .toolbar {
+            ToolbarItemGroup {
+                Button("profile.action.create", systemImage: "plus") { sheet = .create }
+                    .accessibilityIdentifier("profile.action.create")
+                Button("profile.action.import", systemImage: "square.and.arrow.down") { isImporting = true }
+                    .disabled(model.isPreparingImport || model.isCommittingImport)
+                    .accessibilityIdentifier("profile.action.import")
+                    .accessibilityLabel(Text("profile.accessibility.import"))
+                Button("profile.action.export", systemImage: "square.and.arrow.up") { model.requestExport() }
+                    .disabled(!model.canExport)
+                    .accessibilityIdentifier("profile.action.export")
+                    .accessibilityLabel(Text("profile.accessibility.export"))
             }
         }
     }
@@ -258,6 +181,368 @@ struct ProfileWorkspaceView: View {
         }
     }
 
+}
+
+private struct ProfileWorkspaceEmptyState: View {
+    let isPreparingImport: Bool
+    let messageKey: String?
+
+    var body: some View {
+        TargetPageLayout {
+            TargetPageHeader("profile.title", subtitleKey: "profile.empty.subtitle")
+            ContentUnavailableView(
+                "profile.empty.title",
+                systemImage: "doc.text",
+                description: Text("profile.empty.description")
+            )
+            .accessibilityIdentifier("profile.workspace.empty")
+            if isPreparingImport {
+                ProgressView("profile.import.preparing")
+                    .accessibilityIdentifier("profile.workspace.busy")
+            }
+            if let messageKey {
+                TargetNotice(level: .warning, messageKey: messageKey)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .accessibilityIdentifier("profile.workspace")
+    }
+}
+
+private struct ProfileWorkspaceDetailView: View {
+    let profile: Profile
+    @Bindable var model: ProfileViewModel
+    let showRename: () -> Void
+    let requestDelete: () -> Void
+    let requestExport: () -> Void
+
+    private var presentation: ProfileWorkspacePresentation { ProfileWorkspacePresentation(profile: profile) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ProfileSummaryHeader(profile: profile, model: model, presentation: presentation)
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
+
+            if let subscription = profile.subscription {
+                Divider().padding(.top, 12)
+                ProfileSubscriptionStatus(
+                    subscription: subscription,
+                    presentation: presentation,
+                    isUpdating: model.isUpdatingSubscription,
+                    update: model.updateSubscription,
+                    cancel: model.cancelSubscriptionUpdate
+                )
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+            }
+
+            Divider().padding(.top, 12)
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    TargetSectionTitle("profile.editor.section", systemImage: "curlybraces")
+                        .accessibilityIdentifier("profile.editor.section")
+                    Spacer()
+                    if model.isDirty {
+                        Label("profile.unsaved.indicator", systemImage: "circle.fill")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel(Text("profile.unsaved.indicator"))
+                            .accessibilityHint(Text("profile.unsaved.accessibility.hint"))
+                            .accessibilityIdentifier("profile.editor.dirty")
+                    }
+                }
+
+                JSONCodeEditor(
+                    text: Binding(get: { model.editorText }, set: model.updateEditor),
+                    onTextChange: model.updateEditor,
+                    accessibilityIdentifier: "profile.json-editor",
+                    accessibilityLabel: String(localized: "profile.editor.accessibility.label")
+                )
+                .frame(
+                    maxWidth: .infinity,
+                    minHeight: ProfileWorkspaceLayout.minimumEditorHeight,
+                    idealHeight: ProfileWorkspaceLayout.preferredEditorHeight,
+                    maxHeight: .infinity
+                )
+                .layoutPriority(1)
+
+                ProfileFeedback(diagnostic: model.diagnostic, messageKey: model.messageKey)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, 10)
+
+            Divider()
+            ProfileEditorActions(
+                profile: profile,
+                model: model,
+                showRename: showRename,
+                requestDelete: requestDelete,
+                requestExport: requestExport
+            )
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+        }
+        .navigationTitle("profile.editor.title")
+        .accessibilityIdentifier("profile.workspace.detail")
+        .overlay(alignment: .top) {
+            if model.isPreparingImport || model.isCommittingImport {
+                ProgressView(model.isCommittingImport ? "profile.import.committing" : "profile.import.preparing")
+                    .padding(10)
+                    .background(.regularMaterial, in: Capsule())
+                    .accessibilityIdentifier("profile.workspace.busy")
+            }
+        }
+    }
+}
+
+private struct ProfileSummaryHeader: View {
+    let profile: Profile
+    @Bindable var model: ProfileViewModel
+    let presentation: ProfileWorkspacePresentation
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(profile.name)
+                        .font(.title2.weight(.semibold))
+                        .lineLimit(1)
+                        .accessibilityIdentifier("profile.summary.name")
+                    Label(sourceKey, systemImage: sourceSymbol)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("profile.summary.source")
+                }
+                Spacer(minLength: 8)
+                ProfileStatusBadge(level: presentation.validationLevel, titleKey: presentation.validationTitleKey)
+                    .accessibilityIdentifier("profile.summary.validation")
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 16) {
+                    metadata
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    metadata
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("profile.workspace.summary")
+    }
+
+    @ViewBuilder
+    private var metadata: some View {
+        Label {
+            Text("profile.summary.updated") + Text(" ") + Text(profile.updatedAt, style: .relative)
+        } icon: {
+            Image(systemName: "clock")
+        }
+        Label {
+            Text("profile.revision") + Text(" \(profile.validRevision)")
+        } icon: {
+            Image(systemName: "number")
+        }
+        if let checkedAt = profile.validation.checkedAt {
+            Label {
+                Text("profile.summary.checked") + Text(" ") + Text(checkedAt, style: .relative)
+            } icon: {
+                Image(systemName: "checkmark.circle")
+            }
+        }
+    }
+
+    private var sourceKey: LocalizedStringKey {
+        presentation.source == .remote ? "profile.source.remote" : "profile.source.local"
+    }
+
+    private var sourceSymbol: String {
+        presentation.source == .remote ? "link" : "doc.text"
+    }
+}
+
+private struct ProfileSubscriptionStatus: View {
+    let subscription: RemoteSubscription
+    let presentation: ProfileWorkspacePresentation
+    let isUpdating: Bool
+    let update: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) { content }
+            VStack(alignment: .leading, spacing: 8) { content }
+        }
+        .font(.caption)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("profile.subscription.summary")
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        Label("profile.subscription.status", systemImage: "arrow.triangle.2.circlepath")
+            .foregroundStyle(.secondary)
+        if let titleKey = presentation.subscriptionTitleKey,
+           let level = presentation.subscriptionLevel {
+            ProfileStatusBadge(level: level, titleKey: titleKey)
+        }
+        if let checkedAt = subscription.lastCheckedAt {
+            Label {
+                Text("profile.subscription.last-checked") + Text(" ") + Text(checkedAt, style: .relative)
+            } icon: {
+                Image(systemName: "clock")
+            }
+            .foregroundStyle(.secondary)
+        }
+        if let error = subscription.lastErrorKey {
+            Label(LocalizedStringKey(error), systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+        }
+        Spacer(minLength: 0)
+        if isUpdating {
+            ProgressView().controlSize(.small)
+            Button("profile.subscription.cancel", action: cancel)
+                .accessibilityIdentifier("profile.subscription.cancel")
+        } else {
+            Button("profile.subscription.update", action: update)
+                .accessibilityIdentifier("profile.subscription.update")
+        }
+    }
+}
+
+private struct ProfileFeedback: View {
+    let diagnostic: ConfigurationDiagnostic?
+    let messageKey: String?
+
+    var body: some View {
+        Group {
+            if let diagnostic {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(LocalizedStringKey(diagnostic.messageKey))
+                        if let line = diagnostic.line, let column = diagnostic.column {
+                            Text("profile.validation.location") + Text(" \(line):\(column)")
+                        }
+                    }
+                }
+                .foregroundStyle(.red)
+                .font(.callout)
+                .accessibilityIdentifier("profile.feedback.diagnostic")
+            } else if let messageKey {
+                TargetNotice(level: .neutral, messageKey: messageKey)
+                    .accessibilityIdentifier("profile.feedback.message")
+            }
+        }
+    }
+}
+
+private struct ProfileEditorActions: View {
+    let profile: Profile
+    @Bindable var model: ProfileViewModel
+    let showRename: () -> Void
+    let requestDelete: () -> Void
+    let requestExport: () -> Void
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) { actions }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Button("profile.action.format") { model.format() }
+                        .accessibilityIdentifier("profile.action.format")
+                    ProfileMoreActions(
+                        profile: profile,
+                        model: model,
+                        showRename: showRename,
+                        requestDelete: requestDelete,
+                        requestExport: requestExport
+                    )
+                    Spacer()
+                    saveButton
+                }
+                Text("profile.history.available") + Text(" \(profile.validRevision)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityIdentifier("profile.editor.actions")
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        Button("profile.action.format") { model.format() }
+            .accessibilityIdentifier("profile.action.format")
+        Text("profile.history.available") + Text(" \(profile.validRevision)")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Spacer(minLength: 8)
+        ProfileMoreActions(
+            profile: profile,
+            model: model,
+            showRename: showRename,
+            requestDelete: requestDelete,
+            requestExport: requestExport
+        )
+        saveButton
+    }
+
+    private var saveButton: some View {
+        Button("profile.action.save") { model.save() }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut("s")
+            .disabled(!model.isDirty)
+            .accessibilityIdentifier("profile.action.save")
+    }
+}
+
+private struct ProfileMoreActions: View {
+    let profile: Profile
+    @Bindable var model: ProfileViewModel
+    let showRename: () -> Void
+    let requestDelete: () -> Void
+    let requestExport: () -> Void
+
+    var body: some View {
+        Menu {
+            Button("profile.action.rename", action: showRename)
+            Button("profile.action.duplicate") { model.requestDuplicate(profile.id) }
+            Button("profile.action.restore") { model.requestRestore(profile.id) }
+                .disabled(profile.validRevision <= 1)
+            Divider()
+            Button("profile.action.export", action: requestExport)
+                .disabled(!model.canExport)
+            Divider()
+            Button("profile.action.delete", role: .destructive, action: requestDelete)
+        } label: {
+            Text("profile.actions.more")
+        }
+        .accessibilityIdentifier("profile.actions.more")
+        .accessibilityHint(Text("profile.actions.more.hint"))
+    }
+}
+
+private struct ProfileStatusBadge: View {
+    let level: ProfileWorkspaceStatusLevel
+    let titleKey: String
+
+    var body: some View {
+        TargetStatusBadge(level: targetLevel, titleKey: titleKey)
+    }
+
+    private var targetLevel: TargetStatusLevel {
+        switch level {
+        case .neutral: .neutral
+        case .positive: .positive
+        case .warning: .warning
+        case .critical: .critical
+        }
+    }
 }
 
 private struct SubscriptionDiffPreview: View {

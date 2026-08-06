@@ -5,6 +5,61 @@ import XCTest
 
 @MainActor
 final class ProfileWorkspaceInteractionTests: XCTestCase {
+    func testWorkspacePresentationMapsLocalValidationStates() {
+        let profile = makePresentationProfile(subscription: nil, validation: .notChecked)
+
+        let presentation = ProfileWorkspacePresentation(profile: profile)
+
+        XCTAssertEqual(presentation.source, ProfileWorkspacePresentation.Source.local)
+        XCTAssertEqual(presentation.validationTitleKey, "profile.validation.not-checked")
+        XCTAssertEqual(presentation.validationLevel, ProfileWorkspaceStatusLevel.neutral)
+        XCTAssertNil(presentation.subscriptionTitleKey)
+        XCTAssertNil(presentation.subscriptionLevel)
+        XCTAssertFalse(presentation.hasSubscriptionError)
+    }
+
+    func testWorkspacePresentationMapsRemoteStatusAndError() {
+        let subscription = RemoteSubscription(
+            url: URL(string: "https://example.invalid/subscription")!,
+            cacheStatus: .failed,
+            lastErrorKey: "profile.subscription.error.timeout"
+        )
+        let profile = makePresentationProfile(
+            subscription: subscription,
+            validation: .init(status: .valid, checkedAt: Date(), error: nil)
+        )
+
+        let presentation = ProfileWorkspacePresentation(profile: profile)
+
+        XCTAssertEqual(presentation.source, ProfileWorkspacePresentation.Source.remote)
+        XCTAssertEqual(presentation.validationTitleKey, "profile.validation.valid")
+        XCTAssertEqual(presentation.validationLevel, ProfileWorkspaceStatusLevel.positive)
+        XCTAssertEqual(presentation.subscriptionTitleKey, "profile.subscription.cache.failed")
+        XCTAssertEqual(presentation.subscriptionLevel, ProfileWorkspaceStatusLevel.critical)
+        XCTAssertTrue(presentation.hasSubscriptionError)
+    }
+
+    func testWorkspacePresentationMapsInvalidAndSubscriptionUpdateStates() {
+        let subscription = RemoteSubscription(
+            url: URL(string: "https://example.invalid/subscription")!,
+            cacheStatus: .updated
+        )
+        let profile = makePresentationProfile(subscription: subscription, validation: .init(status: .invalid, checkedAt: Date(), error: nil))
+
+        let presentation = ProfileWorkspacePresentation(profile: profile)
+
+        XCTAssertEqual(presentation.validationTitleKey, "profile.validation.invalid")
+        XCTAssertEqual(presentation.validationLevel, ProfileWorkspaceStatusLevel.critical)
+        XCTAssertEqual(presentation.subscriptionLevel, ProfileWorkspaceStatusLevel.positive)
+    }
+
+    func testWorkspaceLayoutUsesCompactMetadataBelowNarrowDetailWidth() {
+        XCTAssertFalse(ProfileWorkspaceLayout.usesCompactMetadata(for: 430))
+        XCTAssertTrue(ProfileWorkspaceLayout.usesCompactMetadata(for: 429))
+        XCTAssertEqual(ProfileWorkspaceLayout.minimumEditorHeight, 180)
+        XCTAssertGreaterThan(ProfileWorkspaceLayout.preferredEditorHeight, ProfileWorkspaceLayout.minimumEditorHeight)
+    }
+
     func testDirtySelectionRequestRecordsOperationWithoutChangingCommittedEditorState() throws {
         let fixture = try makeFixture()
         fixture.model.updateEditor("{\"edited\":true}")
@@ -334,6 +389,18 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         let second = try store.create(name: "Second")
         try store.select(first.id)
         return Fixture(store: store, model: ProfileViewModel(store: store, subscriptionFetcher: subscriptionFetcher), first: first, second: second)
+    }
+
+    private func makePresentationProfile(subscription: RemoteSubscription?, validation: ProfileValidation) -> Profile {
+        Profile(
+            id: UUID(),
+            name: "Presentation",
+            subscription: subscription,
+            createdAt: Date(),
+            updatedAt: Date(),
+            validation: validation,
+            validRevision: 1
+        )
     }
 }
 

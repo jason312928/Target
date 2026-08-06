@@ -4,19 +4,27 @@ import SwiftUI
 struct JSONCodeEditor: NSViewRepresentable {
     @Binding var text: String
     var onTextChange: (String) -> Void
+    var accessibilityIdentifier: String? = nil
+    var accessibilityLabel: String? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+    func makeNSView(context: Context) -> JSONCodeEditorContainerView {
+        let container = JSONCodeEditorContainerView(
+            accessibilityIdentifier: accessibilityIdentifier,
+            accessibilityLabel: accessibilityLabel
+        )
+        let scrollView = container.scrollView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.borderType = .bezelBorder
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
+        scrollView.setAccessibilityIdentifier(accessibilityIdentifier.map { "\($0).scroll" })
+        scrollView.setAccessibilityLabel(accessibilityLabel)
 
-        let textView = NSTextView()
+        let textView = container.textView
         textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         textView.isRichText = false
         textView.allowsUndo = true
@@ -24,20 +32,22 @@ struct JSONCodeEditor: NSViewRepresentable {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.delegate = context.coordinator
         textView.string = text
+        textView.setAccessibilityIdentifier(accessibilityIdentifier.map { "\($0).text" })
+        textView.setAccessibilityLabel(accessibilityLabel)
         scrollView.documentView = textView
         scrollView.verticalRulerView = JSONLineNumberRulerView(textView: textView)
         JSONSyntaxHighlighter.apply(to: textView)
-        return scrollView
+        return container
     }
 
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? NSTextView,
-              textView.string != text,
+    func updateNSView(_ container: JSONCodeEditorContainerView, context: Context) {
+        let textView = container.textView
+        guard textView.string != text,
               !context.coordinator.isEditing else { return }
         textView.string = text
         JSONSyntaxHighlighter.apply(to: textView)
-        (scrollView.verticalRulerView as? JSONLineNumberRulerView)?.updateLineStarts(for: text)
-        scrollView.verticalRulerView?.needsDisplay = true
+        (container.scrollView.verticalRulerView as? JSONLineNumberRulerView)?.updateLineStarts(for: text)
+        container.scrollView.verticalRulerView?.needsDisplay = true
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -60,6 +70,29 @@ struct JSONCodeEditor: NSViewRepresentable {
             isEditing = false
         }
     }
+}
+
+final class JSONCodeEditorContainerView: NSView {
+    let scrollView = NSScrollView()
+    let textView = NSTextView()
+
+    init(accessibilityIdentifier: String?, accessibilityLabel: String?) {
+        super.init(frame: .zero)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityIdentifier(accessibilityIdentifier)
+        setAccessibilityLabel(accessibilityLabel)
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(scrollView)
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
 }
 
 struct JSONLineNumberCalculation {

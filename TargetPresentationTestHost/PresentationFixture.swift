@@ -6,6 +6,12 @@ enum PresentationScenario: String, CaseIterable {
     case successfulDiscard = "successful-discard"
     case importCandidateReturn = "import-candidate-return"
     case subscriptionCandidateReturn = "subscription-candidate-return"
+    case emptyWorkspace = "empty-workspace"
+    case localProfile = "local-profile"
+    case remoteProfile = "remote-profile"
+    case dirtyEditor = "dirty-editor"
+    case invalidDiagnostic = "invalid-diagnostic"
+    case subscriptionBusy = "subscription-busy"
 
     static func fromLaunchArguments() -> Self {
         let arguments = ProcessInfo.processInfo.arguments
@@ -37,19 +43,31 @@ final class PresentationFixture {
         let profileRoot = root.appending(path: "Profiles", directoryHint: .isDirectory)
         importURL = root.appending(path: "FixtureImport.json")
         let checker = PresentationFixtureChecker(results: [.success(())])
-        let fetcher = PresentationFixtureFetcher()
+        let fetcher = PresentationFixtureFetcher(remainsBusy: scenario == .subscriptionBusy)
         store = ProfileStore(
             rootDirectory: profileRoot,
             checker: checker,
             runtimeUsage: PresentationFixtureRuntimeUsage(),
             keyProvider: PresentationFixtureKeyProvider()
         )
-        let firstSubscription = scenario == .subscriptionCandidateReturn
+        if scenario == .emptyWorkspace {
+            // Keep the model's initial list empty while retaining harmless
+            // fixture records for the existing state probe contract.
+            model = ProfileViewModel(store: store, subscriptionFetcher: fetcher)
+            first = try store.create(name: "First Profile")
+            second = try store.create(name: "Second Profile")
+            return
+        }
+
+        let firstSubscription = scenario == .subscriptionCandidateReturn || scenario == .remoteProfile || scenario == .subscriptionBusy
             ? URL(string: "https://fixture.invalid/subscription.json")
             : nil
         first = try store.create(name: "First Profile", subscriptionURL: firstSubscription)
         second = try store.create(name: "Second Profile")
         try store.save(json: Self.persistedConfiguration, for: second.id)
+        if scenario == .localProfile || scenario == .remoteProfile || scenario == .subscriptionBusy {
+            try store.save(json: Self.persistedConfiguration, for: first.id)
+        }
         checker.replaceResults(Self.checkerResults(for: scenario))
         try store.select(first.id)
         model = ProfileViewModel(store: store, subscriptionFetcher: fetcher)
@@ -66,6 +84,14 @@ final class PresentationFixture {
             model.updateEditor(Self.dirtyConfiguration)
         case .subscriptionCandidateReturn:
             model.updateEditor(Self.dirtyConfiguration)
+        case .localProfile, .remoteProfile, .subscriptionBusy:
+            break
+        case .dirtyEditor:
+            model.updateEditor(Self.dirtyConfiguration)
+        case .invalidDiagnostic:
+            model.updateEditor("{\"inbounds\":[")
+        case .emptyWorkspace:
+            break
         }
     }
 
@@ -76,6 +102,8 @@ final class PresentationFixture {
         case .importCandidateReturn:
             model.prepareImport(from: importURL)
         case .subscriptionCandidateReturn:
+            model.updateSubscription()
+        case .subscriptionBusy:
             model.updateSubscription()
         default:
             break
@@ -119,7 +147,10 @@ final class PresentationFixture {
         switch scenario {
         case .saveFailureThenSuccess: return [failed, .success(())]
         case .importCandidateReturn, .subscriptionCandidateReturn: return [.success(()), failed]
-        case .persistedReadDiscardFailure, .successfulDiscard: return [.success(())]
+        case .persistedReadDiscardFailure, .successfulDiscard, .emptyWorkspace,
+             .localProfile, .remoteProfile, .dirtyEditor, .invalidDiagnostic,
+             .subscriptionBusy:
+            return [.success(())]
         }
     }
 }
@@ -139,8 +170,14 @@ private final class PresentationFixtureChecker: SingBoxConfigurationChecking, @u
 }
 
 private struct PresentationFixtureFetcher: ProfileSubscriptionFetching {
+    let remainsBusy: Bool
+
     func fetch(subscription: RemoteSubscription) async throws -> SubscriptionResponse {
-        SubscriptionResponse(
+        if remainsBusy {
+            try await Task.sleep(for: .seconds(30))
+            throw SubscriptionUpdateError.cancelled
+        }
+        return SubscriptionResponse(
             data: Data(("""
             {
               "inbounds": [],

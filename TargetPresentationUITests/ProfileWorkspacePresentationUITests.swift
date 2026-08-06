@@ -15,6 +15,12 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         case successfulDiscard = "successful-discard"
         case importCandidateReturn = "import-candidate-return"
         case subscriptionCandidateReturn = "subscription-candidate-return"
+        case emptyWorkspace = "empty-workspace"
+        case localProfile = "local-profile"
+        case remoteProfile = "remote-profile"
+        case dirtyEditor = "dirty-editor"
+        case invalidDiagnostic = "invalid-diagnostic"
+        case subscriptionBusy = "subscription-busy"
     }
 
     func testSaveFailureThenRecoveryAndSuccess() {
@@ -184,7 +190,22 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         XCTAssertEqual(state("presentation.profile-count", in: app), "2")
     }
 
+    func testVisualWorkspaceStatesRemainReachableAtMinimumAndRegularWidths() {
+        assertVisualState(.emptyWorkspace, size: "740x511", expectsEditor: false)
+        assertVisualState(.localProfile, size: "740x511", expectsEditor: true)
+        assertVisualState(.remoteProfile, size: "740x511", expectsEditor: true)
+        assertVisualState(.dirtyEditor, size: "740x511", expectsEditor: true)
+        assertVisualState(.invalidDiagnostic, size: "740x511", expectsEditor: true)
+        assertVisualState(.subscriptionBusy, size: "740x511", expectsEditor: true)
+        assertVisualState(.localProfile, size: "950x670", expectsEditor: true)
+        assertVisualState(.remoteProfile, size: "950x670", expectsEditor: true)
+    }
+
     private func launch(_ scenario: Scenario) -> XCUIApplication {
+        launch(scenario, windowSize: nil, activates: true)
+    }
+
+    private func launch(_ scenario: Scenario, windowSize: String?, activates: Bool) -> XCUIApplication {
         let app = XCUIApplication(bundleIdentifier: "com.jason312928.TargetPresentationTestHost")
         app.launchArguments = [
             "-AppleLanguages", "(en)",
@@ -193,9 +214,12 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
             "-NSAutomaticTextCompletionEnabled", "NO",
             "--presentation-scenario", scenario.rawValue
         ]
+        if let windowSize {
+            app.launchArguments += ["--presentation-window-size", windowSize]
+        }
         app.launch()
         assertExists(app.windows.firstMatch, message: "Presentation host window did not appear")
-        activateIfNeeded(app)
+        if activates { activateIfNeeded(app) }
         waitForState("presentation.scenario", toEqual: scenario.rawValue, in: app)
         addTeardownBlock {
             if app.state != .notRunning {
@@ -214,10 +238,30 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         return app
     }
 
+    private func assertVisualState(_ scenario: Scenario, size: String, expectsEditor: Bool) {
+        let app = launch(scenario, windowSize: size, activates: false)
+        XCTAssertFalse(app.sheets.firstMatch.exists, "\(scenario) unexpectedly opened a sheet")
+        XCTAssertFalse(app.alerts.firstMatch.exists, "\(scenario) unexpectedly opened an alert")
+
+        if expectsEditor {
+            assertVisibleInsideWindow(app.staticTexts["profile.summary.name"], in: app, message: "Missing summary for \(scenario)")
+            let editor = app.scrollViews["profile.json-editor.scroll"]
+            assertVisibleInsideWindow(editor, in: app, message: "Missing JSON editor for \(scenario)")
+            assertVisibleInsideWindow(button("Format", in: app), in: app, message: "Format is inaccessible for \(scenario)")
+            assertVisibleInsideWindow(button("Validate & Save", in: app), in: app, message: "Save is inaccessible for \(scenario)")
+            assertVisibleInsideWindow(app.menuButtons["More Actions"], in: app, message: "Secondary actions are inaccessible for \(scenario)")
+        } else {
+            assertVisibleInsideWindow(app.staticTexts["profile.workspace.empty"], in: app, message: "Missing empty workspace state")
+        }
+
+        if scenario == .subscriptionBusy {
+            assertVisibleInsideWindow(button("Cancel Update", in: app), in: app, message: "Missing subscription cancellation")
+        }
+    }
+
     private func selectSecondProfile(in app: XCUIApplication) {
         let id = state("presentation.second-profile-id", in: app)
-        let second = app.outlines.firstMatch.cells.element(boundBy: 0)
-            .descendants(matching: .any)["profile.row.\(id)"]
+        let second = app.descendants(matching: .any)["profile.row.\(id)"]
         assertExists(second, message: "Missing second Profile row")
         activateIfNeeded(app)
         second.click()
@@ -356,13 +400,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     private func activateIfNeeded(_ app: XCUIApplication) {
         guard !app.wait(for: .runningForeground, timeout: timeout) else { return }
 
-        let window = app.windows.firstMatch
-        guard window.exists else {
-            attachAccessibilityDiagnostics(for: app, missingIdentifier: "foreground-window")
-            XCTFail("Application has no window available for foreground activation")
-            return
-        }
-        window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02)).click()
+        app.activate()
         guard app.wait(for: .runningForeground, timeout: timeout) else {
             attachAccessibilityDiagnostics(for: app, missingIdentifier: "runningForeground")
             XCTFail("Application did not enter the foreground within \(timeout) seconds")
@@ -392,6 +430,19 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
 
     private func assertDoesNotExist(_ element: XCUIElement, message: String) {
         XCTAssertTrue(!element.exists || element.waitForNonExistence(timeout: timeout), message)
+    }
+
+    private func assertVisibleInsideWindow(_ element: XCUIElement, in app: XCUIApplication, message: String) {
+        let visibleElement = element.firstMatch
+        assertExists(visibleElement, message: message)
+        let frame = visibleElement.frame
+        let windowFrame = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(frame.width, 0, message)
+        XCTAssertGreaterThan(frame.height, 0, message)
+        XCTAssertGreaterThanOrEqual(frame.minX, windowFrame.minX, message)
+        XCTAssertGreaterThanOrEqual(frame.minY, windowFrame.minY, message)
+        XCTAssertLessThanOrEqual(frame.maxX, windowFrame.maxX, message)
+        XCTAssertLessThanOrEqual(frame.maxY, windowFrame.maxY, message)
     }
 
     private func cleanUpPresentationFixtures() {
