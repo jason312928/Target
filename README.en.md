@@ -37,6 +37,21 @@ Build the app:
 xcodebuild -project Target.xcodeproj -scheme Target -configuration Debug build
 ```
 
+### Canonical local installation
+
+Install one local, unsigned Debug build at `/Applications/Target.app` from a clean
+checkout:
+
+```sh
+Scripts/install_local_app.sh
+```
+
+The installer uses a dedicated `.noindex` DerivedData directory, records the source
+commit in the app metadata, replaces only the canonical app bundle, and archives or
+removes validated old Target build products. It does not register TargetService or
+change system-network settings. This is a local development build, not a signed
+release distribution.
+
 For a local engine installation, run the bundled installer from the repository root:
 
 ```sh

@@ -37,6 +37,19 @@ Profile 仅存放在 Target 的 Application Support 容器中。Profile 可保�
 xcodebuild -project Target.xcodeproj -scheme Target -configuration Debug build
 ```
 
+### 唯一本机安装
+
+从干净的仓库检出安装唯一的本机 unsigned Debug 构建到
+`/Applications/Target.app`：
+
+```sh
+Scripts/install_local_app.sh
+```
+
+该脚本使用专用 `.noindex` DerivedData 目录，将源码提交写入 App 元数据，只替换
+canonical App bundle，并归档或移除已验证的旧 Target 构建产物。它不会注册
+TargetService，也不会修改系统网络设置。这是本机开发构建，不是正式签名发布版本。
+
 如需在本机安装引擎，请从仓库根目录运行随附的安装脚本：
 
 ```sh
