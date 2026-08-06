@@ -1,5 +1,10 @@
 import SwiftUI
 
+enum AppShellLayout {
+    static let minimumWindowWidth: CGFloat = 740
+    static let minimumWindowHeight: CGFloat = 460
+}
+
 struct AppShellView: View {
     @Bindable var lifecycle: BackendLifecycleModel
     @SceneStorage("app-shell.destination") private var persistedDestinationRawValue: String?
@@ -17,7 +22,10 @@ struct AppShellView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
-        .frame(minWidth: 620, minHeight: 460)
+        .frame(
+            minWidth: AppShellLayout.minimumWindowWidth,
+            minHeight: AppShellLayout.minimumWindowHeight
+        )
         .task {
             normalizePersistedDestination()
             lifecycle.refresh()

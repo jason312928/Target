@@ -58,6 +58,7 @@ struct ProfileWorkspaceView: View {
                 }
             }
         }
+        .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 220)
         .fileImporter(isPresented: $isImporting, allowedContentTypes: [.json]) { result in
             switch result {
             case .success(let url): model.prepareImport(from: url)

@@ -6,6 +6,11 @@ final class AppShellRoutingTests: XCTestCase {
         XCTAssertEqual(AppDestination.defaultDestination, .dashboard)
     }
 
+    func testShellMinimumWidthLeavesSpaceForNarrowDashboardAndProfileWorkspace() {
+        XCTAssertEqual(AppShellLayout.minimumWindowWidth, 740)
+        XCTAssertEqual(AppShellLayout.minimumWindowHeight, 460)
+    }
+
     func testDestinationSetContainsOnlyDashboardAndProfilesWithStableIdentity() {
         XCTAssertEqual(AppDestination.allCases, [.dashboard, .profiles])
         XCTAssertEqual(AppDestination.visibleDestinations, [.dashboard, .profiles])
