@@ -7,7 +7,7 @@ struct ProfileWorkspaceView: View {
     @Bindable var model: ProfileViewModel
     @State private var sheet: ProfileSheet?
     @State private var isImporting = false
-    @State private var showDeleteConfirmation = false
+    @State private var deleteTarget: UUID?
 
     init(lifecycle: BackendLifecycleModel?, model: ProfileViewModel) {
         self.lifecycle = lifecycle
@@ -16,15 +16,15 @@ struct ProfileWorkspaceView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $model.selectedID) {
+            List(selection: Binding(get: { model.selectedID }, set: model.requestSelection)) {
                 ForEach(model.profiles) { profile in
                     ProfileRow(profile: profile)
                         .tag(profile.id)
                         .contextMenu {
-                            Button("profile.action.duplicate") { model.selectedID = profile.id; model.duplicateSelected() }
-                            Button("profile.action.rename") { model.selectedID = profile.id; sheet = .rename(profile.name) }
+                            Button("profile.action.duplicate") { model.requestDuplicate(profile.id) }
+                            Button("profile.action.rename") { sheet = .rename(profile.id, profile.name) }
                             Divider()
-                            Button("profile.action.delete", role: .destructive) { model.selectedID = profile.id; showDeleteConfirmation = true }
+                            Button("profile.action.delete", role: .destructive) { deleteTarget = profile.id }
                         }
                 }
             }
@@ -61,8 +61,8 @@ struct ProfileWorkspaceView: View {
         .sheet(item: $sheet) { sheet in
             ProfileNameSheet(sheet: sheet) { name, url in
                 switch sheet {
-                case .create: model.create(name: name, subscriptionURL: url)
-                case .rename: model.renameSelected(to: name)
+                case .create: model.requestCreate(name: name, subscriptionURL: url)
+                case .rename(let id, _): model.rename(id, to: name)
                 }
             }
         }
@@ -73,7 +73,6 @@ struct ProfileWorkspaceView: View {
             if let candidate = model.pendingImportCandidate {
                 ProfileImportConfirmation(candidate: candidate, isCommitting: model.isCommittingImport) { name in
                     model.commitPreparedImport(name: name)
-                    lifecycle?.refresh()
                 } cancel: {
                     model.cancelPreparedImport()
                 }
@@ -88,14 +87,19 @@ struct ProfileWorkspaceView: View {
                     model.discardSubscriptionPreview()
                 } confirm: {
                     model.confirmSubscriptionUpdate()
-                    lifecycle?.refresh()
                 }
             }
         }
-        .onChange(of: model.selectedID) { _, _ in lifecycle?.refresh() }
-        .alert("profile.delete.title", isPresented: $showDeleteConfirmation) {
-            Button("profile.action.delete", role: .destructive) { model.deleteSelected(); lifecycle?.refresh() }
-            Button("profile.action.cancel", role: .cancel) { }
+        .onChange(of: model.readinessChangeGeneration) { _, _ in lifecycle?.refresh() }
+        .alert("profile.delete.title", isPresented: Binding(
+            get: { deleteTarget != nil },
+            set: { if !$0 { deleteTarget = nil } }
+        )) {
+            Button("profile.action.delete", role: .destructive) {
+                if let deleteTarget { model.requestDelete(deleteTarget) }
+                deleteTarget = nil
+            }
+            Button("profile.action.cancel", role: .cancel) { deleteTarget = nil }
         } message: {
             Text("profile.delete.message")
         }
@@ -107,6 +111,23 @@ struct ProfileWorkspaceView: View {
             Button("profile.export.warning.confirm") { presentExportPanel() }
         } message: {
             Text("profile.export.warning.message")
+        }
+        .alert("profile.unsaved.title", isPresented: Binding(
+            get: { model.pendingOperation != nil },
+            set: { if !$0 { model.cancelUnsavedChangesConfirmation() } }
+        )) {
+            Button("profile.unsaved.save-and-continue") {
+                model.resolveUnsavedChanges(.saveAndContinue)
+            }
+            .keyboardShortcut(.defaultAction)
+            Button("profile.unsaved.discard", role: .destructive) {
+                model.resolveUnsavedChanges(.discardChanges)
+            }
+            Button("profile.action.cancel", role: .cancel) {
+                model.cancelUnsavedChangesConfirmation()
+            }
+        } message: {
+            Text("profile.unsaved.message")
         }
     }
 
@@ -130,6 +151,14 @@ struct ProfileWorkspaceView: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+
+            if model.isDirty {
+                Label("profile.unsaved.indicator", systemImage: "circle.fill")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel(Text("profile.unsaved.indicator"))
+                    .accessibilityHint(Text("profile.unsaved.accessibility.hint"))
+            }
 
             if let subscription = profile.subscription {
                 HStack(spacing: 10) {
@@ -168,19 +197,19 @@ struct ProfileWorkspaceView: View {
 
             HStack {
                 Button("profile.action.format") { model.format() }
-                Button("profile.action.restore") { model.restorePreviousVersion(); lifecycle?.refresh() }
+                Button("profile.action.restore") { model.requestRestore(profile.id) }
                     .disabled(profile.validRevision <= 1)
                 Text("profile.history.available") + Text(" \(profile.validRevision)")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("profile.action.rename") { sheet = .rename(profile.name) }
-                Button("profile.action.duplicate") { model.duplicateSelected() }
-                Button("profile.action.delete", role: .destructive) { showDeleteConfirmation = true }
+                Button("profile.action.rename") { sheet = .rename(profile.id, profile.name) }
+                Button("profile.action.duplicate") { model.requestDuplicate(profile.id) }
+                Button("profile.action.delete", role: .destructive) { deleteTarget = profile.id }
                 Button("profile.action.export") { model.requestExport() }
                     .disabled(!model.canExport)
                     .help(model.isDirty ? "profile.export.unsaved-changes" : "")
                     .accessibilityHint(Text(model.isDirty ? "profile.export.unsaved-changes" : "profile.accessibility.export"))
-                Button("profile.action.save") { model.save(); lifecycle?.refresh() }
+                Button("profile.action.save") { model.save() }
                     .keyboardShortcut("s")
                     .disabled(!model.isDirty)
             }
@@ -328,7 +357,7 @@ private struct ValidationBadge: View {
 
 private enum ProfileSheet: Identifiable {
     case create
-    case rename(String)
+    case rename(UUID, String)
     var id: String { switch self { case .create: "create"; case .rename: "rename" } }
 }
 
@@ -354,7 +383,7 @@ private struct ProfileNameSheet: View {
         }
         .padding(20)
         .frame(width: 380)
-        .onAppear { if case .rename(let current) = sheet { name = current } }
+        .onAppear { if case .rename(_, let current) = sheet { name = current } }
     }
 
     private var titleKey: LocalizedStringKey {

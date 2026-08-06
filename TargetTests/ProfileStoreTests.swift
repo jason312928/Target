@@ -1464,7 +1464,7 @@ final class ProfileStoreTests: XCTestCase {
         model.prepareImport(from: input)
         for _ in 0..<100 where model.pendingImportCandidate == nil { await Task.yield() }
         XCTAssertNotNil(model.pendingImportCandidate)
-        model.selectedID = model.selectedID == first.id ? second.id : first.id
+        model.requestSelection(model.selectedID == first.id ? second.id : first.id)
         XCTAssertNil(model.pendingImportCandidate)
     }
 

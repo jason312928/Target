@@ -5,17 +5,12 @@ import Observation
 @Observable
 final class ProfileViewModel {
     private let store: ProfileStore
-    private let subscriptionFetcher: SecureSubscriptionFetcher
+    private let subscriptionFetcher: any ProfileSubscriptionFetching
     private var subscriptionTask: Task<Void, Never>?
     private var importTask: Task<Void, Never>?
 
     private(set) var profiles: [Profile] = []
-    var selectedID: UUID? {
-        didSet {
-            if oldValue != selectedID { cancelPreparedImport() }
-            selectProfile()
-        }
-    }
+    private(set) var selectedID: UUID?
     var editorText = ""
     private(set) var diagnostic: ConfigurationDiagnostic?
     private(set) var isDirty = false
@@ -27,18 +22,65 @@ final class ProfileViewModel {
     private(set) var isCommittingImport = false
     private(set) var isShowingExportWarning = false
     private(set) var isExporting = false
+    private(set) var pendingOperation: ProfileWorkspaceOperation?
+    /// Changes that affect selected configuration readiness. The view observes
+    /// this rather than refreshing lifecycle state for cancelled actions or
+    /// subscription-cache metadata updates.
+    private(set) var readinessChangeGeneration = 0
 
-    init(store: ProfileStore = ProfileStore(), subscriptionFetcher: SecureSubscriptionFetcher = SecureSubscriptionFetcher()) {
+    init(store: ProfileStore = ProfileStore(), subscriptionFetcher: any ProfileSubscriptionFetching = SecureSubscriptionFetcher()) {
         self.store = store
         self.subscriptionFetcher = subscriptionFetcher
-        reload()
+        reloadInitialState()
     }
 
     var selectedProfile: Profile? { profiles.first { $0.id == selectedID } }
     var canExport: Bool { selectedProfile != nil && !isDirty && !isExporting }
     var defaultExportFileName: String { store.defaultExportFileNameForSelectedProfile() ?? "Profile.json" }
 
-    func reload() {
+    func requestSelection(_ id: UUID?) {
+        guard id != selectedID else { return }
+        guard let id else { return }
+        request(.select(id))
+    }
+
+    func requestCreate(name: String, subscriptionURL: URL? = nil) {
+        request(.create(name: name, subscriptionURL: subscriptionURL))
+    }
+
+    func requestDuplicate(_ id: UUID) {
+        request(.duplicate(id))
+    }
+
+    func requestDelete(_ id: UUID) {
+        request(.delete(id))
+    }
+
+    func requestRestore(_ id: UUID) {
+        request(.restore(id))
+    }
+
+    func resolveUnsavedChanges(_ decision: ProfileUnsavedChangesDecision) {
+        guard let operation = pendingOperation else { return }
+        switch decision {
+        case .cancel:
+            pendingOperation = nil
+        case .discardChanges:
+            discardEditorChanges()
+            pendingOperation = nil
+            execute(operation)
+        case .saveAndContinue:
+            guard saveCurrentEditor() else { return }
+            pendingOperation = nil
+            execute(operation)
+        }
+    }
+
+    func cancelUnsavedChangesConfirmation() {
+        resolveUnsavedChanges(.cancel)
+    }
+
+    private func reloadInitialState() {
         do {
             profiles = try store.listProfiles()
             selectedID = try store.selectedProfileID() ?? profiles.first?.id
@@ -49,14 +91,6 @@ final class ProfileViewModel {
             editorText = ""
             messageKey = "profile.message.load-failed"
         }
-    }
-
-    func create(name: String, subscriptionURL: URL? = nil) {
-        do {
-            let profile = try store.create(name: name, subscriptionURL: subscriptionURL)
-            reload()
-            selectedID = profile.id
-        } catch { messageKey = "profile.message.operation-failed" }
     }
 
     func prepareImport(from url: URL) {
@@ -85,18 +119,7 @@ final class ProfileViewModel {
 
     func commitPreparedImport(name: String) {
         guard let candidate = pendingImportCandidate, !isCommittingImport else { return }
-        isCommittingImport = true
-        messageKey = nil
-        do {
-            let profile = try store.importCandidate(candidate, name: name)
-            pendingImportCandidate = nil
-            reload()
-            selectedID = profile.id
-            messageKey = "profile.import.success"
-        } catch let error as ProfileStoreError {
-            present(error)
-        } catch { messageKey = "profile.message.operation-failed" }
-        isCommittingImport = false
+        request(.importCandidate(candidate, name: name))
     }
 
     func cancelPreparedImport() {
@@ -143,25 +166,11 @@ final class ProfileViewModel {
         messageKey = "profile.export.cancelled"
     }
 
-    func duplicateSelected() {
-        guard let selectedID else { return }
+    func rename(_ id: UUID, to name: String) {
         do {
-            let profile = try store.duplicate(selectedID)
-            reload()
-            self.selectedID = profile.id
+            try store.rename(id, to: name)
+            refreshMetadataPreservingEditor()
         } catch { messageKey = "profile.message.operation-failed" }
-    }
-
-    func renameSelected(to name: String) {
-        guard let selectedID else { return }
-        do { try store.rename(selectedID, to: name); reload() }
-        catch { messageKey = "profile.message.operation-failed" }
-    }
-
-    func deleteSelected() {
-        guard let selectedID else { return }
-        do { try store.delete(selectedID); reload() }
-        catch { messageKey = "profile.message.operation-failed" }
     }
 
     func updateEditor(_ text: String) {
@@ -184,25 +193,24 @@ final class ProfileViewModel {
     }
 
     func save() {
-        guard let selectedID else { return }
+        _ = saveCurrentEditor()
+    }
+
+    @discardableResult
+    private func saveCurrentEditor() -> Bool {
+        guard let selectedID else { return false }
         do {
             try store.save(json: editorText, for: selectedID)
             diagnostic = nil
             isDirty = false
             messageKey = "profile.message.saved"
-            reload()
+            refreshMetadataPreservingEditor()
+            markReadinessChanged()
+            return true
         } catch let error as ProfileStoreError {
             present(error)
         } catch { messageKey = "profile.message.operation-failed" }
-    }
-
-    func restorePreviousVersion() {
-        guard let selectedID else { return }
-        do {
-            try store.restorePreviousValidVersion(for: selectedID)
-            reload()
-            messageKey = "profile.message.restored"
-        } catch { messageKey = "profile.message.operation-failed" }
+        return false
     }
 
     func updateSubscription() {
@@ -224,19 +232,19 @@ final class ProfileViewModel {
                 let pending = try store.previewSubscriptionUpdate(response, for: profileID)
                 guard !Task.isCancelled else { throw SubscriptionUpdateError.cancelled }
                 self?.pendingSubscriptionUpdate = pending
-                self?.reload()
+                self?.refreshMetadataPreservingEditor()
                 if pending == nil { self?.messageKey = "profile.subscription.not-modified" }
             } catch let error as SubscriptionUpdateError {
                 if error == .cancelled { try? store.recordSubscriptionCancellation(for: profileID) }
                 else { try? store.recordSubscriptionFailure(for: profileID, messageKey: error.messageKey) }
-                self?.reload()
+                self?.refreshMetadataPreservingEditor()
                 self?.messageKey = error.messageKey
             } catch let error as ProfileStoreError {
-                self?.reload()
+                self?.refreshMetadataPreservingEditor()
                 self?.present(error)
             } catch {
                 try? store.recordSubscriptionFailure(for: profileID, messageKey: "profile.subscription.error.download-failed")
-                self?.reload()
+                self?.refreshMetadataPreservingEditor()
                 self?.messageKey = "profile.subscription.error.download-failed"
             }
         }
@@ -248,16 +256,7 @@ final class ProfileViewModel {
 
     func confirmSubscriptionUpdate() {
         guard let pending = pendingSubscriptionUpdate else { return }
-        do {
-            try store.applySubscriptionUpdate(pending)
-            pendingSubscriptionUpdate = nil
-            reload()
-            messageKey = "profile.subscription.applied"
-        } catch let error as ProfileStoreError {
-            present(error)
-        } catch {
-            messageKey = "profile.message.operation-failed"
-        }
+        request(.applySubscription(pending))
     }
 
     func discardSubscriptionPreview() {
@@ -265,10 +264,84 @@ final class ProfileViewModel {
         messageKey = "profile.subscription.preview-dismissed"
     }
 
-    private func selectProfile() {
-        guard let selectedID else { return }
-        do { try store.select(selectedID); loadSelectedText() }
+    private func request(_ operation: ProfileWorkspaceOperation) {
+        guard !isDirty else {
+            pendingOperation = operation
+            return
+        }
+        execute(operation)
+    }
+
+    private func execute(_ operation: ProfileWorkspaceOperation) {
+        do {
+            switch operation {
+            case .select(let id):
+                try store.select(id)
+                selectedID = id
+                cancelPreparedImport()
+                loadSelectedText()
+                markReadinessChanged()
+            case .create(let name, let subscriptionURL):
+                let profile = try store.create(name: name, subscriptionURL: subscriptionURL)
+                try selectAndActivate(profile.id)
+                markReadinessChanged()
+            case .duplicate(let id):
+                let profile = try store.duplicate(id)
+                try selectAndActivate(profile.id)
+                markReadinessChanged()
+            case .delete(let id):
+                try store.delete(id)
+                activate(try store.selectedProfileID() ?? profiles.first(where: { $0.id != id })?.id)
+                markReadinessChanged()
+            case .restore(let id):
+                try store.restorePreviousValidVersion(for: id)
+                activate(id)
+                messageKey = "profile.message.restored"
+                markReadinessChanged()
+            case .importCandidate(let candidate, let name):
+                isCommittingImport = true
+                defer { isCommittingImport = false }
+                let profile = try store.importCandidate(candidate, name: name)
+                pendingImportCandidate = nil
+                activate(profile.id)
+                messageKey = "profile.import.success"
+                markReadinessChanged()
+            case .applySubscription(let pending):
+                try store.applySubscriptionUpdate(pending)
+                pendingSubscriptionUpdate = nil
+                activate(pending.profileID)
+                messageKey = "profile.subscription.applied"
+                markReadinessChanged()
+            }
+        } catch let error as ProfileStoreError {
+            present(error)
+        } catch {
+            messageKey = "profile.message.operation-failed"
+        }
+    }
+
+    private func activate(_ id: UUID?) {
+        profiles = (try? store.listProfiles()) ?? []
+        selectedID = id
+        loadSelectedText()
+    }
+
+    private func selectAndActivate(_ id: UUID) throws {
+        try store.select(id)
+        activate(id)
+    }
+
+    /// For remote subscription state and metadata-only actions. Never invokes
+    /// loadSelectedText(), so a task completing after the user edits cannot
+    /// replace the current editing buffer or clear its dirty state.
+    private func refreshMetadataPreservingEditor() {
+        do { profiles = try store.listProfiles() }
         catch { messageKey = "profile.message.load-failed" }
+    }
+
+    private func discardEditorChanges() {
+        diagnostic = nil
+        isDirty = false
     }
 
     private func loadSelectedText() {
@@ -280,6 +353,10 @@ final class ProfileViewModel {
         editorText = text
         diagnostic = nil
         isDirty = false
+    }
+
+    private func markReadinessChanged() {
+        readinessChangeGeneration &+= 1
     }
 
     private func present(_ error: ProfileStoreError) {

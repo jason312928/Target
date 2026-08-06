@@ -38,6 +38,10 @@ struct PendingSubscriptionUpdate: Sendable {
     let response: SubscriptionResponse
 }
 
+protocol ProfileSubscriptionFetching: Sendable {
+    func fetch(subscription: RemoteSubscription) async throws -> SubscriptionResponse
+}
+
 /// The production policy accepts only public HTTPS origins. The test-only switch
 /// exists so unit tests can exercise the HTTP state machine against an isolated
 /// loopback mock server without weakening the app's production path.
@@ -141,7 +145,7 @@ private final class SubscriptionRedirectDelegate: NSObject, URLSessionTaskDelega
 
 /// An explicit, cancelable download operation. It retains no URLs or response
 /// content after returning, and exposes only safe status/error categories.
-final class SecureSubscriptionFetcher: @unchecked Sendable {
+final class SecureSubscriptionFetcher: ProfileSubscriptionFetching, @unchecked Sendable {
     static let defaultMaximumResponseBytes = 5 * 1024 * 1024
     static let defaultTimeout: TimeInterval = 20
     static let defaultRetryCount = 2
