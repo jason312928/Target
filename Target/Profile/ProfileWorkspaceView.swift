@@ -19,6 +19,8 @@ struct ProfileWorkspaceView: View {
             List(selection: Binding(get: { model.selectedID }, set: model.requestSelection)) {
                 ForEach(model.profiles) { profile in
                     ProfileRow(profile: profile)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("profile.row.\(profile.id.uuidString)")
                         .tag(profile.id)
                         .contextMenu {
                             Button("profile.action.duplicate") { model.requestDuplicate(profile.id) }
@@ -130,13 +132,16 @@ struct ProfileWorkspaceView: View {
             Button("profile.unsaved.save-and-continue") {
                 _ = model.resolveUnsavedChanges(.saveAndContinue)
             }
+            .accessibilityIdentifier("profile.unsaved.save-and-continue")
             .keyboardShortcut(.defaultAction)
             Button("profile.unsaved.discard", role: .destructive) {
                 _ = model.resolveUnsavedChanges(.discardChanges)
             }
+            .accessibilityIdentifier("profile.unsaved.discard")
             Button("profile.action.cancel", role: .cancel) {
                 _ = model.resolveUnsavedChanges(.cancel)
             }
+            .accessibilityIdentifier("profile.unsaved.cancel")
         } message: {
             Text("profile.unsaved.message")
         }
@@ -257,7 +262,9 @@ private struct SubscriptionDiffPreview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("profile.subscription.preview.title").font(.headline)
+            Text("profile.subscription.preview.title")
+                .font(.headline)
+                .accessibilityIdentifier("profile.subscription.preview")
             Text("profile.subscription.preview.description").font(.callout).foregroundStyle(.secondary)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
@@ -274,7 +281,9 @@ private struct SubscriptionDiffPreview: View {
             HStack {
                 Spacer()
                 Button("profile.subscription.discard") { dismiss() }
-                Button("profile.subscription.confirm") { confirm() }.keyboardShortcut(.defaultAction)
+                Button("profile.subscription.confirm") { confirm() }
+                    .accessibilityIdentifier("profile.subscription.confirm")
+                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
@@ -419,7 +428,9 @@ private struct ProfileImportConfirmation: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("profile.import.confirm.title").font(.headline)
+            Text("profile.import.confirm.title")
+                .font(.headline)
+                .accessibilityIdentifier("profile.import.confirmation")
             Text("profile.import.confirm.description").foregroundStyle(.secondary)
             Text("profile.import.confirm.size") + Text(" \(candidate.fileSize)")
                 .font(.caption).foregroundStyle(.secondary)
@@ -429,6 +440,7 @@ private struct ProfileImportConfirmation: View {
                 Spacer()
                 Button("profile.action.cancel") { cancel() }.disabled(isCommitting)
                 Button("profile.action.confirm") { confirm(name) }
+                    .accessibilityIdentifier("profile.import.confirm")
                     .keyboardShortcut(.defaultAction)
                     .disabled(isCommitting || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
