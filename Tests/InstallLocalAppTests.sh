@@ -81,6 +81,15 @@ assert_transaction_closed() {
     [ -z "$install_staging_app" ] || fail_test 'staging transaction state was retained'
     [ -z "$install_replaced_app" ] || fail_test 'replacement transaction state was retained'
     [ "$install_transaction_active" = false ] || fail_test 'transaction remained active after a successful rollback'
+    [ "$install_transaction_phase" = 'closed' ] || fail_test 'transaction phase was not closed'
+}
+
+assert_transaction_cleanup_pending() {
+    [ -z "$install_staging_app" ] || fail_test 'cleanup-pending state retained a staging path'
+    [ -n "$install_replaced_app" ] || fail_test 'cleanup-pending state lost the replacement path'
+    [ -d "$install_replaced_app" ] || fail_test 'cleanup-pending replacement evidence is missing'
+    [ "$install_transaction_active" = true ] || fail_test 'cleanup-pending transaction was marked inactive'
+    [ "$install_transaction_phase" = 'cleanup_pending' ] || fail_test 'transaction phase is not cleanup_pending'
 }
 
 assert_canonical() {
@@ -91,11 +100,14 @@ assert_canonical() {
 }
 
 reset_apps() {
-    rm -rf -- "$applications_directory" "$test_root/Built"
-    mkdir -p "$applications_directory" "$test_root/Built"
+    rm -rf -- "$applications_directory" "$test_root/Built" "$derived_data_root" "$archive_root" \
+        "$test_home_root/Applications" "$test_home_root/Desktop" "$test_home_root/Downloads"
+    mkdir -p "$applications_directory" "$test_root/Built" "$test_home_root/Applications" \
+        "$test_home_root/Desktop" "$test_home_root/Downloads"
     install_staging_app=''
     install_replaced_app=''
     install_transaction_active=false
+    install_transaction_phase='closed'
     dry_run=false
     unset TARGET_INSTALLER_TEST_FAILPOINT || true
 }
@@ -110,6 +122,15 @@ expect_failure() {
 
 install_fixture() {
     install_canonical_app "$test_root/Built/New.app" "$commit" "$build_number"
+}
+
+make_historical_app() {
+    local app="$1" version="$2"
+    make_app "$app" "$version"
+    rm -f -- "$app/Contents/Resources/Assets.car"
+    /usr/libexec/PlistBuddy -c 'Delete :TargetSourceCommit' "$app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c 'Delete :TargetSourceCommitShort' "$app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c 'Delete :TargetBuildChannel' "$app/Contents/Info.plist"
 }
 
 # 1. First installation succeeds without an existing canonical app.
@@ -271,6 +292,81 @@ make_repository_fixture() {
     git -C "$fixture" commit -q -m fixture
 }
 
+add_top_level_command_fixtures() {
+    local fixture="$1"
+    mkdir -p "$fixture/bin"
+    cat > "$fixture/bin/xcodebuild" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = '-list' ]; then
+    printf '    Schemes:\n        Target\n'
+    exit 0
+fi
+derived_data=''
+commit=''
+build_number=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -derivedDataPath) derived_data="$2"; shift ;;
+        TARGET_SOURCE_COMMIT=*) commit="${1#*=}" ;;
+        CURRENT_PROJECT_VERSION=*) build_number="${1#*=}" ;;
+    esac
+    shift
+done
+[ -n "$derived_data" ] && [ -n "$commit" ] && [ -n "$build_number" ]
+app="$derived_data/Build/Products/Debug/Target.app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$app/Contents/MacOS/Target"
+chmod 755 "$app/Contents/MacOS/Target"
+: > "$app/Contents/Resources/Assets.car"
+cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.jason312928.Target</string>
+<key>CFBundleShortVersionString</key><string>new</string>
+<key>CFBundleVersion</key><string>$build_number</string>
+<key>TargetSourceCommit</key><string>$commit</string>
+<key>TargetSourceCommitShort</key><string>${commit:0:12}</string>
+<key>TargetBuildChannel</key><string>Local</string>
+</dict></plist>
+PLIST
+EOF
+    cat > "$fixture/bin/ditto" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cp -R -- "$1" "$2"
+EOF
+    cat > "$fixture/bin/mdimport" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    cat > "$fixture/bin/open" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod 755 "$fixture/bin/xcodebuild" "$fixture/bin/ditto" "$fixture/bin/mdimport" "$fixture/bin/open"
+    git -C "$fixture" add bin
+    git -C "$fixture" commit -q -m 'add isolated installer command fixtures'
+}
+
+make_top_level_repository_fixture() {
+    local fixture="$1"
+    make_repository_fixture "$fixture" 'https://github.com/jason312928/Target.git'
+    add_top_level_command_fixtures "$fixture"
+}
+
+run_top_level_installer() {
+    local fixture="$1" stdout_file="$2" stderr_file="$3"
+    (
+        cd "$fixture"
+        PATH="$fixture/bin:$PATH" \
+            TARGET_INSTALLER_TEST_MODE=1 \
+            TARGET_INSTALLER_TEST_ROOT="$test_root" \
+            bash Scripts/install_local_app.sh >"$stdout_file" 2>"$stderr_file"
+    )
+}
+
 repository_validation() {
     local fixture="$1"
     (
@@ -336,6 +432,146 @@ env -u TARGET_INSTALLER_TEST_MODE -u TARGET_INSTALLER_TEST_ROOT bash -c '
 ' bash "$transaction_library" || fail_test 'normal-mode canonical path was redirected'
 pass_test 'normal mode remains fixed to /Applications/Target.app'
 
+# 21. Historical canonical apps without Assets.car are replaceable.
+reset_apps
+make_historical_app "$canonical_app" 'old'
+make_app "$test_root/Built/New.app" 'new'
+install_fixture
+assert_canonical 'new'
+assert_no_artifacts
+pass_test 'historical canonical without Assets.car is replaced successfully'
+
+# 22. A staging rename failure restores a historical canonical app without Assets.car.
+reset_apps
+make_historical_app "$canonical_app" 'old'
+make_app "$test_root/Built/New.app" 'new'
+TARGET_INSTALLER_TEST_FAILPOINT='staging_rename'
+expect_failure 'historical staging rename failure' install_fixture
+unset TARGET_INSTALLER_TEST_FAILPOINT
+assert_canonical 'old'
+[ ! -e "$canonical_app/Contents/Resources/Assets.car" ] || fail_test 'historical Assets.car unexpectedly appeared after restore'
+assert_no_artifacts
+assert_transaction_closed
+pass_test 'staging rename failure restores historical canonical without Assets.car'
+
+# 23. A canonical verification failure restores a historical app without Assets.car.
+reset_apps
+make_historical_app "$canonical_app" 'old'
+make_app "$test_root/Built/New.app" 'new'
+TARGET_INSTALLER_TEST_FAILPOINT='verify_canonical'
+expect_failure 'historical canonical verification failure' install_fixture
+unset TARGET_INSTALLER_TEST_FAILPOINT
+assert_canonical 'old'
+[ ! -e "$canonical_app/Contents/Resources/Assets.car" ] || fail_test 'historical Assets.car unexpectedly appeared after verification rollback'
+assert_no_artifacts
+assert_transaction_closed
+pass_test 'canonical verification failure restores historical canonical without Assets.car'
+
+# 24. Startup restores one historical replacement without Assets.car when canonical is absent.
+reset_apps
+make_historical_app "$applications_directory/.Target.app.replaced-historical" 'old'
+recover_interrupted_installation
+assert_canonical 'old'
+[ ! -e "$canonical_app/Contents/Resources/Assets.car" ] || fail_test 'historical replacement gained Assets.car during restore'
+assert_no_artifacts
+pass_test 'startup restores a unique historical replacement without Assets.car'
+
+# 25. Startup removes a historical replacement without Assets.car beside a valid canonical.
+reset_apps
+make_app "$canonical_app" 'new'
+make_historical_app "$applications_directory/.Target.app.replaced-historical" 'old'
+recover_interrupted_installation
+assert_canonical 'new'
+assert_no_artifacts
+pass_test 'startup removes a historical replacement without Assets.car beside valid canonical'
+
+# 26. Replacement cleanup failure remains explicitly cleanup pending through rollback.
+reset_apps
+make_historical_app "$canonical_app" 'old'
+make_app "$test_root/Built/New.app" 'new'
+TARGET_INSTALLER_TEST_FAILPOINT='remove_replaced'
+expect_failure 'cleanup-pending install' install_fixture
+assert_canonical 'new'
+[ "$(artifact_count '.Target.app.replaced-*')" = 1 ] || fail_test 'cleanup-pending replacement was not retained'
+assert_transaction_cleanup_pending
+pending_replacement="$install_replaced_app"
+expect_failure 'cleanup-pending rollback' rollback_install_transaction
+[ "$install_replaced_app" = "$pending_replacement" ] || fail_test 'rollback cleared the pending replacement path'
+assert_transaction_cleanup_pending
+unset TARGET_INSTALLER_TEST_FAILPOINT
+pass_test 'replacement cleanup failure preserves canonical, evidence, and cleanup-pending transaction state'
+
+# 27. A subsequent startup safely cleans the pending historical replacement.
+install_staging_app=''
+install_replaced_app=''
+install_transaction_active=false
+install_transaction_phase='closed'
+recover_interrupted_installation
+assert_canonical 'new'
+assert_no_artifacts
+assert_transaction_closed
+pass_test 'next startup safely cleans the retained cleanup-pending replacement'
+
+# 28. Top-level staging rename failure exits nonzero and its EXIT trap leaves a clean rollback.
+reset_apps
+fixture="$test_root/TopLevelStagingRepository"
+make_top_level_repository_fixture "$fixture"
+make_historical_app "$canonical_app" 'old'
+export TARGET_INSTALLER_TEST_FAILPOINT='staging_rename'
+expect_failure 'top-level staging rename failure' run_top_level_installer "$fixture" "$test_root/top-staging.stdout" "$test_root/top-staging.stderr"
+unset TARGET_INSTALLER_TEST_FAILPOINT
+assert_canonical 'old'
+assert_no_artifacts
+if grep -Fq 'rollback left recoverable evidence' "$test_root/top-staging.stderr"; then
+    fail_test 'top-level staging failure emitted false recoverable-evidence stderr'
+fi
+pass_test 'top-level staging rename failure exits nonzero, restores old canonical, and emits no false rollback warning'
+
+# 29. Top-level canonical verification failure exits nonzero and restores the historical app.
+reset_apps
+fixture="$test_root/TopLevelVerificationRepository"
+make_top_level_repository_fixture "$fixture"
+make_historical_app "$canonical_app" 'old'
+export TARGET_INSTALLER_TEST_FAILPOINT='verify_canonical'
+expect_failure 'top-level canonical verification failure' run_top_level_installer "$fixture" "$test_root/top-verify.stdout" "$test_root/top-verify.stderr"
+unset TARGET_INSTALLER_TEST_FAILPOINT
+assert_canonical 'old'
+assert_no_artifacts
+if grep -Fq 'rollback left recoverable evidence' "$test_root/top-verify.stderr"; then
+    fail_test 'top-level verification failure emitted false recoverable-evidence stderr'
+fi
+pass_test 'top-level canonical verification failure exits nonzero, restores old canonical, and emits no false rollback warning'
+
+# 30. Top-level cleanup pending preserves both validated apps and succeeds on the next run.
+reset_apps
+fixture="$test_root/TopLevelCleanupRepository"
+make_top_level_repository_fixture "$fixture"
+make_historical_app "$canonical_app" 'old'
+export TARGET_INSTALLER_TEST_FAILPOINT='remove_replaced'
+expect_failure 'top-level cleanup pending' run_top_level_installer "$fixture" "$test_root/top-cleanup.stdout" "$test_root/top-cleanup.stderr"
+unset TARGET_INSTALLER_TEST_FAILPOINT
+assert_canonical 'new'
+[ "$(artifact_count '.Target.app.replaced-*')" = 1 ] || fail_test 'top-level cleanup pending did not retain one replacement'
+grep -Fq 'installation cleanup pending:' "$test_root/top-cleanup.stderr" || fail_test 'top-level cleanup pending stderr was missing'
+if grep -Fq 'rollback left recoverable evidence' "$test_root/top-cleanup.stderr"; then
+    fail_test 'top-level cleanup pending emitted a false rollback warning'
+fi
+run_top_level_installer "$fixture" "$test_root/top-recovery.stdout" "$test_root/top-recovery.stderr" || fail_test 'next top-level recovery failed'
+assert_canonical 'new'
+assert_no_artifacts
+pass_test 'top-level cleanup pending exits nonzero, preserves evidence, reports accurately, and cleans on next run'
+
+# 31. Bundle-ID-correct canonical and replacement apps without executables fail closed.
+reset_apps
+make_app "$canonical_app" 'incomplete-new'
+make_app "$applications_directory/.Target.app.replaced-incomplete-old" 'incomplete-old'
+rm -f -- "$canonical_app/Contents/MacOS/Target" "$applications_directory/.Target.app.replaced-incomplete-old/Contents/MacOS/Target"
+expect_failure 'missing executables in canonical and replacement' recover_interrupted_installation
+[ -d "$canonical_app" ] || fail_test 'missing-executable canonical was changed'
+[ -d "$applications_directory/.Target.app.replaced-incomplete-old" ] || fail_test 'missing-executable replacement was changed'
+pass_test 'Bundle-ID-correct canonical and replacement without executables remain fail closed'
+
 rm -rf -- "$test_root"
 [ ! -e "$test_root" ] || fail_test 'temporary test root final cleanup failed'
+pass_test 'isolated test root and all fixtures are removed'
 printf 'PASS: %d installer recovery scenarios; isolated temporary root removed\n' "$passed"

@@ -15,6 +15,7 @@ test_home_root=''
 install_staging_app=''
 install_replaced_app=''
 install_transaction_active=false
+install_transaction_phase='closed'
 
 installer_error() {
     printf 'error: %s\n' "$*" >&2
@@ -61,24 +62,54 @@ plist_value() {
     /usr/libexec/PlistBuddy -c "Print :$2" "$1/Contents/Info.plist" 2>/dev/null
 }
 
-is_target_bundle() {
+has_target_bundle_identity() {
     local app="$1"
     [ -d "$app" ] && [ ! -L "$app" ] && \
         [ -d "$app/Contents" ] && [ ! -L "$app/Contents" ] && \
         [ -f "$app/Contents/Info.plist" ] && [ ! -L "$app/Contents/Info.plist" ] && \
-        [ -d "$app/Contents/MacOS" ] && [ ! -L "$app/Contents/MacOS" ] && \
-        [ -f "$app/Contents/MacOS/Target" ] && [ ! -L "$app/Contents/MacOS/Target" ] && [ -x "$app/Contents/MacOS/Target" ] && \
-        [ -d "$app/Contents/Resources" ] && [ ! -L "$app/Contents/Resources" ] && \
-        [ -f "$app/Contents/Resources/Assets.car" ] && [ ! -L "$app/Contents/Resources/Assets.car" ] && \
         [ "$(plist_value "$app" CFBundleIdentifier || true)" = "$expected_bundle_id" ]
 }
 
+is_allowed_controlled_app_path() {
+    local app="$1" parent_directory
+    case "$app" in
+        /*/../*|/*/./*|*/..|*/.) return 1 ;;
+    esac
+    if [ "$app" = "$canonical_app" ]; then
+        return 0
+    fi
+    case "$app" in
+        "$applications_directory"/.Target.app.installing-*|"$applications_directory"/.Target.app.replaced-*)
+            parent_directory="$(dirname -- "$app")"
+            [ "$parent_directory" = "$applications_directory" ]
+            ;;
+        "$derived_data_root"/Target*/Build/Products/*/Target.app) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+has_recoverable_target_structure() {
+    local app="$1"
+    has_target_bundle_identity "$app" && \
+        [ -d "$app/Contents/MacOS" ] && [ ! -L "$app/Contents/MacOS" ] && \
+        [ -f "$app/Contents/MacOS/Target" ] && [ ! -L "$app/Contents/MacOS/Target" ] && [ -x "$app/Contents/MacOS/Target" ] && \
+        [ ! -e "$app/Contents/PlugIns/TargetTests.xctest" ] && [ ! -L "$app/Contents/PlugIns/TargetTests.xctest" ]
+}
+
+is_recoverable_historical_app() {
+    is_allowed_controlled_app_path "$1" && has_recoverable_target_structure "$1"
+}
+
 is_target_app() {
-    [ "$(basename -- "$1")" = 'Target.app' ] && is_target_bundle "$1"
+    [ "$(basename -- "$1")" = 'Target.app' ] && has_recoverable_target_structure "$1"
 }
 
 assert_target_app() {
-    is_target_app "$1" || installer_error "expected a regular $expected_bundle_id Target.app bundle: $1"
+    is_target_app "$1" || installer_error "expected a recoverable $expected_bundle_id Target.app bundle: $1"
+}
+
+assert_recoverable_historical_app() {
+    is_recoverable_historical_app "$1" || installer_error "expected a recoverable controlled $expected_bundle_id app bundle: $1"
 }
 
 test_failpoint() {
@@ -98,7 +129,7 @@ safe_remove_app() {
             ;;
         *) installer_error "refusing to remove unapproved path: $app"; return 1 ;;
     esac
-    is_target_bundle "$app" || { installer_error "expected a regular $expected_bundle_id app bundle: $app"; return 1; }
+    is_recoverable_historical_app "$app" || { installer_error "expected a recoverable $expected_bundle_id app bundle: $app"; return 1; }
     if [ "${dry_run:-false}" = true ]; then
         printf 'would remove app: %s\n' "$app"
         return
@@ -129,7 +160,7 @@ validate_transaction_candidates() {
     for app in "${transaction_candidates[@]:-}"; do
         [ -n "$app" ] || continue
         [ ! -L "$app" ] || { installer_error "refusing $kind recovery for symlink path: $app"; return 1; }
-        is_target_bundle "$app" || { installer_error "refusing $kind recovery for unrecognized path: $app"; return 1; }
+        is_recoverable_historical_app "$app" || { installer_error "refusing $kind recovery for unrecognized path: $app"; return 1; }
     done
 }
 
@@ -153,7 +184,7 @@ recover_orphaned_replacements() {
     }
     [ ! -L "$canonical_app" ] || { installer_error 'refusing recovery for symlink canonical path'; return 1; }
     if [ -e "$canonical_app" ]; then
-        assert_target_app "$canonical_app" || return 1
+        assert_recoverable_historical_app "$canonical_app" || return 1
         if [ "${#transaction_candidates[@]}" -eq 1 ]; then
             safe_remove_app "${transaction_candidates[0]}" || {
                 installer_error 'could not clean the validated replacement bundle; canonical app remains installed'
@@ -168,7 +199,7 @@ recover_orphaned_replacements() {
         installer_error "could not restore replacement bundle to canonical path: $app"
         return 1
     }
-    assert_target_app "$canonical_app" || {
+    assert_recoverable_historical_app "$canonical_app" || {
         installer_error 'restored canonical bundle did not pass ordinary Target App validation'
         return 1
     }
@@ -186,9 +217,11 @@ verify_built_app() {
         printf 'error: injected canonical verification failure: %s\n' "$app" >&2
         return 1
     fi
-    is_target_bundle "$app" || { installer_error "expected a regular $expected_bundle_id app bundle: $app"; return 1; }
+    is_allowed_controlled_app_path "$app" || { installer_error "expected a controlled Target app path: $app"; return 1; }
+    has_recoverable_target_structure "$app" || { installer_error "expected a recoverable $expected_bundle_id app bundle: $app"; return 1; }
+    [ -d "$app/Contents/Resources" ] && [ ! -L "$app/Contents/Resources" ] || { installer_error "missing regular Resources directory in $app"; return 1; }
     [ -f "$app/Contents/MacOS/Target" ] || { installer_error "missing main executable in $app"; return 1; }
-    [ -f "$app/Contents/Resources/Assets.car" ] || { installer_error "missing compiled asset catalog in $app"; return 1; }
+    [ -f "$app/Contents/Resources/Assets.car" ] && [ ! -L "$app/Contents/Resources/Assets.car" ] || { installer_error "missing regular compiled asset catalog in $app"; return 1; }
     [ ! -e "$app/Contents/PlugIns/TargetTests.xctest" ] || { installer_error "test bundle was mixed into $app"; return 1; }
     [ "$(plist_value "$app" CFBundleVersion)" = "$build_number" ] || { installer_error "unexpected build number in $app"; return 1; }
     [ "$(plist_value "$app" TargetSourceCommit)" = "$commit" ] || { installer_error "unexpected source commit in $app"; return 1; }
@@ -200,7 +233,7 @@ remove_controlled_staging() {
     local app="$1"
     [ -e "$app" ] || [ -L "$app" ] || return 0
     [ ! -L "$app" ] || { installer_error "preserving symlink staging evidence: $app"; return 1; }
-    is_target_bundle "$app" || { installer_error "preserving unrecognized staging evidence: $app"; return 1; }
+    is_recoverable_historical_app "$app" || { installer_error "preserving unrecognized staging evidence: $app"; return 1; }
     safe_remove_app "$app"
 }
 
@@ -208,13 +241,13 @@ restore_replaced_app() {
     local replaced_app="$1"
     [ -e "$replaced_app" ] || [ -L "$replaced_app" ] || return 0
     [ ! -L "$replaced_app" ] || { installer_error "cannot restore symlink replacement evidence: $replaced_app"; return 1; }
-    is_target_bundle "$replaced_app" || { installer_error "cannot restore unrecognized replacement evidence: $replaced_app"; return 1; }
+    is_recoverable_historical_app "$replaced_app" || { installer_error "cannot restore unrecognized replacement evidence: $replaced_app"; return 1; }
     [ ! -e "$canonical_app" ] || { installer_error "cannot restore replacement while canonical path is occupied"; return 1; }
     mv -- "$replaced_app" "$canonical_app" || {
         installer_error "could not restore old canonical app from $replaced_app"
         return 1
     }
-    assert_target_app "$canonical_app" || {
+    assert_recoverable_historical_app "$canonical_app" || {
         installer_error 'restored canonical bundle did not pass ordinary Target App validation'
         return 1
     }
@@ -222,19 +255,32 @@ restore_replaced_app() {
 }
 
 rollback_install_transaction() {
-    local rollback_failed=false
+    local rollback_failed=false cleanup_pending=false
     if [ -n "$install_staging_app" ]; then
         remove_controlled_staging "$install_staging_app" || rollback_failed=true
     fi
-    if [ -n "$install_replaced_app" ] && [ ! -e "$canonical_app" ] && [ ! -L "$canonical_app" ]; then
-        restore_replaced_app "$install_replaced_app" || rollback_failed=true
+    if [ -n "$install_replaced_app" ] && { [ -e "$install_replaced_app" ] || [ -L "$install_replaced_app" ]; }; then
+        if [ ! -e "$canonical_app" ] && [ ! -L "$canonical_app" ]; then
+            restore_replaced_app "$install_replaced_app" || rollback_failed=true
+        elif [ "$install_transaction_phase" = 'cleanup_pending' ] && is_recoverable_historical_app "$canonical_app" && is_recoverable_historical_app "$install_replaced_app"; then
+            cleanup_pending=true
+        else
+            installer_error 'cannot complete rollback while canonical and replacement evidence both remain'
+            rollback_failed=true
+        fi
     fi
     if [ "$rollback_failed" = true ]; then
+        return 1
+    fi
+    if [ "$cleanup_pending" = true ]; then
+        install_transaction_active=true
+        install_transaction_phase='cleanup_pending'
         return 1
     fi
     install_staging_app=''
     install_replaced_app=''
     install_transaction_active=false
+    install_transaction_phase='closed'
     return 0
 }
 
@@ -242,7 +288,12 @@ cleanup_failed_install_transaction() {
     local exit_code=$?
     trap - EXIT
     if [ "$install_transaction_active" = true ]; then
-        rollback_install_transaction || printf 'error: installation rollback left recoverable evidence\n' >&2
+        if ! rollback_install_transaction; then
+            if [ "$install_transaction_phase" != 'cleanup_pending' ]; then
+                printf 'error: installation rollback left recoverable evidence\n' >&2
+            fi
+            [ "$exit_code" -ne 0 ] || exit_code=1
+        fi
     fi
     exit "$exit_code"
 }
@@ -259,7 +310,7 @@ quarantine_failed_canonical() {
         installer_error 'could not quarantine failed canonical app before rollback'
         return 1
     }
-    if is_target_bundle "$failed_app"; then
+    if is_recoverable_historical_app "$failed_app"; then
         safe_remove_app "$failed_app" || printf 'error: retained validated failed canonical evidence: %s\n' "$failed_app" >&2
     else
         printf 'error: retained unrecognized failed canonical evidence: %s\n' "$failed_app" >&2
@@ -276,7 +327,7 @@ install_canonical_app() {
     [ -w "$applications_directory" ] || { installer_error 'Applications directory is not safely writable by the current user'; return 1; }
     [ ! -L "$canonical_app" ] || { installer_error 'refusing to replace symlink canonical path'; return 1; }
     if [ -e "$canonical_app" ]; then
-        assert_target_app "$canonical_app" || return 1
+        is_recoverable_historical_app "$canonical_app" || { installer_error "expected a recoverable $expected_bundle_id canonical app: $canonical_app"; return 1; }
         [ ! -d "$canonical_app/Contents/Application Support" ] || { installer_error 'canonical app contains a user data directory'; return 1; }
         [ ! -d "$canonical_app/Contents/Preferences" ] || { installer_error 'canonical app contains a user data directory'; return 1; }
     fi
@@ -296,6 +347,7 @@ install_canonical_app() {
     install_staging_app="$staging_app"
     install_replaced_app=''
     install_transaction_active=true
+    install_transaction_phase='active'
     if test_failpoint 'copy' || ! ditto "$built_app" "$staging_app"; then
         installer_error 'could not copy validated build into staging'
         rollback_install_transaction || true
@@ -321,15 +373,17 @@ install_canonical_app() {
     install_staging_app=''
     if ! verify_built_app "$canonical_app" "$commit" "$build_number"; then
         quarantine_failed_canonical "$failed_app" || true
-        restore_replaced_app "$replaced_app" || true
+        rollback_install_transaction || true
         return 1
     fi
     if [ -n "$install_replaced_app" ] && ! safe_remove_app "$install_replaced_app"; then
-        installer_error 'could not remove validated old canonical app; recovery will retry on the next run'
+        install_transaction_phase='cleanup_pending'
+        installer_error 'installation cleanup pending: valid canonical app remains installed and validated replacement cleanup will retry on the next run'
         return 1
     fi
     install_replaced_app=''
     install_transaction_active=false
+    install_transaction_phase='closed'
 }
 
 validate_target_repository() {
