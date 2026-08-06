@@ -3,6 +3,12 @@ import XCTest
 final class ProfileWorkspacePresentationUITests: XCTestCase {
     private let timeout: TimeInterval = 10
 
+    override func setUp() {
+        super.setUp()
+        continueAfterFailure = false
+        executionTimeAllowance = 60
+    }
+
     private enum Scenario: String {
         case saveFailureThenSuccess = "save-failure-then-success"
         case persistedReadDiscardFailure = "persisted-read-discard-failure"
@@ -14,17 +20,25 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     func testSaveFailureThenRecoveryAndSuccess() {
         let app = launch(.saveFailureThenSuccess)
         let initialReadinessGeneration = integerState("presentation.readiness-generation", in: app)
-        selectSecondProfile(in: app)
-        assertUnsavedAlert(in: app)
         let initialPresentationGeneration = integerState("presentation.generation", in: app)
+        selectSecondProfile(in: app)
+        assertUnsavedAlert(
+            pendingOperation: "select-second",
+            generation: initialPresentationGeneration + 1,
+            in: app
+        )
 
         clickButton("profile.unsaved.save-and-continue", in: app)
-        assertUnsavedAlert(in: app)
+        let recoveredPresentationGeneration = initialPresentationGeneration + 2
+        assertUnsavedAlert(
+            pendingOperation: "select-second",
+            generation: recoveredPresentationGeneration,
+            in: app
+        )
         XCTAssertEqual(state("presentation.selected-profile", in: app), "First Profile")
         XCTAssertEqual(state("presentation.editor-state", in: app), "fixture-dirty")
         XCTAssertEqual(state("presentation.dirty", in: app), "true")
         XCTAssertEqual(state("presentation.pending-operation", in: app), "select-second")
-        let recoveredPresentationGeneration = initialPresentationGeneration + 1
         XCTAssertEqual(integerState("presentation.generation", in: app), recoveredPresentationGeneration)
         XCTAssertEqual(integerState("presentation.readiness-generation", in: app), initialReadinessGeneration)
         XCTAssertEqual(state("presentation.active-presentation", in: app), "active")
@@ -36,7 +50,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         )
 
         clickButton("profile.unsaved.save-and-continue", in: app)
-        XCTAssertTrue(unsavedSheet(in: app).waitForNonExistence(timeout: timeout))
+        waitForUnsavedAlertToDisappear(in: app)
         XCTAssertEqual(state("presentation.selected-profile", in: app), "Second Profile")
         XCTAssertEqual(state("presentation.editor-state", in: app), "second-persisted")
         XCTAssertEqual(state("presentation.dirty", in: app), "false")
@@ -49,20 +63,28 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     func testPersistedReadDiscardFailureThenCancel() {
         let app = launch(.persistedReadDiscardFailure)
         let initialReadinessGeneration = integerState("presentation.readiness-generation", in: app)
-        selectSecondProfile(in: app)
-        assertUnsavedAlert(in: app)
         let initialPresentationGeneration = integerState("presentation.generation", in: app)
+        selectSecondProfile(in: app)
+        assertUnsavedAlert(
+            pendingOperation: "select-second",
+            generation: initialPresentationGeneration + 1,
+            in: app
+        )
         clickButton("profile.unsaved.discard", in: app)
-        assertUnsavedAlert(in: app)
+        assertUnsavedAlert(
+            pendingOperation: "select-second",
+            generation: initialPresentationGeneration + 2,
+            in: app
+        )
         XCTAssertEqual(state("presentation.selected-profile", in: app), "First Profile")
         XCTAssertEqual(state("presentation.editor-state", in: app), "fixture-dirty")
         XCTAssertEqual(state("presentation.dirty", in: app), "true")
         XCTAssertEqual(state("presentation.pending-operation", in: app), "select-second")
-        XCTAssertEqual(integerState("presentation.generation", in: app), initialPresentationGeneration + 1)
+        XCTAssertEqual(integerState("presentation.generation", in: app), initialPresentationGeneration + 2)
         XCTAssertEqual(integerState("presentation.readiness-generation", in: app), initialReadinessGeneration)
 
         clickButton("profile.unsaved.cancel", in: app)
-        XCTAssertTrue(unsavedSheet(in: app).waitForNonExistence(timeout: timeout))
+        waitForUnsavedAlertToDisappear(in: app)
         activateIfNeeded(app)
         XCTAssertEqual(state("presentation.pending-operation", in: app), "none")
         XCTAssertEqual(state("presentation.selected-profile", in: app), "First Profile")
@@ -74,10 +96,15 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     func testSuccessfulDiscardExecutesSelectionOnce() {
         let app = launch(.successfulDiscard)
         let initialReadinessGeneration = integerState("presentation.readiness-generation", in: app)
+        let initialPresentationGeneration = integerState("presentation.generation", in: app)
         selectSecondProfile(in: app)
-        assertUnsavedAlert(in: app)
+        assertUnsavedAlert(
+            pendingOperation: "select-second",
+            generation: initialPresentationGeneration + 1,
+            in: app
+        )
         clickButton("profile.unsaved.discard", in: app)
-        XCTAssertTrue(unsavedSheet(in: app).waitForNonExistence(timeout: timeout))
+        waitForUnsavedAlertToDisappear(in: app)
         XCTAssertEqual(state("presentation.selected-profile", in: app), "Second Profile")
         XCTAssertEqual(state("presentation.editor-state", in: app), "second-persisted")
         XCTAssertEqual(state("presentation.pending-operation", in: app), "none")
@@ -89,18 +116,31 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
 
     func testImportCandidateReturnsAfterFailedSaveAndCancel() {
         let app = launch(.importCandidateReturn)
-        XCTAssertTrue(element("profile.import.confirmation", in: app).waitForExistence(timeout: timeout))
+        assertExists(element("profile.import.confirmation", in: app), message: "Missing import confirmation")
         let candidateFingerprint = state("presentation.import-candidate-fingerprint", in: app)
         let initialRevision = state("presentation.selected-revision", in: app)
         let initialReadinessGeneration = integerState("presentation.readiness-generation", in: app)
+        let initialPresentationGeneration = integerState("presentation.generation", in: app)
         XCTAssertEqual(state("presentation.import-candidate", in: app), "true")
         clickButton("profile.import.confirm", in: app)
-        XCTAssertTrue(element("profile.import.confirmation", in: app).waitForNonExistence(timeout: timeout))
-        assertUnsavedAlert(in: app)
+        assertDoesNotExist(element("profile.import.confirmation", in: app), message: "Import confirmation did not dismiss")
+        waitForState("presentation.import-confirmation-presented", toEqual: "false", in: app)
+        assertUnsavedAlert(
+            pendingOperation: "import-candidate",
+            generation: initialPresentationGeneration + 1,
+            in: app
+        )
         clickButton("profile.unsaved.save-and-continue", in: app)
-        assertUnsavedAlert(in: app)
+        assertUnsavedAlert(
+            pendingOperation: "import-candidate",
+            generation: initialPresentationGeneration + 2,
+            in: app
+        )
         clickButton("profile.unsaved.cancel", in: app)
-        XCTAssertTrue(element("profile.import.confirmation", in: app).waitForExistence(timeout: timeout))
+        waitForUnsavedAlertToDisappear(in: app)
+        waitForState("presentation.pending-operation", toEqual: "none", in: app)
+        waitForState("presentation.import-confirmation-presented", toEqual: "true", in: app)
+        assertExists(element("profile.import.confirmation", in: app), message: "Import confirmation did not return")
         XCTAssertEqual(state("presentation.import-candidate", in: app), "true")
         XCTAssertEqual(state("presentation.import-candidate-fingerprint", in: app), candidateFingerprint)
         XCTAssertEqual(state("presentation.selected-revision", in: app), initialRevision)
@@ -111,18 +151,31 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
 
     func testSubscriptionCandidateReturnsAfterFailedSaveAndCancel() {
         let app = launch(.subscriptionCandidateReturn)
-        XCTAssertTrue(element("profile.subscription.preview", in: app).waitForExistence(timeout: timeout))
+        assertExists(element("profile.subscription.preview", in: app), message: "Missing subscription preview")
         let candidateFingerprint = state("presentation.subscription-candidate-fingerprint", in: app)
         let initialRevision = state("presentation.selected-revision", in: app)
         let initialReadinessGeneration = integerState("presentation.readiness-generation", in: app)
+        let initialPresentationGeneration = integerState("presentation.generation", in: app)
         XCTAssertEqual(state("presentation.subscription-candidate", in: app), "true")
         clickButton("profile.subscription.confirm", in: app)
-        XCTAssertTrue(element("profile.subscription.preview", in: app).waitForNonExistence(timeout: timeout))
-        assertUnsavedAlert(in: app)
+        assertDoesNotExist(element("profile.subscription.preview", in: app), message: "Subscription preview did not dismiss")
+        waitForState("presentation.subscription-preview-presented", toEqual: "false", in: app)
+        assertUnsavedAlert(
+            pendingOperation: "apply-subscription",
+            generation: initialPresentationGeneration + 1,
+            in: app
+        )
         clickButton("profile.unsaved.save-and-continue", in: app)
-        assertUnsavedAlert(in: app)
+        assertUnsavedAlert(
+            pendingOperation: "apply-subscription",
+            generation: initialPresentationGeneration + 2,
+            in: app
+        )
         clickButton("profile.unsaved.cancel", in: app)
-        XCTAssertTrue(element("profile.subscription.preview", in: app).waitForExistence(timeout: timeout))
+        waitForUnsavedAlertToDisappear(in: app)
+        waitForState("presentation.pending-operation", toEqual: "none", in: app)
+        waitForState("presentation.subscription-preview-presented", toEqual: "true", in: app)
+        assertExists(element("profile.subscription.preview", in: app), message: "Subscription preview did not return")
         XCTAssertEqual(state("presentation.subscription-candidate", in: app), "true")
         XCTAssertEqual(state("presentation.subscription-candidate-fingerprint", in: app), candidateFingerprint)
         XCTAssertEqual(state("presentation.selected-revision", in: app), initialRevision)
@@ -137,13 +190,27 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
             "-AppleLanguages", "(en)",
             "-AppleLocale", "en_US",
             "-ApplePersistenceIgnoreState", "YES",
+            "-NSAutomaticTextCompletionEnabled", "NO",
             "--presentation-scenario", scenario.rawValue
         ]
         app.launch()
-        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: timeout))
-        app.activate()
-        XCTAssertEqual(app.state, .runningForeground)
-        addTeardownBlock { app.terminate() }
+        assertExists(app.windows.firstMatch, message: "Presentation host window did not appear")
+        activateIfNeeded(app)
+        waitForState("presentation.scenario", toEqual: scenario.rawValue, in: app)
+        addTeardownBlock {
+            if app.state != .notRunning {
+                let sheet = app.sheets.firstMatch
+                if sheet.exists {
+                    app.typeKey(.escape, modifierFlags: [])
+                    _ = sheet.waitForNonExistence(timeout: 2)
+                }
+                app.typeKey("q", modifierFlags: .command)
+                if !app.wait(for: .notRunning, timeout: 5) {
+                    app.terminate()
+                }
+            }
+            self.cleanUpPresentationFixtures()
+        }
         return app
     }
 
@@ -151,29 +218,37 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         let id = state("presentation.second-profile-id", in: app)
         let second = app.outlines.firstMatch.cells.element(boundBy: 0)
             .descendants(matching: .any)["profile.row.\(id)"]
-        XCTAssertTrue(second.waitForExistence(timeout: timeout))
+        assertExists(second, message: "Missing second Profile row")
         activateIfNeeded(app)
         second.click()
     }
 
-    private func assertUnsavedAlert(in app: XCUIApplication) {
-        let sheet = unsavedSheet(in: app)
-        XCTAssertTrue(sheet.waitForExistence(timeout: timeout))
-        let title = sheet.staticTexts
+    private func assertUnsavedAlert(
+        pendingOperation: String,
+        generation: Int,
+        in app: XCUIApplication
+    ) {
+        waitForState("presentation.pending-operation", toEqual: pendingOperation, in: app)
+        waitForState("presentation.active-presentation", toEqual: "active", in: app)
+        waitForState("presentation.generation", toEqual: "\(generation)", in: app)
+        activateIfNeeded(app)
+        _ = requireButton("profile.unsaved.save-and-continue", in: app)
+        let title = app.descendants(matching: .staticText)
             .matching(NSPredicate(format: "value == %@", "Keep unsaved changes?"))
             .firstMatch
-        XCTAssertTrue(title.waitForExistence(timeout: timeout))
+        assertExists(title, message: "Missing unsaved Alert title")
     }
 
-    private func unsavedSheet(in app: XCUIApplication) -> XCUIElement {
-        app.sheets
-            .containing(.button, identifier: "profile.unsaved.save-and-continue")
-            .firstMatch
+    private func waitForUnsavedAlertToDisappear(in app: XCUIApplication) {
+        assertDoesNotExist(
+            button("profile.unsaved.save-and-continue", in: app),
+            message: "Unsaved Alert did not disappear"
+        )
     }
 
     private func state(_ identifier: String, in app: XCUIApplication) -> String {
         let element = app.staticTexts[identifier]
-        XCTAssertTrue(element.waitForExistence(timeout: timeout), "Missing state probe \(identifier)")
+        assertExists(element, message: "Missing state probe \(identifier)")
         return element.value as? String ?? ""
     }
 
@@ -190,18 +265,109 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         app.descendants(matching: .any)[identifier]
     }
 
+    private func waitForState(_ identifier: String, toEqual expectedValue: String, in app: XCUIApplication) {
+        let stateElement = app.staticTexts[identifier]
+        assertExists(stateElement, message: "Missing state probe \(identifier)")
+        guard (stateElement.value as? String) != expectedValue else { return }
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", expectedValue),
+            object: stateElement
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [expectation], timeout: timeout),
+            .completed,
+            "State probe \(identifier) did not become \(expectedValue); current value: \(String(describing: stateElement.value))"
+        )
+    }
+
     private func clickButton(_ identifier: String, in app: XCUIApplication) {
         activateIfNeeded(app)
-        let button = app.buttons[identifier]
-        XCTAssertTrue(button.waitForExistence(timeout: timeout), "Missing button \(identifier)")
-        button.click()
+        if identifier == "profile.import.confirm" {
+            app.typeKey(.tab, modifierFlags: [])
+        }
+        dismissTextCompletionIfPresent(in: app)
+        let result = requireButton(identifier, in: app)
+        switch identifier {
+        case "profile.import.confirm", "profile.subscription.confirm", "profile.unsaved.save-and-continue":
+            app.typeKey(.return, modifierFlags: [])
+        case "profile.unsaved.cancel":
+            app.typeKey(.escape, modifierFlags: [])
+        default:
+            guard result.isHittable || waitUntilHittable(result) else {
+                attachAccessibilityDiagnostics(for: app, missingIdentifier: "hittable \(identifier)")
+                XCTFail("Button \(identifier) did not become hittable within \(timeout) seconds")
+                return
+            }
+            result.click()
+        }
+    }
+
+    private func dismissTextCompletionIfPresent(in app: XCUIApplication) {
+        let completionWindow = app.windows["SafariPlatformSupportAutoCompleteWindow"]
+        guard completionWindow.exists else { return }
+        app.typeKey(.escape, modifierFlags: [])
+        assertDoesNotExist(completionWindow, message: "System text-completion window did not dismiss")
+    }
+
+    private func button(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .button)[identifier]
+    }
+
+    private func requireButton(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        let result = button(identifier, in: app)
+        guard result.exists || result.waitForExistence(timeout: timeout) else {
+            attachAccessibilityDiagnostics(for: app, missingIdentifier: identifier)
+            XCTFail("Missing button \(identifier) while presentation state was active")
+            return result
+        }
+        return result
+    }
+
+    private func waitUntilHittable(_ element: XCUIElement) -> Bool {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isHittable == true"),
+            object: element
+        )
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func attachAccessibilityDiagnostics(for app: XCUIApplication, missingIdentifier: String) {
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "AX hierarchy missing \(missingIdentifier)"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+
+        let identifiers = [
+            ("Sheets", app.sheets),
+            ("Dialogs", app.dialogs),
+            ("Buttons", app.descendants(matching: .button))
+        ].map { label, query in
+            let values = query.allElementsBoundByIndex.map { element in
+                element.identifier.isEmpty ? "<empty>" : element.identifier
+            }
+            return "\(label): \(values)"
+        }.joined(separator: "\n")
+        let inventory = XCTAttachment(string: identifiers)
+        inventory.name = "AX Sheet Dialog Button identifiers"
+        inventory.lifetime = .keepAlways
+        add(inventory)
     }
 
     private func activateIfNeeded(_ app: XCUIApplication) {
-        if app.state != .runningForeground {
-            app.activate()
+        guard !app.wait(for: .runningForeground, timeout: timeout) else { return }
+
+        let window = app.windows.firstMatch
+        guard window.exists else {
+            attachAccessibilityDiagnostics(for: app, missingIdentifier: "foreground-window")
+            XCTFail("Application has no window available for foreground activation")
+            return
         }
-        XCTAssertEqual(app.state, .runningForeground)
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.02)).click()
+        guard app.wait(for: .runningForeground, timeout: timeout) else {
+            attachAccessibilityDiagnostics(for: app, missingIdentifier: "runningForeground")
+            XCTFail("Application did not enter the foreground within \(timeout) seconds")
+            return
+        }
     }
 
     private func assertStateRemains(
@@ -211,12 +377,46 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         in app: XCUIApplication
     ) {
         let element = app.staticTexts[identifier]
-        XCTAssertTrue(element.waitForExistence(timeout: timeout), "Missing state probe \(identifier)")
+        assertExists(element, message: "Missing state probe \(identifier)")
         let changed = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value != %@", value),
             object: element
         )
         changed.isInverted = true
         XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: duration), .completed)
+    }
+
+    private func assertExists(_ element: XCUIElement, message: String) {
+        XCTAssertTrue(element.exists || element.waitForExistence(timeout: timeout), message)
+    }
+
+    private func assertDoesNotExist(_ element: XCUIElement, message: String) {
+        XCTAssertTrue(!element.exists || element.waitForNonExistence(timeout: timeout), message)
+    }
+
+    private func cleanUpPresentationFixtures() {
+        let fileManager = FileManager.default
+        var directory = fileManager.temporaryDirectory.resolvingSymlinksInPath()
+
+        for _ in 0..<4 {
+            if let contents = try? fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) {
+                for url in contents where url.lastPathComponent.hasPrefix("TargetPresentationFixture-") {
+                    do {
+                        try fileManager.removeItem(at: url)
+                    } catch {
+                        XCTFail("Unable to remove presentation fixture \(url.lastPathComponent)")
+                    }
+                }
+            }
+
+            if directory.lastPathComponent == "T" { break }
+            let parent = directory.deletingLastPathComponent()
+            guard parent.path != "/", parent != directory else { break }
+            directory = parent
+        }
     }
 }

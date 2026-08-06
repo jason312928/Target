@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// A test-only macOS application. Its first and only Profile model is created
@@ -5,6 +6,7 @@ import SwiftUI
 @main
 @MainActor
 struct TargetPresentationTestHostApp: App {
+    @NSApplicationDelegateAdaptor(PresentationTestHostApplicationDelegate.self) private var appDelegate
     @State private var fixture: PresentationFixture
 
     init() {
@@ -22,8 +24,20 @@ struct TargetPresentationTestHostApp: App {
                     PresentationStateProbe(fixture: fixture)
                 }
                 .frame(minWidth: 760, minHeight: 560)
-                .task { fixture.startScenario() }
+                .task {
+                    appDelegate.fixture = fixture
+                    fixture.startScenario()
+                }
                 .onDisappear { fixture.cleanUp() }
         }
+    }
+}
+
+@MainActor
+private final class PresentationTestHostApplicationDelegate: NSObject, NSApplicationDelegate {
+    weak var fixture: PresentationFixture?
+
+    func applicationWillTerminate(_ notification: Notification) {
+        fixture?.cleanUp()
     }
 }

@@ -7,16 +7,20 @@ struct PresentationStateProbe: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
+            state("presentation.scenario", fixture.scenario.rawValue)
             state("presentation.selected-profile", fixture.model.selectedProfile?.name ?? "none")
             state("presentation.dirty", fixture.model.isDirty ? "true" : "false")
             state("presentation.pending-operation", pendingOperationName)
             state("presentation.active-presentation", fixture.model.unsavedChangesPresentation.isPresented ? "active" : "inactive")
             state("presentation.generation", "\(fixture.model.unsavedChangesPresentation.generation)")
             state("presentation.readiness-generation", "\(fixture.model.readinessChangeGeneration)")
+            state("presentation.fixture-readiness-generation", "\(fixture.model.readinessChangeGeneration)")
             state("presentation.editor-state", editorState)
             state("presentation.import-candidate", fixture.model.pendingImportCandidate == nil ? "false" : "true")
+            state("presentation.import-confirmation-presented", fixture.model.shouldPresentImportConfirmation ? "true" : "false")
             state("presentation.import-candidate-fingerprint", importCandidateFingerprint)
             state("presentation.subscription-candidate", fixture.model.pendingSubscriptionUpdate == nil ? "false" : "true")
+            state("presentation.subscription-preview-presented", fixture.model.shouldPresentSubscriptionPreview ? "true" : "false")
             state("presentation.subscription-candidate-fingerprint", subscriptionCandidateFingerprint)
             state("presentation.profile-count", "\(fixture.model.profiles.count)")
             state("presentation.selected-revision", "\(fixture.model.selectedProfile?.validRevision ?? 0)")
@@ -24,6 +28,7 @@ struct PresentationStateProbe: View {
         }
         .font(.caption2)
         .foregroundStyle(.clear)
+        .allowsHitTesting(false)
         .accessibilityHidden(false)
     }
 
