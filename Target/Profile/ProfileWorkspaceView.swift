@@ -47,10 +47,14 @@ struct ProfileWorkspaceView: View {
             if let profile = model.selectedProfile {
                 editor(for: profile)
             } else {
-                VStack(spacing: 12) {
-                    ContentUnavailableView("profile.empty.title", systemImage: "doc.text", description: Text("profile.empty.description"))
-                    if model.isPreparingImport { ProgressView("profile.import.preparing") }
-                    if let messageKey = model.messageKey { Text(LocalizedStringKey(messageKey)).foregroundStyle(.secondary) }
+                TargetPageLayout {
+                    TargetPageHeader("profile.title")
+                    VStack(spacing: 12) {
+                        ContentUnavailableView("profile.empty.title", systemImage: "doc.text", description: Text("profile.empty.description"))
+                        if model.isPreparingImport { ProgressView("profile.import.preparing") }
+                        if let messageKey = model.messageKey { Text(LocalizedStringKey(messageKey)).foregroundStyle(.secondary) }
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 260)
                 }
             }
         }

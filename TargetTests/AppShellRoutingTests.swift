@@ -8,8 +8,33 @@ final class AppShellRoutingTests: XCTestCase {
 
     func testDestinationSetContainsOnlyDashboardAndProfilesWithStableIdentity() {
         XCTAssertEqual(AppDestination.allCases, [.dashboard, .profiles])
+        XCTAssertEqual(AppDestination.visibleDestinations, [.dashboard, .profiles])
         XCTAssertEqual(AppDestination.dashboard.id, .dashboard)
         XCTAssertEqual(AppDestination.profiles.id, .profiles)
+    }
+
+    func testNavigationSectionsAndDestinationOrderAreStable() {
+        XCTAssertEqual(AppNavigationSection.ordered, [.workspace])
+        XCTAssertEqual(
+            AppNavigationSection.ordered.flatMap { AppDestination.metadata(in: $0).map(\.destination) },
+            [.dashboard, .profiles]
+        )
+    }
+
+    func testEveryVisibleDestinationBelongsToExactlyOneSection() {
+        for destination in AppDestination.visibleDestinations {
+            let sections = AppNavigationSection.ordered.filter {
+                AppDestination.metadata(in: $0).contains { $0.destination == destination }
+            }
+            XCTAssertEqual(sections, [destination.metadata.section])
+        }
+    }
+
+    func testNavigationMetadataContainsNoUnimplementedDestination() {
+        XCTAssertEqual(
+            Set(AppDestination.navigationMetadata.map(\.destination)),
+            Set([.dashboard, .profiles])
+        )
     }
 
     func testMissingProfileRoutesOnlyToProfiles() {
@@ -33,7 +58,17 @@ final class AppShellRoutingTests: XCTestCase {
         XCTAssertNil(DashboardActionRouter.route(for: .unavailable))
     }
 
-    func testMissingSelectionFallsBackToDashboard() {
-        XCTAssertEqual(AppDestination.fallback(for: nil), .dashboard)
+    func testMissingPersistedSelectionFallsBackToDashboard() {
+        XCTAssertEqual(AppDestination.destination(for: nil), .dashboard)
+    }
+
+    func testInvalidOrOldPersistedSelectionFallsBackToDashboard() {
+        XCTAssertEqual(AppDestination.destination(for: "connections"), .dashboard)
+        XCTAssertEqual(AppDestination.destination(for: ""), .dashboard)
+    }
+
+    func testValidPersistedSelectionRestoresDestination() {
+        XCTAssertEqual(AppDestination.destination(for: "dashboard"), .dashboard)
+        XCTAssertEqual(AppDestination.destination(for: "profiles"), .profiles)
     }
 }

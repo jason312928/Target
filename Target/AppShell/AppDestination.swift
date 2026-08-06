@@ -1,5 +1,29 @@
 import Foundation
 
+enum AppNavigationSection: String, CaseIterable, Hashable, Identifiable {
+    case workspace
+
+    static let ordered: [Self] = [.workspace]
+
+    var id: String { rawValue }
+
+    var title: LocalizedStringResource {
+        switch self {
+        case .workspace: "navigation.section.workspace"
+        }
+    }
+}
+
+struct AppDestinationMetadata: Identifiable {
+    let destination: AppDestination
+    let section: AppNavigationSection
+    let sortOrder: Int
+    let title: LocalizedStringResource
+    let symbolName: String
+
+    var id: AppDestination { destination }
+}
+
 enum AppDestination: String, CaseIterable, Hashable, Identifiable {
     case dashboard
     case profiles
@@ -8,22 +32,47 @@ enum AppDestination: String, CaseIterable, Hashable, Identifiable {
 
     var id: Self { self }
 
-    var title: LocalizedStringResource {
-        switch self {
-        case .dashboard: "dashboard.title"
-        case .profiles: "profile.title"
-        }
+    static let navigationMetadata: [AppDestinationMetadata] = [
+        AppDestinationMetadata(
+            destination: .dashboard,
+            section: .workspace,
+            sortOrder: 0,
+            title: "dashboard.title",
+            symbolName: "rectangle.grid.1x2"
+        ),
+        AppDestinationMetadata(
+            destination: .profiles,
+            section: .workspace,
+            sortOrder: 1,
+            title: "profile.title",
+            symbolName: "doc.text"
+        ),
+    ]
+
+    static var visibleDestinations: [Self] {
+        navigationMetadata
+            .sorted { $0.sortOrder < $1.sortOrder }
+            .map(\.destination)
     }
 
-    var symbolName: String {
-        switch self {
-        case .dashboard: "rectangle.grid.1x2"
-        case .profiles: "doc.text"
+    var metadata: AppDestinationMetadata {
+        guard let metadata = Self.navigationMetadata.first(where: { $0.destination == self }) else {
+            preconditionFailure("Every AppDestination must have navigation metadata.")
         }
+        return metadata
     }
 
-    static func fallback(for selection: Self?) -> Self {
-        selection ?? defaultDestination
+    static func metadata(in section: AppNavigationSection) -> [AppDestinationMetadata] {
+        navigationMetadata
+            .filter { $0.section == section }
+            .sorted { $0.sortOrder < $1.sortOrder }
+    }
+
+    static func destination(for persistedRawValue: String?) -> Self {
+        guard let persistedRawValue, let destination = Self(rawValue: persistedRawValue) else {
+            return defaultDestination
+        }
+        return destination
     }
 }
 

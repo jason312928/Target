@@ -26,34 +26,22 @@ struct DashboardView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("dashboard.title")
-                    .font(.largeTitle.weight(.semibold))
-                Text("dashboard.subtitle")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                statusCard
-                if let errorKey = presentation.backendErrorKey {
-                    TargetNotice(level: .critical, messageKey: errorKey)
+        TargetPageLayout {
+            TargetPageHeader("dashboard.title", subtitleKey: "dashboard.subtitle")
+            statusCard
+            notices
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: TargetUI.sectionSpacing) {
+                    runtimeCard
+                    serviceCard
                 }
-                if presentation.showsRestartNotice {
-                    TargetNotice(level: .warning, messageKey: "engine.restart.required")
+                VStack(alignment: .leading, spacing: TargetUI.sectionSpacing) {
+                    runtimeCard
+                    serviceCard
                 }
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 20) {
-                        runtimeCard
-                        serviceCard
-                    }
-                    VStack(alignment: .leading, spacing: 20) {
-                        runtimeCard
-                        serviceCard
-                    }
-                }
-                safetyCard
             }
-            .frame(maxWidth: 900, alignment: .leading)
-            .padding(24)
+            TargetSectionTitle("dashboard.section.network", systemImage: "lock")
+            safetySection
         }
         .frame(minWidth: 500, minHeight: 460)
         .navigationTitle("dashboard.title")
@@ -74,16 +62,37 @@ struct DashboardView: View {
                 Text(LocalizedStringKey(presentation.descriptionKey))
                     .font(.title2)
                     .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    primaryActionButton
-                    if presentation.isBusy {
-                        ProgressView()
-                            .controlSize(.small)
-                            .accessibilityLabel(Text("dashboard.status.working"))
+                ViewThatFits(in: .horizontal) {
+                    HStack {
+                        primaryActionButton
+                        busyIndicator
+                        Spacer(minLength: 0)
                     }
-                    Spacer()
+                    VStack(alignment: .leading, spacing: 8) {
+                        primaryActionButton
+                        busyIndicator
+                    }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var busyIndicator: some View {
+        if presentation.isBusy {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel(Text("dashboard.status.working"))
+        }
+    }
+
+    @ViewBuilder
+    private var notices: some View {
+        if let errorKey = presentation.backendErrorKey {
+            TargetNotice(level: .critical, messageKey: errorKey)
+        }
+        if presentation.showsRestartNotice {
+            TargetNotice(level: .warning, messageKey: "engine.restart.required")
         }
     }
 
@@ -129,8 +138,7 @@ struct DashboardView: View {
     private var runtimeCard: some View {
         TargetCard {
             VStack(alignment: .leading, spacing: 12) {
-                Label("dashboard.section.runtime", systemImage: "bolt")
-                    .font(.headline)
+                TargetSectionTitle("dashboard.section.runtime", systemImage: "bolt")
                 TargetStatusRow(labelKey: "engine.label.installation", valueKey: presentation.engineInstallationKey, value: nil)
                 TargetStatusRow(labelKey: "engine.label.version", valueKey: nil, value: presentation.engineVersion)
                 TargetStatusRow(labelKey: "backend.label.engine", valueKey: presentation.engineStateKey, value: nil)
@@ -147,15 +155,17 @@ struct DashboardView: View {
     private var serviceCard: some View {
         TargetCard {
             VStack(alignment: .leading, spacing: 12) {
-                Label("dashboard.section.service", systemImage: "shield")
-                    .font(.headline)
+                TargetSectionTitle("dashboard.section.service", systemImage: "shield")
                 TargetStatusRow(labelKey: "backend.label.service", valueKey: presentation.serviceInstallationKey, value: nil)
                 TargetStatusRow(labelKey: "xpc.label.status", valueKey: presentation.xpcStateKey, value: nil)
-                HStack {
-                    Button("service.action.install") { lifecycle.installService() }
-                        .disabled(!lifecycle.canManageService || lifecycle.serviceInstallation == .enabled)
-                    Button("service.action.remove", role: .destructive) { lifecycle.removeService() }
-                        .disabled(!lifecycle.canManageService || lifecycle.serviceInstallation == .notRegistered)
+                ViewThatFits(in: .horizontal) {
+                    HStack {
+                        serviceButtons
+                        Spacer(minLength: 0)
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        serviceButtons
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -163,33 +173,56 @@ struct DashboardView: View {
         .frame(minWidth: 280, maxWidth: .infinity)
     }
 
-    private var safetyCard: some View {
-        TargetCard {
-            VStack(alignment: .leading, spacing: 12) {
-                Label("dashboard.section.network", systemImage: "lock")
-                    .font(.headline)
-                if presentation.isHostSafeMode {
-                    TargetNotice(level: .warning, messageKey: "host-safety.status.safe")
-                }
+    @ViewBuilder
+    private var serviceButtons: some View {
+        Button("service.action.install") { lifecycle.installService() }
+            .disabled(!lifecycle.canManageService || lifecycle.serviceInstallation == .enabled)
+        Button("service.action.remove", role: .destructive) { lifecycle.removeService() }
+            .disabled(!lifecycle.canManageService || lifecycle.serviceInstallation == .notRegistered)
+    }
+
+    private var safetySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if presentation.isHostSafeMode {
+                TargetNotice(level: .warning, messageKey: "host-safety.status.safe")
+            }
+            if let errorKey = presentation.systemProxyErrorKey {
+                TargetNotice(level: .critical, messageKey: errorKey)
+            }
+            TargetCard {
+                VStack(alignment: .leading, spacing: 12) {
                 TargetStatusRow(labelKey: "system-proxy.label.status", valueKey: presentation.systemProxyStateKey, value: nil)
                 TargetStatusRow(labelKey: "system-proxy.label.engine", valueKey: presentation.systemProxyEngineKey, value: nil)
-                if let errorKey = presentation.systemProxyErrorKey {
-                    TargetNotice(level: .critical, messageKey: errorKey)
-                }
-                HStack {
-                    Toggle("system-proxy.action.toggle", isOn: Binding(
-                        get: { lifecycle.systemProxyStatus.state == .enabled },
-                        set: { $0 ? lifecycle.enableSystemProxy() : lifecycle.disableSystemProxy() }
-                    ))
-                    .disabled(!lifecycle.canEnableSystemProxy && !lifecycle.canDisableSystemProxy)
-                    .accessibilityHint(Text(presentation.isHostSafeMode ? "dashboard.proxy.safe-mode.hint" : "dashboard.proxy.hint"))
-                    Spacer()
-                    Button("system-proxy.action.refresh") { lifecycle.refreshSystemProxyStatus() }
-                        .disabled(lifecycle.isBusy)
-                    Button("system-proxy.action.recover") { lifecycle.recoverSystemProxy() }
-                        .disabled(!lifecycle.canRecoverSystemProxy)
+                ViewThatFits(in: .horizontal) {
+                    HStack {
+                        proxyToggle
+                        Spacer(minLength: 12)
+                        proxyButtons
+                    }
+                    VStack(alignment: .leading, spacing: 12) {
+                        proxyToggle
+                        proxyButtons
+                    }
                 }
             }
+            }
         }
+    }
+
+    private var proxyToggle: some View {
+        Toggle("system-proxy.action.toggle", isOn: Binding(
+            get: { lifecycle.systemProxyStatus.state == .enabled },
+            set: { $0 ? lifecycle.enableSystemProxy() : lifecycle.disableSystemProxy() }
+        ))
+        .disabled(!lifecycle.canEnableSystemProxy && !lifecycle.canDisableSystemProxy)
+        .accessibilityHint(Text(presentation.isHostSafeMode ? "dashboard.proxy.safe-mode.hint" : "dashboard.proxy.hint"))
+    }
+
+    @ViewBuilder
+    private var proxyButtons: some View {
+        Button("system-proxy.action.refresh") { lifecycle.refreshSystemProxyStatus() }
+            .disabled(lifecycle.isBusy)
+        Button("system-proxy.action.recover") { lifecycle.recoverSystemProxy() }
+            .disabled(!lifecycle.canRecoverSystemProxy)
     }
 }

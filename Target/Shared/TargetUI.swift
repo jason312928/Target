@@ -1,5 +1,66 @@
 import SwiftUI
 
+enum TargetUI {
+    static let pageContentMaxWidth: CGFloat = 960
+    static let pagePadding: CGFloat = 24
+    static let sectionSpacing: CGFloat = 20
+    static let cardCornerRadius: CGFloat = 8
+}
+
+struct TargetPageLayout<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: TargetUI.sectionSpacing) {
+                content
+            }
+            .frame(maxWidth: TargetUI.pageContentMaxWidth, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(TargetUI.pagePadding)
+        }
+    }
+}
+
+struct TargetPageHeader: View {
+    let titleKey: LocalizedStringKey
+    let subtitleKey: LocalizedStringKey?
+
+    init(_ titleKey: LocalizedStringKey, subtitleKey: LocalizedStringKey? = nil) {
+        self.titleKey = titleKey
+        self.subtitleKey = subtitleKey
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(titleKey)
+                .font(.largeTitle.weight(.semibold))
+            if let subtitleKey {
+                Text(subtitleKey)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+struct TargetSectionTitle: View {
+    let titleKey: LocalizedStringKey
+    let symbolName: String
+
+    init(_ titleKey: LocalizedStringKey, systemImage symbolName: String) {
+        self.titleKey = titleKey
+        self.symbolName = symbolName
+    }
+
+    var body: some View {
+        Label(titleKey, systemImage: symbolName)
+            .font(.headline)
+            .accessibilityElement(children: .combine)
+    }
+}
+
 enum TargetStatusLevel: Equatable {
     case neutral
     case positive
@@ -30,8 +91,8 @@ struct TargetCard<Content: View>: View {
 
     var body: some View {
         content
-            .padding(20)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(18)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: TargetUI.cardCornerRadius, style: .continuous))
     }
 }
 
@@ -61,7 +122,7 @@ struct TargetNotice: View {
             Spacer(minLength: 0)
         }
         .padding(12)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: TargetUI.cardCornerRadius, style: .continuous))
         .accessibilityHint(Text("dashboard.notice.hint"))
     }
 }

@@ -3,6 +3,7 @@
   "strings" : {
     "app.title" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Target" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Target" } } } },
     "navigation.accessibility.label" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Main navigation" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "主导航" } } } },
+    "navigation.section.workspace" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Workspace" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "工作区" } } } },
     "profile.action.cancel" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } } } },
     "profile.action.confirm" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Confirm" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "确认" } } } },
     "profile.action.create" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "New Profile" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "新建 Profile" } } } },
