@@ -32,7 +32,7 @@ configure_installer_paths() {
         installer_test_root="${TARGET_INSTALLER_TEST_ROOT:-}"
         [ -n "$installer_test_root" ] || installer_error 'test mode requires TARGET_INSTALLER_TEST_ROOT'
         installer_test_root="$(canonical_directory "$installer_test_root")" || installer_error 'cannot resolve test root'
-        [[ "${installer_test_root##*/}" =~ ^TargetInstallerTests\.[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || installer_error 'test root must be a UUID temporary directory'
+        [[ "${installer_test_root##*/}" =~ ^TargetInstallerTests\.[[:alnum:]]{8}$ ]] || installer_error 'test root must be an isolated mktemp directory'
         case "$installer_test_root" in
             /|/Applications|/Applications/*) installer_error 'test root must not contain the real Applications directory' ;;
         esac
@@ -62,7 +62,15 @@ plist_value() {
 }
 
 is_target_bundle() {
-    [ -d "$1" ] && [ ! -L "$1" ] && [ "$(plist_value "$1" CFBundleIdentifier || true)" = "$expected_bundle_id" ]
+    local app="$1"
+    [ -d "$app" ] && [ ! -L "$app" ] && \
+        [ -d "$app/Contents" ] && [ ! -L "$app/Contents" ] && \
+        [ -f "$app/Contents/Info.plist" ] && [ ! -L "$app/Contents/Info.plist" ] && \
+        [ -d "$app/Contents/MacOS" ] && [ ! -L "$app/Contents/MacOS" ] && \
+        [ -f "$app/Contents/MacOS/Target" ] && [ ! -L "$app/Contents/MacOS/Target" ] && [ -x "$app/Contents/MacOS/Target" ] && \
+        [ -d "$app/Contents/Resources" ] && [ ! -L "$app/Contents/Resources" ] && \
+        [ -f "$app/Contents/Resources/Assets.car" ] && [ ! -L "$app/Contents/Resources/Assets.car" ] && \
+        [ "$(plist_value "$app" CFBundleIdentifier || true)" = "$expected_bundle_id" ]
 }
 
 is_target_app() {
@@ -190,7 +198,7 @@ verify_built_app() {
 
 remove_controlled_staging() {
     local app="$1"
-    [ -e "$app" ] || [ -L "$app" ] || return
+    [ -e "$app" ] || [ -L "$app" ] || return 0
     [ ! -L "$app" ] || { installer_error "preserving symlink staging evidence: $app"; return 1; }
     is_target_bundle "$app" || { installer_error "preserving unrecognized staging evidence: $app"; return 1; }
     safe_remove_app "$app"
@@ -198,7 +206,7 @@ remove_controlled_staging() {
 
 restore_replaced_app() {
     local replaced_app="$1"
-    [ -e "$replaced_app" ] || [ -L "$replaced_app" ] || return
+    [ -e "$replaced_app" ] || [ -L "$replaced_app" ] || return 0
     [ ! -L "$replaced_app" ] || { installer_error "cannot restore symlink replacement evidence: $replaced_app"; return 1; }
     is_target_bundle "$replaced_app" || { installer_error "cannot restore unrecognized replacement evidence: $replaced_app"; return 1; }
     [ ! -e "$canonical_app" ] || { installer_error "cannot restore replacement while canonical path is occupied"; return 1; }
@@ -221,7 +229,13 @@ rollback_install_transaction() {
     if [ -n "$install_replaced_app" ] && [ ! -e "$canonical_app" ] && [ ! -L "$canonical_app" ]; then
         restore_replaced_app "$install_replaced_app" || rollback_failed=true
     fi
-    "$rollback_failed" && return 1
+    if [ "$rollback_failed" = true ]; then
+        return 1
+    fi
+    install_staging_app=''
+    install_replaced_app=''
+    install_transaction_active=false
+    return 0
 }
 
 cleanup_failed_install_transaction() {

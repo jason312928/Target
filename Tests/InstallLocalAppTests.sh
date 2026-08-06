@@ -34,7 +34,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-test_root="$(mktemp -d "${TMPDIR:-/tmp}/TargetInstallerTests.$(uuidgen)")"
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/TargetInstallerTests.XXXXXXXX")"
 mkdir -p "$test_root/Applications" "$test_root/tools" "$test_root/Home"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$test_root/tools/lsregister"
 chmod 755 "$test_root/tools/lsregister"
@@ -75,6 +75,12 @@ artifact_count() {
 assert_no_artifacts() {
     [ "$(artifact_count '.Target.app.installing-*')" = 0 ] || fail_test 'unexpected staging artifact'
     [ "$(artifact_count '.Target.app.replaced-*')" = 0 ] || fail_test 'unexpected replacement artifact'
+}
+
+assert_transaction_closed() {
+    [ -z "$install_staging_app" ] || fail_test 'staging transaction state was retained'
+    [ -z "$install_replaced_app" ] || fail_test 'replacement transaction state was retained'
+    [ "$install_transaction_active" = false ] || fail_test 'transaction remained active after a successful rollback'
 }
 
 assert_canonical() {
@@ -132,7 +138,8 @@ expect_failure 'copy failure' install_fixture
 unset TARGET_INSTALLER_TEST_FAILPOINT
 assert_canonical 'old'
 assert_no_artifacts
-pass_test 'staging copy failure exits nonzero; old canonical remains and staging is clean'
+assert_transaction_closed
+pass_test 'staging copy failure exits nonzero; old canonical remains and rollback state is clear'
 
 # 4. Failure after the old app was moved restores it.
 reset_apps
@@ -143,7 +150,8 @@ expect_failure 'staging rename failure' install_fixture
 unset TARGET_INSTALLER_TEST_FAILPOINT
 assert_canonical 'old'
 assert_no_artifacts
-pass_test 'staging rename failure exits nonzero and restores the old canonical app'
+assert_transaction_closed
+pass_test 'staging rename failure exits nonzero, restores the old app, and clears rollback state'
 
 # 5. Failed validation of the new canonical app restores the old app.
 reset_apps
@@ -221,7 +229,25 @@ expect_failure 'wrong Bundle ID replacement' recover_interrupted_installation
 [ -d "$applications_directory/.Target.app.replaced-wrong" ] || fail_test 'wrong-ID replacement changed'
 pass_test 'wrong Bundle ID replacement exits nonzero and is not deleted'
 
-# 13. Deletion is bounded to approved verified paths.
+# 13. A Bundle-ID-only replacement is rejected without deletion.
+reset_apps
+make_app "$applications_directory/.Target.app.replaced-incomplete" 'incomplete'
+rm -f -- "$applications_directory/.Target.app.replaced-incomplete/Contents/MacOS/Target"
+expect_failure 'incomplete replacement' recover_interrupted_installation
+[ -d "$applications_directory/.Target.app.replaced-incomplete" ] || fail_test 'incomplete replacement changed'
+pass_test 'startup recovery rejects a Bundle-ID-only replacement without deleting it'
+
+# 14. A Bundle-ID-only canonical app does not authorize replacement cleanup.
+reset_apps
+make_app "$canonical_app" 'incomplete'
+rm -f -- "$canonical_app/Contents/MacOS/Target"
+make_app "$applications_directory/.Target.app.replaced-valid" 'old'
+expect_failure 'incomplete canonical app' recover_interrupted_installation
+[ -d "$canonical_app" ] || fail_test 'incomplete canonical app changed'
+[ -d "$applications_directory/.Target.app.replaced-valid" ] || fail_test 'validated replacement was deleted beside incomplete canonical app'
+pass_test 'startup recovery rejects a Bundle-ID-only canonical app and preserves the replacement'
+
+# 15. Deletion is bounded to approved verified paths.
 reset_apps
 unapproved_app="$applications_directory/.Target.app.replaced-container/Nested.app"
 make_app "$unapproved_app" 'unapproved'
@@ -254,27 +280,27 @@ repository_validation() {
     )
 }
 
-# 14. Dirty repositories are rejected.
+# 16. Dirty repositories are rejected.
 fixture="$test_root/DirtyRepository"
 make_repository_fixture "$fixture" 'https://github.com/jason312928/Target.git'
 printf 'dirty\n' > "$fixture/dirty"
 expect_failure 'dirty repository' repository_validation "$fixture"
 pass_test 'dirty worktree exits nonzero'
 
-# 15. Non-main branches are rejected.
+# 17. Non-main branches are rejected.
 fixture="$test_root/BranchRepository"
 make_repository_fixture "$fixture" 'https://github.com/jason312928/Target.git'
 git -C "$fixture" checkout -q -b repair
 expect_failure 'non-main branch' repository_validation "$fixture"
 pass_test 'non-main branch exits nonzero'
 
-# 16. A repository with a different origin is rejected.
+# 18. A repository with a different origin is rejected.
 fixture="$test_root/WrongRepository"
 make_repository_fixture "$fixture" 'https://example.invalid/not-target.git'
 expect_failure 'wrong repository' repository_validation "$fixture"
 pass_test 'wrong repository exits nonzero'
 
-# 17. The top-level dry run is confined to the test root and changes no files.
+# 19. The top-level dry run is confined to the test root and changes no files.
 fixture="$test_root/DryRunRepository"
 make_repository_fixture "$fixture" 'https://github.com/jason312928/Target.git'
 mkdir -p "$fixture/bin" "$test_root/Home/Applications"
@@ -301,7 +327,7 @@ after_tree="$(find "$test_root" -print | LC_ALL=C sort)"
 [ -d "$test_root/Home/Applications/Target.app" ] || fail_test 'dry run modified an old app candidate'
 pass_test 'dry run exits 0 and makes no filesystem changes in the isolated root'
 
-# 18. Normal mode has no path injection and remains fixed to /Applications/Target.app.
+# 20. Normal mode has no path injection and remains fixed to /Applications/Target.app.
 env -u TARGET_INSTALLER_TEST_MODE -u TARGET_INSTALLER_TEST_ROOT bash -c '
     source "$1"
     configure_installer_paths
