@@ -8,6 +8,7 @@ installer_script="$repo_root/Scripts/install_local_app.sh"
 commit='0123456789abcdef0123456789abcdef01234567'
 build_number='42'
 test_root=''
+sentinel_root=''
 passed=0
 
 fail_test() {
@@ -29,15 +30,88 @@ cleanup() {
         printf 'FAIL: temporary test root was not removed: %s\n' "$test_root" >&2
         exit 1
     fi
+    if [ -n "$sentinel_root" ] && [ -e "$sentinel_root" ]; then
+        rm -rf -- "$sentinel_root"
+    fi
+    if [ -n "$sentinel_root" ] && [ -e "$sentinel_root" ]; then
+        printf 'FAIL: temporary sentinel root was not removed: %s\n' "$sentinel_root" >&2
+        exit 1
+    fi
     exit "$exit_code"
 }
 
 trap cleanup EXIT
 
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/TargetInstallerTests.XXXXXXXX")"
+sentinel_root="$(mktemp -d "${TMPDIR:-/tmp}/TargetInstallerSentinels.XXXXXXXX")"
+test_root="$(cd -P -- "$test_root" && pwd -P)"
+sentinel_root="$(cd -P -- "$sentinel_root" && pwd -P)"
 mkdir -p "$test_root/Applications" "$test_root/tools" "$test_root/Home"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$test_root/tools/lsregister"
-chmod 755 "$test_root/tools/lsregister"
+cat > "$test_root/tools/xcodebuild" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -n "${TARGET_INSTALLER_FIXTURE_LOG:-}" ]; then
+    printf 'xcodebuild\n' >> "$TARGET_INSTALLER_FIXTURE_LOG"
+fi
+if [ "${1:-}" = '-list' ]; then
+    printf '    Schemes:\n        Target\n'
+    exit 0
+fi
+derived_data=''
+commit=''
+build_number=''
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -derivedDataPath) derived_data="$2"; shift ;;
+        TARGET_SOURCE_COMMIT=*) commit="${1#*=}" ;;
+        CURRENT_PROJECT_VERSION=*) build_number="${1#*=}" ;;
+    esac
+    shift
+done
+[ -n "$derived_data" ] && [ -n "$commit" ] && [ -n "$build_number" ]
+app="$derived_data/Build/Products/Debug/Target.app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$app/Contents/MacOS/Target"
+chmod 755 "$app/Contents/MacOS/Target"
+: > "$app/Contents/Resources/Assets.car"
+cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.jason312928.Target</string>
+<key>CFBundleShortVersionString</key><string>new</string>
+<key>CFBundleVersion</key><string>$build_number</string>
+<key>TargetSourceCommit</key><string>$commit</string>
+<key>TargetSourceCommitShort</key><string>${commit:0:12}</string>
+<key>TargetBuildChannel</key><string>Local</string>
+</dict></plist>
+PLIST
+EOF
+cat > "$test_root/tools/ditto" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -n "${TARGET_INSTALLER_FIXTURE_LOG:-}" ]; then
+    printf 'ditto\n' >> "$TARGET_INSTALLER_FIXTURE_LOG"
+fi
+cp -R -- "$1" "$2"
+EOF
+cat > "$test_root/tools/lsregister" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -n "${TARGET_INSTALLER_FIXTURE_LOG:-}" ]; then
+    printf 'lsregister %s\n' "$*" >> "$TARGET_INSTALLER_FIXTURE_LOG"
+fi
+exit 0
+EOF
+cat > "$test_root/tools/mdimport" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -n "${TARGET_INSTALLER_FIXTURE_LOG:-}" ]; then
+    printf 'mdimport %s\n' "$*" >> "$TARGET_INSTALLER_FIXTURE_LOG"
+fi
+exit 0
+EOF
+chmod 755 "$test_root/tools/xcodebuild" "$test_root/tools/ditto" "$test_root/tools/lsregister" "$test_root/tools/mdimport"
 
 export TARGET_INSTALLER_TEST_MODE=1
 export TARGET_INSTALLER_TEST_ROOT="$test_root"
@@ -110,6 +184,38 @@ reset_apps() {
     install_transaction_phase='closed'
     dry_run=false
     unset TARGET_INSTALLER_TEST_FAILPOINT || true
+}
+
+make_isolated_test_root() {
+    local root
+    root="$(mktemp -d "${TMPDIR:-/tmp}/TargetInstallerTests.XXXXXXXX")"
+    root="$(cd -P -- "$root" && pwd -P)"
+    mkdir -p "$root/Applications" "$root/Home/Applications" "$root/Home/Desktop" \
+        "$root/Home/Downloads" "$root/tools"
+    cp "$test_root/tools/xcodebuild" "$root/tools/xcodebuild"
+    cp "$test_root/tools/ditto" "$root/tools/ditto"
+    cp "$test_root/tools/lsregister" "$root/tools/lsregister"
+    cp "$test_root/tools/mdimport" "$root/tools/mdimport"
+    chmod 755 "$root/tools/xcodebuild" "$root/tools/ditto" "$root/tools/lsregister" "$root/tools/mdimport"
+    printf '%s\n' "$root"
+}
+
+configure_fixture_root() {
+    local root="$1"
+    TARGET_INSTALLER_TEST_MODE=1 TARGET_INSTALLER_TEST_ROOT="$root" bash -c '
+        set -euo pipefail
+        source "$1"
+        configure_installer_paths
+    ' bash "$transaction_library"
+}
+
+assert_sentinel_unchanged() {
+    local sentinel="$1" expected="$2"
+    [ -f "$sentinel/sentinel.txt" ] || fail_test 'external sentinel file disappeared'
+    [ "$(cat "$sentinel/sentinel.txt")" = "$expected" ] || fail_test 'external sentinel content changed'
+    [ ! -e "$sentinel/Target.app" ] || fail_test 'external sentinel gained Target.app'
+    [ -z "$(find "$sentinel" -mindepth 1 -maxdepth 1 \( -name '.Target.app.installing-*' -o -name '.Target.app.replaced-*' \) -print)" ] || \
+        fail_test 'external sentinel gained an installer transaction artifact'
 }
 
 expect_failure() {
@@ -571,7 +677,157 @@ expect_failure 'missing executables in canonical and replacement' recover_interr
 [ -d "$applications_directory/.Target.app.replaced-incomplete-old" ] || fail_test 'missing-executable replacement was changed'
 pass_test 'Bundle-ID-correct canonical and replacement without executables remain fail closed'
 
+# 32. An Applications symlink to an external directory is rejected before any write.
+escape_root="$(make_isolated_test_root)"
+external_applications="$sentinel_root/ExternalApplications"
+mkdir -p "$external_applications"
+printf 'applications-sentinel\n' > "$external_applications/sentinel.txt"
+rm -rf -- "$escape_root/Applications"
+ln -s "$external_applications" "$escape_root/Applications"
+expect_failure 'external Applications symlink' configure_fixture_root "$escape_root"
+assert_sentinel_unchanged "$external_applications" 'applications-sentinel'
+[ -L "$escape_root/Applications" ] || fail_test 'external Applications symlink changed'
+rm -rf -- "$escape_root"
+pass_test 'test Applications symlink to an external sentinel exits nonzero before staging or replacement writes'
+
+# 33. An Applications symlink to the real /Applications is rejected by path validation alone.
+escape_root="$(make_isolated_test_root)"
+rm -rf -- "$escape_root/Applications"
+ln -s /Applications "$escape_root/Applications"
+fixture_log="$sentinel_root/real-applications-fixtures.log"
+expect_failure 'real Applications symlink' env TARGET_INSTALLER_FIXTURE_LOG="$fixture_log" \
+    TARGET_INSTALLER_TEST_MODE=1 TARGET_INSTALLER_TEST_ROOT="$escape_root" bash -c '
+        set -euo pipefail
+        source "$1"
+        configure_installer_paths
+    ' bash "$transaction_library"
+[ -L "$escape_root/Applications" ] || fail_test 'real Applications symlink changed'
+[ ! -e "$fixture_log" ] || fail_test 'a command fixture ran while rejecting the real Applications symlink'
+rm -rf -- "$escape_root"
+pass_test 'test Applications symlink to real /Applications exits nonzero without invoking any fixture'
+
+# 34. A Home/Applications symlink cannot expose an external Target.app to collection.
+escape_root="$(make_isolated_test_root)"
+external_home_apps="$sentinel_root/ExternalHomeApplications"
+mkdir -p "$external_home_apps"
+make_app "$external_home_apps/Target.app" 'external-home'
+printf 'home-applications-sentinel\n' > "$external_home_apps/sentinel.txt"
+rm -rf -- "$escape_root/Home/Applications"
+ln -s "$external_home_apps" "$escape_root/Home/Applications"
+fixture_log="$sentinel_root/home-applications-fixtures.log"
+expect_failure 'external Home Applications symlink' env TARGET_INSTALLER_FIXTURE_LOG="$fixture_log" \
+    TARGET_INSTALLER_TEST_MODE=1 TARGET_INSTALLER_TEST_ROOT="$escape_root" bash -c '
+        set -euo pipefail
+        source "$1"
+        configure_installer_paths
+    ' bash "$transaction_library"
+[ -d "$external_home_apps/Target.app" ] || fail_test 'external Home Target.app was moved or deleted'
+[ "$(app_version "$external_home_apps/Target.app")" = 'external-home' ] || fail_test 'external Home Target.app changed'
+[ ! -e "$fixture_log" ] || fail_test 'lsregister or another fixture ran for an external Home Applications root'
+rm -rf -- "$escape_root"
+pass_test 'external Home/Applications symlink exits nonzero without moving, deleting, or unregistering its App'
+
+# 35. A DerivedData symlink is rejected before build or cleanup.
+escape_root="$(make_isolated_test_root)"
+external_derived_data="$sentinel_root/ExternalDerivedData"
+mkdir -p "$external_derived_data"
+printf 'derived-data-sentinel\n' > "$external_derived_data/sentinel.txt"
+ln -s "$external_derived_data" "$escape_root/DerivedData"
+fixture_log="$sentinel_root/derived-data-fixtures.log"
+expect_failure 'external DerivedData symlink' env TARGET_INSTALLER_FIXTURE_LOG="$fixture_log" \
+    TARGET_INSTALLER_TEST_MODE=1 TARGET_INSTALLER_TEST_ROOT="$escape_root" bash -c '
+        set -euo pipefail
+        source "$1"
+        configure_installer_paths
+    ' bash "$transaction_library"
+assert_sentinel_unchanged "$external_derived_data" 'derived-data-sentinel'
+[ ! -e "$fixture_log" ] || fail_test 'xcodebuild or another fixture ran for external DerivedData'
+rm -rf -- "$escape_root"
+pass_test 'external DerivedData symlink exits nonzero before build, deletion, or fixture execution'
+
+# 36. An archive-root symlink is rejected before archival.
+escape_root="$(make_isolated_test_root)"
+external_archive="$sentinel_root/ExternalArchive"
+mkdir -p "$external_archive"
+printf 'archive-sentinel\n' > "$external_archive/sentinel.txt"
+ln -s "$external_archive" "$escape_root/Archived Builds.noindex"
+expect_failure 'external archive symlink' configure_fixture_root "$escape_root"
+assert_sentinel_unchanged "$external_archive" 'archive-sentinel'
+rm -rf -- "$escape_root"
+pass_test 'external archive-root symlink exits nonzero before archive creation or movement'
+
+# 37. A symlink lsregister fixture is rejected even when executable.
+escape_root="$(make_isolated_test_root)"
+external_lsregister="$sentinel_root/external-lsregister"
+printf '#!/usr/bin/env bash\nprintf called >> "$1"\n' > "$external_lsregister"
+chmod 755 "$external_lsregister"
+rm -f -- "$escape_root/tools/lsregister"
+ln -s "$external_lsregister" "$escape_root/tools/lsregister"
+expect_failure 'symlink lsregister fixture' configure_fixture_root "$escape_root"
+[ -L "$escape_root/tools/lsregister" ] || fail_test 'lsregister fixture symlink changed'
+rm -rf -- "$escape_root"
+pass_test 'test-mode lsregister symlink resolving outside the test root exits nonzero'
+
+# 38. A symlink mdimport fixture is rejected even when executable.
+escape_root="$(make_isolated_test_root)"
+external_mdimport="$sentinel_root/external-mdimport"
+printf '#!/usr/bin/env bash\nprintf called >> "$1"\n' > "$external_mdimport"
+chmod 755 "$external_mdimport"
+rm -f -- "$escape_root/tools/mdimport"
+ln -s "$external_mdimport" "$escape_root/tools/mdimport"
+expect_failure 'symlink mdimport fixture' configure_fixture_root "$escape_root"
+[ -L "$escape_root/tools/mdimport" ] || fail_test 'mdimport fixture symlink changed'
+rm -rf -- "$escape_root"
+pass_test 'test-mode mdimport symlink resolving outside the test root exits nonzero'
+
+# 39. A missing required fixture fails closed and never falls back to PATH.
+escape_root="$(make_isolated_test_root)"
+rm -f -- "$escape_root/tools/mdimport"
+decoy_bin="$sentinel_root/DecoyBin"
+mkdir -p "$decoy_bin"
+decoy_log="$sentinel_root/path-fallback.log"
+cat > "$decoy_bin/mdimport" <<EOF
+#!/usr/bin/env bash
+printf 'PATH mdimport called\n' >> "$decoy_log"
+EOF
+chmod 755 "$decoy_bin/mdimport"
+expect_failure 'missing mdimport fixture' env PATH="$decoy_bin:$PATH" \
+    TARGET_INSTALLER_TEST_MODE=1 TARGET_INSTALLER_TEST_ROOT="$escape_root" bash -c '
+        set -euo pipefail
+        source "$1"
+        configure_installer_paths
+    ' bash "$transaction_library"
+[ ! -e "$decoy_log" ] || fail_test 'test mode fell back to PATH for missing mdimport fixture'
+rm -rf -- "$escape_root"
+pass_test 'missing test command fixture exits nonzero without PATH fallback'
+
+# 40. Valid directories and regular fixtures remain accepted.
+escape_root="$(make_isolated_test_root)"
+configure_fixture_root "$escape_root" || fail_test 'valid isolated path and command fixtures were rejected'
+rm -rf -- "$escape_root"
+pass_test 'ordinary isolated directories and regular executable fixtures pass containment validation'
+
+# 41. The test root itself cannot be a symlink.
+escape_root="$(make_isolated_test_root)"
+symlink_root="$sentinel_root/TargetInstallerTests.SYMROOT1"
+ln -s "$escape_root" "$symlink_root"
+expect_failure 'symlink test root' configure_fixture_root "$symlink_root"
+[ -L "$symlink_root" ] || fail_test 'test-root symlink changed'
+rm -f -- "$symlink_root"
+rm -rf -- "$escape_root"
+pass_test 'a test-root symlink exits nonzero before controlled-path validation'
+
+# 42. A non-canonical absolute spelling of the test root is rejected.
+escape_root="$(make_isolated_test_root)"
+noncanonical_root="$(dirname -- "$escape_root")/${escape_root##*/}/../${escape_root##*/}"
+expect_failure 'non-canonical test root' configure_fixture_root "$noncanonical_root"
+[ -d "$escape_root" ] || fail_test 'non-canonical test-root rejection changed the real directory'
+rm -rf -- "$escape_root"
+pass_test 'a non-canonical absolute test-root path exits nonzero without changing the directory'
+
 rm -rf -- "$test_root"
 [ ! -e "$test_root" ] || fail_test 'temporary test root final cleanup failed'
-pass_test 'isolated test root and all fixtures are removed'
+rm -rf -- "$sentinel_root"
+[ ! -e "$sentinel_root" ] || fail_test 'temporary sentinel root final cleanup failed'
+pass_test 'isolated test roots, command fixtures, and external sentinels are removed'
 printf 'PASS: %d installer recovery scenarios; isolated temporary root removed\n' "$passed"

@@ -10,8 +10,12 @@ canonical_app='/Applications/Target.app'
 derived_data_root="$HOME/Library/Developer/Xcode/DerivedData"
 derived_data_path="$derived_data_root/Target-Canonical.noindex"
 archive_root="$HOME/Library/Application Support/Target/Archived Builds.noindex"
-lsregister='/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
+installer_xcodebuild='xcodebuild'
+installer_ditto='ditto'
+installer_lsregister='/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
+installer_mdimport='mdimport'
 test_home_root=''
+test_tools_root=''
 install_staging_app=''
 install_replaced_app=''
 install_transaction_active=false
@@ -27,35 +31,143 @@ canonical_directory() {
     (cd -P -- "$1" && pwd -P)
 }
 
+path_is_strictly_within() {
+    local root="$1" path="$2"
+    [ "$path" != "$root" ] || return 1
+    case "$path" in
+        "$root"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_test_directory_path() {
+    local path="$1" label="$2" relative component current
+    local -a components
+    [ "$installer_test_mode" = true ] || return 0
+    case "$path" in
+        /*/../*|/*/./*|*/..|*/.) installer_error "$label contains a non-canonical path component"; return 1 ;;
+    esac
+    path_is_strictly_within "$installer_test_root" "$path" || {
+        installer_error "$label must remain inside the isolated test root"
+        return 1
+    }
+    relative="${path#"$installer_test_root"/}"
+    IFS='/' read -r -a components <<< "$relative"
+    current="$installer_test_root"
+    for component in "${components[@]}"; do
+        [ -n "$component" ] || { installer_error "$label contains an empty path component"; return 1; }
+        current="$current/$component"
+        [ ! -L "$current" ] || { installer_error "$label contains a symlink component: $current"; return 1; }
+        if [ -e "$current" ]; then
+            [ -d "$current" ] || { installer_error "$label contains a non-directory component: $current"; return 1; }
+            [ "$(canonical_directory "$current")" = "$current" ] || {
+                installer_error "$label resolves outside its canonical test path: $current"
+                return 1
+            }
+        fi
+    done
+}
+
+validate_test_command_fixture() {
+    local command_path="$1" label="$2" command_parent canonical_parent
+    [ "$installer_test_mode" = true ] || return 0
+    validate_test_directory_path "$test_tools_root" 'test tools directory' || return 1
+    path_is_strictly_within "$test_tools_root" "$command_path" || {
+        installer_error "$label fixture must be inside the isolated tools directory"
+        return 1
+    }
+    [ -f "$command_path" ] && [ ! -L "$command_path" ] && [ -x "$command_path" ] || {
+        installer_error "test mode requires a regular executable $label fixture"
+        return 1
+    }
+    command_parent="$(dirname -- "$command_path")"
+    canonical_parent="$(canonical_directory "$command_parent")" || {
+        installer_error "cannot resolve the $label fixture directory"
+        return 1
+    }
+    [ "$canonical_parent/${command_path##*/}" = "$command_path" ] || {
+        installer_error "$label fixture does not have a canonical test path"
+        return 1
+    }
+}
+
+validate_test_mode_paths() {
+    [ "$installer_test_mode" = true ] || return 0
+    [ -d "$installer_test_root" ] && [ ! -L "$installer_test_root" ] || {
+        installer_error 'test root must be a regular directory and not a symlink'
+        return 1
+    }
+    [ "$(canonical_directory "$installer_test_root")" = "$installer_test_root" ] || {
+        installer_error 'test root must remain a canonical absolute path'
+        return 1
+    }
+    validate_test_directory_path "$applications_directory" 'test Applications directory' || return 1
+    validate_test_directory_path "$test_home_root" 'test Home directory' || return 1
+    validate_test_directory_path "$test_home_root/Applications" 'test Home Applications directory' || return 1
+    validate_test_directory_path "$test_home_root/Desktop" 'test Home Desktop directory' || return 1
+    validate_test_directory_path "$test_home_root/Downloads" 'test Home Downloads directory' || return 1
+    validate_test_directory_path "$derived_data_root" 'test DerivedData directory' || return 1
+    validate_test_directory_path "$derived_data_path" 'test canonical DerivedData directory' || return 1
+    validate_test_directory_path "$archive_root" 'test archive directory' || return 1
+    validate_test_directory_path "$test_tools_root" 'test tools directory' || return 1
+    validate_test_command_fixture "$installer_xcodebuild" 'xcodebuild' || return 1
+    validate_test_command_fixture "$installer_ditto" 'ditto' || return 1
+    validate_test_command_fixture "$installer_lsregister" 'lsregister' || return 1
+    validate_test_command_fixture "$installer_mdimport" 'mdimport' || return 1
+}
+
 configure_installer_paths() {
     if [ "${TARGET_INSTALLER_TEST_MODE:-}" = '1' ]; then
+        local requested_test_root
         installer_test_mode=true
-        installer_test_root="${TARGET_INSTALLER_TEST_ROOT:-}"
-        [ -n "$installer_test_root" ] || installer_error 'test mode requires TARGET_INSTALLER_TEST_ROOT'
-        installer_test_root="$(canonical_directory "$installer_test_root")" || installer_error 'cannot resolve test root'
-        [[ "${installer_test_root##*/}" =~ ^TargetInstallerTests\.[[:alnum:]]{8}$ ]] || installer_error 'test root must be an isolated mktemp directory'
+        requested_test_root="${TARGET_INSTALLER_TEST_ROOT:-}"
+        [ -n "$requested_test_root" ] || { installer_error 'test mode requires TARGET_INSTALLER_TEST_ROOT'; return 1; }
+        case "$requested_test_root" in
+            /*) ;;
+            *) installer_error 'test root must be an absolute path'; return 1 ;;
+        esac
+        [ -d "$requested_test_root" ] && [ ! -L "$requested_test_root" ] || {
+            installer_error 'test root must be a regular directory and not a symlink'
+            return 1
+        }
+        installer_test_root="$(canonical_directory "$requested_test_root")" || { installer_error 'cannot resolve test root'; return 1; }
+        [ "$installer_test_root" = "$requested_test_root" ] || { installer_error 'test root must be a canonical absolute path'; return 1; }
+        [[ "${installer_test_root##*/}" =~ ^TargetInstallerTests\.[[:alnum:]]{8}$ ]] || {
+            installer_error 'test root must be an isolated mktemp directory'
+            return 1
+        }
         case "$installer_test_root" in
-            /|/Applications|/Applications/*) installer_error 'test root must not contain the real Applications directory' ;;
+            /|/Applications|/Applications/*) installer_error 'test root must not contain the real Applications directory'; return 1 ;;
         esac
         applications_directory="$installer_test_root/Applications"
-        [ -d "$applications_directory" ] || installer_error 'test root Applications directory is missing'
+        [ -d "$applications_directory" ] || { installer_error 'test root Applications directory is missing'; return 1; }
         canonical_app="$applications_directory/Target.app"
         derived_data_root="$installer_test_root/DerivedData"
         derived_data_path="$derived_data_root/Target-Canonical.noindex"
         archive_root="$installer_test_root/Archived Builds.noindex"
         test_home_root="$installer_test_root/Home"
-        lsregister="$installer_test_root/tools/lsregister"
-        [ -x "$lsregister" ] || installer_error 'test mode requires an isolated lsregister fixture'
+        test_tools_root="$installer_test_root/tools"
+        installer_xcodebuild="$test_tools_root/xcodebuild"
+        installer_ditto="$test_tools_root/ditto"
+        installer_lsregister="$test_tools_root/lsregister"
+        installer_mdimport="$test_tools_root/mdimport"
+        validate_test_mode_paths || return 1
         return
     fi
 
-    [ -z "${TARGET_INSTALLER_TEST_ROOT:-}" ] || installer_error 'TARGET_INSTALLER_TEST_ROOT requires TARGET_INSTALLER_TEST_MODE=1'
+    [ -z "${TARGET_INSTALLER_TEST_ROOT:-}" ] || {
+        installer_error 'TARGET_INSTALLER_TEST_ROOT requires TARGET_INSTALLER_TEST_MODE=1'
+        return 1
+    }
     applications_directory='/Applications'
     canonical_app='/Applications/Target.app'
     derived_data_root="$HOME/Library/Developer/Xcode/DerivedData"
     derived_data_path="$derived_data_root/Target-Canonical.noindex"
     archive_root="$HOME/Library/Application Support/Target/Archived Builds.noindex"
-    lsregister='/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
+    installer_xcodebuild='xcodebuild'
+    installer_ditto='ditto'
+    installer_lsregister='/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister'
+    installer_mdimport='mdimport'
 }
 
 plist_value() {
@@ -207,6 +319,7 @@ recover_orphaned_replacements() {
 }
 
 recover_interrupted_installation() {
+    validate_test_mode_paths || return 1
     cleanup_orphaned_staging || return 1
     recover_orphaned_replacements
 }
@@ -320,9 +433,17 @@ quarantine_failed_canonical() {
 install_canonical_app() {
     local built_app="$1" commit="$2" build_number="$3"
     local staging_app replaced_app failed_app transaction_id
+    validate_test_mode_paths || return 1
     applications_directory="$(canonical_directory "$applications_directory")" || { installer_error 'cannot resolve Applications directory'; return 1; }
+    [ "$applications_directory" != '/Applications' ] || {
+        [ "$installer_test_mode" = false ] || { installer_error 'test mode must never resolve to the real /Applications directory'; return 1; }
+    }
     if [ "$installer_test_mode" = false ]; then
         [ "$applications_directory" = '/Applications' ] || { installer_error 'unexpected /Applications canonical path'; return 1; }
+    else
+        path_is_strictly_within "$installer_test_root" "$applications_directory" || { installer_error 'test Applications directory escaped the test root'; return 1; }
+        canonical_app="$applications_directory/Target.app"
+        path_is_strictly_within "$applications_directory" "$canonical_app" || { installer_error 'test canonical app escaped Applications'; return 1; }
     fi
     [ -w "$applications_directory" ] || { installer_error 'Applications directory is not safely writable by the current user'; return 1; }
     [ ! -L "$canonical_app" ] || { installer_error 'refusing to replace symlink canonical path'; return 1; }
@@ -335,6 +456,11 @@ install_canonical_app() {
     staging_app="$applications_directory/.Target.app.installing-$transaction_id"
     replaced_app="$applications_directory/.Target.app.replaced-$transaction_id"
     failed_app="$applications_directory/.Target.app.installing-$transaction_id.failed"
+    if [ "$installer_test_mode" = true ]; then
+        path_is_strictly_within "$applications_directory" "$staging_app" || { installer_error 'test staging path escaped Applications'; return 1; }
+        path_is_strictly_within "$applications_directory" "$replaced_app" || { installer_error 'test replacement path escaped Applications'; return 1; }
+        path_is_strictly_within "$applications_directory" "$failed_app" || { installer_error 'test failed-app path escaped Applications'; return 1; }
+    fi
     [ ! -e "$staging_app" ] && [ ! -L "$staging_app" ] || { installer_error "staging path already exists: $staging_app"; return 1; }
     [ ! -e "$replaced_app" ] && [ ! -L "$replaced_app" ] || { installer_error "replacement path already exists: $replaced_app"; return 1; }
     if [ "${dry_run:-false}" = true ]; then
@@ -348,7 +474,7 @@ install_canonical_app() {
     install_replaced_app=''
     install_transaction_active=true
     install_transaction_phase='active'
-    if test_failpoint 'copy' || ! ditto "$built_app" "$staging_app"; then
+    if test_failpoint 'copy' || ! "$installer_ditto" "$built_app" "$staging_app"; then
         installer_error 'could not copy validated build into staging'
         rollback_install_transaction || true
         return 1

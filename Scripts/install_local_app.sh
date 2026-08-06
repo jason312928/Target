@@ -17,13 +17,14 @@ unregister_app() {
         printf 'would unregister LaunchServices path: %s\n' "$app"
         return
     fi
-    "$lsregister" -u "$app" >/dev/null 2>&1 || true
+    "$installer_lsregister" -u "$app" >/dev/null 2>&1 || true
 }
 
 archive_app() {
     local app="$1"
     local timestamp archive_directory destination suffix
     assert_target_app "$app"
+    validate_test_mode_paths || return 1
     timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
     archive_directory="$archive_root/$timestamp"
     destination="$archive_directory/Target.app"
@@ -44,6 +45,7 @@ archive_app() {
 collect_old_apps() {
     local root app
     local roots
+    validate_test_mode_paths || return 1
     if [ "$installer_test_mode" = true ]; then
         roots=("$test_home_root/Applications" "$test_home_root/Desktop" "$test_home_root/Downloads" "$derived_data_root")
     else
@@ -67,12 +69,13 @@ collect_old_apps() {
 
 collect_stale_launchservices_paths() {
     local app
+    validate_test_mode_paths || return 1
     while IFS= read -r app; do
         [ "$app" = "$canonical_app" ] && continue
         [ -n "$app" ] || continue
         unregister_app "$app"
     done < <(
-        "$lsregister" -dump | awk '
+        "$installer_lsregister" -dump | awk '
             /^$/ { path = ""; next }
             /^path:[[:space:]]*/ { sub(/^path:[[:space:]]*/, ""); path = $0; sub(/[[:space:]]+\(0x[[:xdigit:]]+\)$/, "", path); next }
             /^identifier:[[:space:]]*com\.jason312928\.Target$/ { if (path != "") print path; path = "" }
@@ -91,14 +94,19 @@ done
 
 configure_installer_paths
 command -v git >/dev/null 2>&1 || { installer_error 'git is required'; exit 1; }
-command -v xcodebuild >/dev/null 2>&1 || { installer_error 'xcodebuild is required'; exit 1; }
-command -v ditto >/dev/null 2>&1 || { installer_error 'ditto is required'; exit 1; }
-[ -x "$lsregister" ] || { installer_error 'LaunchServices lsregister is unavailable'; exit 1; }
+if [ "$installer_test_mode" = false ]; then
+    command -v "$installer_xcodebuild" >/dev/null 2>&1 || { installer_error 'xcodebuild is required'; exit 1; }
+    command -v "$installer_ditto" >/dev/null 2>&1 || { installer_error 'ditto is required'; exit 1; }
+    command -v "$installer_mdimport" >/dev/null 2>&1 || { installer_error 'mdimport is required'; exit 1; }
+    [ -x "$installer_lsregister" ] || { installer_error 'LaunchServices lsregister is unavailable'; exit 1; }
+else
+    validate_test_mode_paths || exit 1
+fi
 trap cleanup_failed_install_transaction EXIT
 
 repo_root="$(validate_target_repository)" || exit 1
 cd -- "$repo_root"
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -list -project 'Target.xcodeproj' | awk '
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer "$installer_xcodebuild" -list -project 'Target.xcodeproj' | awk '
     /^    Schemes:$/ { in_schemes = 1; next }
     in_schemes && /^        Target$/ { found = 1 }
     END { exit found ? 0 : 1 }
@@ -120,8 +128,9 @@ if [ "$dry_run" = true ]; then
 fi
 
 recover_interrupted_installation
+validate_test_mode_paths || exit 1
 mkdir -p "$derived_data_path"
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild \
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer "$installer_xcodebuild" \
     -project 'Target.xcodeproj' \
     -scheme 'Target' \
     -configuration Debug \
@@ -140,7 +149,7 @@ verify_built_app "$built_app" "$commit" "$build_number"
 install_canonical_app "$built_app" "$commit" "$build_number"
 collect_old_apps
 collect_stale_launchservices_paths
-"$lsregister" -f "$canonical_app" >/dev/null
-mdimport "$canonical_app"
+"$installer_lsregister" -f "$canonical_app" >/dev/null
+"$installer_mdimport" "$canonical_app"
 verify_built_app "$canonical_app" "$commit" "$build_number"
 printf 'installed canonical Target.app at %s\n' "$canonical_app"
