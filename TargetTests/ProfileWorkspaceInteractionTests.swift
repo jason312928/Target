@@ -59,6 +59,18 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertFalse(fixture.model.isDirty)
     }
 
+    func testDiscardingPendingCreationExecutesOnlyOnce() throws {
+        let fixture = try makeFixture()
+        fixture.model.updateEditor("{\"edited\":true}")
+        fixture.model.requestCreate(name: "Created")
+        fixture.model.resolveUnsavedChanges(.discardChanges)
+
+        XCTAssertEqual(fixture.model.profiles.count, 3)
+        XCTAssertEqual(fixture.model.selectedProfile?.name, "Created")
+        fixture.model.resolveUnsavedChanges(.discardChanges)
+        XCTAssertEqual(fixture.model.profiles.count, 3)
+    }
+
     func testSaveFailureDoesNotExecutePendingOperationOrLoseEditor() throws {
         let fixture = try makeFixture(checker: InteractionChecker(result: .failure(.init(messageKey: "profile.validation.check-failed", line: nil, column: nil))))
         fixture.model.updateEditor("{\"inbounds\":[],\"outbounds\":[],\"route\":{}}")
@@ -124,6 +136,11 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
                 guard case .applySubscription? = fixture.model.pendingOperation else {
                     return XCTFail("Applying a candidate with edits must ask first")
                 }
+                fixture.model.resolveUnsavedChanges(.discardChanges)
+                XCTAssertTrue(fixture.model.editorText.contains("\"updated\":true"))
+                let revision = fixture.model.selectedProfile?.validRevision
+                fixture.model.resolveUnsavedChanges(.discardChanges)
+                XCTAssertEqual(fixture.model.selectedProfile?.validRevision, revision)
             case .notModified, .failure, .cancelled:
                 XCTAssertNil(fixture.model.pendingSubscriptionUpdate)
             }
