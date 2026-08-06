@@ -23,10 +23,9 @@ final class ProfileViewModel {
     private(set) var isShowingExportWarning = false
     private(set) var isExporting = false
     private(set) var pendingOperation: ProfileWorkspaceOperation?
-    /// Advances when a user request needs the unsaved-changes decision. Alert
-    /// presentation is intentionally separate from the pending intent because
-    /// SwiftUI may dismiss an alert before its button action has completed.
-    private(set) var unsavedChangesDecisionGeneration = 0
+    /// Presentation ownership is separate from the typed pending intent, but
+    /// its active state is kept consistent with that intent by decision result.
+    private(set) var unsavedChangesPresentation = ProfileUnsavedChangesPresentation()
     /// Changes that affect selected configuration readiness. The view observes
     /// this rather than refreshing lifecycle state for cancelled actions or
     /// subscription-cache metadata updates.
@@ -41,6 +40,8 @@ final class ProfileViewModel {
     var selectedProfile: Profile? { profiles.first { $0.id == selectedID } }
     var canExport: Bool { selectedProfile != nil && !isDirty && !isExporting }
     var defaultExportFileName: String { store.defaultExportFileNameForSelectedProfile() ?? "Profile.json" }
+    var shouldPresentImportConfirmation: Bool { pendingImportCandidate != nil && pendingOperation == nil }
+    var shouldPresentSubscriptionPreview: Bool { pendingSubscriptionUpdate != nil && pendingOperation == nil }
 
     func requestSelection(_ id: UUID?) {
         guard id != selectedID else { return }
@@ -64,24 +65,41 @@ final class ProfileViewModel {
         request(.restore(id))
     }
 
-    func resolveUnsavedChanges(_ decision: ProfileUnsavedChangesDecision) {
-        guard let operation = pendingOperation else { return }
+    @discardableResult
+    func resolveUnsavedChanges(_ decision: ProfileUnsavedChangesDecision) -> ProfileUnsavedChangesDecisionResult {
+        guard let operation = pendingOperation else { return .noPendingOperation }
         switch decision {
         case .cancel:
             pendingOperation = nil
+            unsavedChangesPresentation.resolve(.cancelled)
+            return .cancelled
         case .discardChanges:
-            guard discardCurrentEditorToPersistedState() else { return }
+            guard discardCurrentEditorToPersistedState() else {
+                unsavedChangesPresentation.resolve(.failedAndStillPending)
+                return .failedAndStillPending
+            }
             pendingOperation = nil
+            unsavedChangesPresentation.resolve(.resolved)
             execute(operation)
+            return .resolved
         case .saveAndContinue:
-            guard saveCurrentEditor() else { return }
+            guard saveCurrentEditor() else {
+                unsavedChangesPresentation.resolve(.failedAndStillPending)
+                return .failedAndStillPending
+            }
             pendingOperation = nil
+            unsavedChangesPresentation.resolve(.resolved)
             execute(operation)
+            return .resolved
         }
     }
 
     func cancelUnsavedChangesConfirmation() {
-        resolveUnsavedChanges(.cancel)
+        _ = resolveUnsavedChanges(.cancel)
+    }
+
+    func unsavedChangesAlertPresentationDidChange(_ isPresented: Bool) {
+        unsavedChangesPresentation.alertPresentationDidChange(isPresented)
     }
 
     private func reloadInitialState() {
@@ -197,7 +215,11 @@ final class ProfileViewModel {
     }
 
     func save() {
-        _ = saveCurrentEditor()
+        if pendingOperation != nil {
+            _ = resolveUnsavedChanges(.saveAndContinue)
+        } else {
+            _ = saveCurrentEditor()
+        }
     }
 
     @discardableResult
@@ -269,9 +291,12 @@ final class ProfileViewModel {
     }
 
     private func request(_ operation: ProfileWorkspaceOperation) {
+        // A recovery decision owns the next replacement action. This also
+        // prevents a clean editor from overwriting a recoverable older intent.
+        guard pendingOperation == nil else { return }
         guard !isDirty else {
             pendingOperation = operation
-            unsavedChangesDecisionGeneration &+= 1
+            unsavedChangesPresentation.requestPresentation()
             return
         }
         execute(operation)

@@ -8,7 +8,6 @@ struct ProfileWorkspaceView: View {
     @State private var sheet: ProfileSheet?
     @State private var isImporting = false
     @State private var deleteTarget: UUID?
-    @State private var isShowingUnsavedChangesAlert = false
 
     init(lifecycle: BackendLifecycleModel?, model: ProfileViewModel) {
         self.lifecycle = lifecycle
@@ -68,7 +67,7 @@ struct ProfileWorkspaceView: View {
             }
         }
         .sheet(isPresented: Binding(
-            get: { model.pendingImportCandidate != nil && model.pendingOperation == nil },
+            get: { model.shouldPresentImportConfirmation },
             set: {
                 if !$0, model.pendingOperation == nil {
                     model.cancelPreparedImport()
@@ -84,7 +83,7 @@ struct ProfileWorkspaceView: View {
             }
         }
         .sheet(isPresented: Binding(
-            get: { model.pendingSubscriptionUpdate != nil && model.pendingOperation == nil },
+            get: { model.shouldPresentSubscriptionPreview },
             set: {
                 if !$0, model.pendingOperation == nil {
                     model.discardSubscriptionPreview()
@@ -100,9 +99,6 @@ struct ProfileWorkspaceView: View {
             }
         }
         .onChange(of: model.readinessChangeGeneration) { _, _ in lifecycle?.refresh() }
-        .onChange(of: model.unsavedChangesDecisionGeneration) { _, _ in
-            isShowingUnsavedChangesAlert = model.pendingOperation != nil
-        }
         .alert("profile.delete.title", isPresented: Binding(
             get: { deleteTarget != nil },
             set: { if !$0 { deleteTarget = nil } }
@@ -125,24 +121,21 @@ struct ProfileWorkspaceView: View {
             Text("profile.export.warning.message")
         }
         .alert("profile.unsaved.title", isPresented: Binding(
-            get: { isShowingUnsavedChangesAlert },
+            get: { model.unsavedChangesPresentation.isPresented },
             // An Alert binding can be set to false as part of ordinary button
             // dismissal. It must not discard the pending intent; only the
             // explicit Cancel action below does that.
-            set: { isShowingUnsavedChangesAlert = $0 }
+            set: { model.unsavedChangesAlertPresentationDidChange($0) }
         )) {
             Button("profile.unsaved.save-and-continue") {
-                model.resolveUnsavedChanges(.saveAndContinue)
-                isShowingUnsavedChangesAlert = false
+                _ = model.resolveUnsavedChanges(.saveAndContinue)
             }
             .keyboardShortcut(.defaultAction)
             Button("profile.unsaved.discard", role: .destructive) {
-                model.resolveUnsavedChanges(.discardChanges)
-                isShowingUnsavedChangesAlert = false
+                _ = model.resolveUnsavedChanges(.discardChanges)
             }
             Button("profile.action.cancel", role: .cancel) {
-                model.cancelUnsavedChangesConfirmation()
-                isShowingUnsavedChangesAlert = false
+                _ = model.resolveUnsavedChanges(.cancel)
             }
         } message: {
             Text("profile.unsaved.message")

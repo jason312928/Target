@@ -52,8 +52,9 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         let saved = "{\"inbounds\":[],\"outbounds\":[],\"route\":{},\"saved\":true}"
         fixture.model.updateEditor(saved)
         fixture.model.requestSelection(fixture.second.id)
-        fixture.model.resolveUnsavedChanges(.saveAndContinue)
+        let result = fixture.model.resolveUnsavedChanges(.saveAndContinue)
 
+        XCTAssertEqual(result, .resolved)
         XCTAssertEqual(try fixture.store.configurationText(for: fixture.first.id), saved)
         XCTAssertEqual(fixture.model.selectedID, fixture.second.id)
         XCTAssertFalse(fixture.model.isDirty)
@@ -75,16 +76,22 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         let fixture = try makeFixture(checker: InteractionChecker(result: .failure(.init(messageKey: "profile.validation.check-failed", line: nil, column: nil))))
         fixture.model.updateEditor("{\"inbounds\":[],\"outbounds\":[],\"route\":{}}")
         fixture.model.requestSelection(fixture.second.id)
-        fixture.model.resolveUnsavedChanges(.saveAndContinue)
+        let presentationGeneration = fixture.model.unsavedChangesPresentation.generation
+        let result = fixture.model.resolveUnsavedChanges(.saveAndContinue)
 
         XCTAssertEqual(fixture.model.selectedID, fixture.first.id)
         XCTAssertEqual(try fixture.store.selectedProfileID(), fixture.first.id)
         XCTAssertTrue(fixture.model.isDirty)
         XCTAssertEqual(fixture.model.diagnostic?.messageKey, "profile.validation.check-failed")
+        XCTAssertEqual(result, .failedAndStillPending)
         guard case .select(let id)? = fixture.model.pendingOperation else {
             return XCTFail("The failed save must retain the pending action")
         }
         XCTAssertEqual(id, fixture.second.id)
+        XCTAssertTrue(fixture.model.unsavedChangesPresentation.isPresented)
+        XCTAssertEqual(fixture.model.unsavedChangesPresentation.generation, presentationGeneration + 1)
+        fixture.model.unsavedChangesAlertPresentationDidChange(false)
+        XCTAssertEqual(fixture.model.unsavedChangesPresentation.generation, presentationGeneration + 1)
     }
 
     func testDirtyReplacingOperationsArePendingWhileRenamePreservesEditor() async throws {
@@ -127,8 +134,9 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         fixture.model.updateEditor("{\"discarded\":true}")
         fixture.model.requestDelete(fixture.first.id)
 
-        fixture.model.resolveUnsavedChanges(.discardChanges)
+        let result = fixture.model.resolveUnsavedChanges(.discardChanges)
 
+        XCTAssertEqual(result, .resolved)
         XCTAssertEqual(usage.checkCount, 1)
         XCTAssertNil(fixture.model.pendingOperation)
         XCTAssertEqual(fixture.model.selectedID, fixture.first.id)
@@ -155,6 +163,80 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertTrue(fixture.model.isDirty)
         XCTAssertNotNil(fixture.model.pendingOperation)
         XCTAssertEqual(fixture.model.messageKey, "profile.message.operation-failed")
+        XCTAssertTrue(fixture.model.unsavedChangesPresentation.isPresented)
+    }
+
+    func testDecisionResultsRetirePresentationOnlyAfterSuccessOrExplicitCancel() throws {
+        let fixture = try makeFixture()
+        fixture.model.updateEditor("{\"edited\":true}")
+        fixture.model.requestSelection(fixture.second.id)
+        XCTAssertTrue(fixture.model.unsavedChangesPresentation.isPresented)
+
+        XCTAssertEqual(fixture.model.resolveUnsavedChanges(.cancel), .cancelled)
+        XCTAssertNil(fixture.model.pendingOperation)
+        XCTAssertFalse(fixture.model.unsavedChangesPresentation.isPresented)
+
+        fixture.model.updateEditor("{\"edited\":true}")
+        fixture.model.requestSelection(fixture.second.id)
+        XCTAssertEqual(fixture.model.resolveUnsavedChanges(.discardChanges), .resolved)
+        XCTAssertNil(fixture.model.pendingOperation)
+        XCTAssertFalse(fixture.model.unsavedChangesPresentation.isPresented)
+        XCTAssertEqual(fixture.model.selectedID, fixture.second.id)
+    }
+
+    func testOrdinaryAlertDismissalCannotHidePendingOperationAndMainSaveResolvesIt() throws {
+        let fixture = try makeFixture()
+        let saved = "{\"inbounds\":[],\"outbounds\":[],\"route\":{},\"saved\":true}"
+        fixture.model.updateEditor(saved)
+        fixture.model.requestSelection(fixture.second.id)
+        let initialGeneration = fixture.model.unsavedChangesPresentation.generation
+
+        fixture.model.unsavedChangesAlertPresentationDidChange(false)
+        XCTAssertNotNil(fixture.model.pendingOperation)
+        XCTAssertTrue(fixture.model.unsavedChangesPresentation.isPresented)
+        XCTAssertEqual(fixture.model.unsavedChangesPresentation.generation, initialGeneration)
+
+        fixture.model.save()
+        XCTAssertNil(fixture.model.pendingOperation)
+        XCTAssertFalse(fixture.model.unsavedChangesPresentation.isPresented)
+        XCTAssertEqual(fixture.model.selectedID, fixture.second.id)
+        XCTAssertEqual(try fixture.store.configurationText(for: fixture.first.id), saved)
+    }
+
+    func testCancelRestoresImportAndSubscriptionCandidatePresentationAfterFailure() async throws {
+        let importChecker = SequenceInteractionChecker(results: [.success(()), .failure(.init(messageKey: "profile.validation.check-failed", line: nil, column: nil))])
+        let importFixture = try makeFixture(checker: importChecker)
+        let importURL = FileManager.default.temporaryDirectory.appending(path: "TargetProfilePresentationImport-\(UUID().uuidString).json")
+        try Data("{\"inbounds\":[],\"outbounds\":[],\"route\":{}}".utf8).write(to: importURL)
+        defer { try? FileManager.default.removeItem(at: importURL) }
+        importFixture.model.prepareImport(from: importURL)
+        for _ in 0..<100 where importFixture.model.pendingImportCandidate == nil { await Task.yield() }
+        XCTAssertTrue(importFixture.model.shouldPresentImportConfirmation)
+        importFixture.model.updateEditor("{\"inbounds\":[],\"outbounds\":[],\"route\":{}}")
+        importFixture.model.commitPreparedImport(name: "Imported")
+        XCTAssertFalse(importFixture.model.shouldPresentImportConfirmation)
+        XCTAssertEqual(importFixture.model.resolveUnsavedChanges(.saveAndContinue), .failedAndStillPending)
+        XCTAssertTrue(importFixture.model.unsavedChangesPresentation.isPresented)
+        XCTAssertEqual(importFixture.model.resolveUnsavedChanges(.cancel), .cancelled)
+        XCTAssertNil(importFixture.model.pendingOperation)
+        XCTAssertTrue(importFixture.model.shouldPresentImportConfirmation)
+
+        let fetcher = ControlledSubscriptionFetcher()
+        let subscriptionChecker = SequenceInteractionChecker(results: [.success(()), .failure(.init(messageKey: "profile.validation.check-failed", line: nil, column: nil))])
+        let subscriptionFixture = try makeFixture(checker: subscriptionChecker, subscriptionFetcher: fetcher)
+        subscriptionFixture.model.updateSubscription()
+        await fetcher.waitUntilStarted()
+        await fetcher.complete(.updated)
+        try await waitForSubscriptionCompletion(subscriptionFixture.model)
+        XCTAssertTrue(subscriptionFixture.model.shouldPresentSubscriptionPreview)
+        subscriptionFixture.model.updateEditor("{\"inbounds\":[],\"outbounds\":[],\"route\":{}}")
+        subscriptionFixture.model.confirmSubscriptionUpdate()
+        XCTAssertFalse(subscriptionFixture.model.shouldPresentSubscriptionPreview)
+        XCTAssertEqual(subscriptionFixture.model.resolveUnsavedChanges(.saveAndContinue), .failedAndStillPending)
+        XCTAssertTrue(subscriptionFixture.model.unsavedChangesPresentation.isPresented)
+        XCTAssertEqual(subscriptionFixture.model.resolveUnsavedChanges(.cancel), .cancelled)
+        XCTAssertNil(subscriptionFixture.model.pendingOperation)
+        XCTAssertTrue(subscriptionFixture.model.shouldPresentSubscriptionPreview)
     }
 
     func testSubscriptionCompletionAfterEditingPreservesEditorForAllFetcherOutcomes() async throws {
