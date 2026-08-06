@@ -23,6 +23,10 @@ final class ProfileViewModel {
     private(set) var isShowingExportWarning = false
     private(set) var isExporting = false
     private(set) var pendingOperation: ProfileWorkspaceOperation?
+    /// Advances when a user request needs the unsaved-changes decision. Alert
+    /// presentation is intentionally separate from the pending intent because
+    /// SwiftUI may dismiss an alert before its button action has completed.
+    private(set) var unsavedChangesDecisionGeneration = 0
     /// Changes that affect selected configuration readiness. The view observes
     /// this rather than refreshing lifecycle state for cancelled actions or
     /// subscription-cache metadata updates.
@@ -66,7 +70,7 @@ final class ProfileViewModel {
         case .cancel:
             pendingOperation = nil
         case .discardChanges:
-            discardEditorChanges()
+            guard discardCurrentEditorToPersistedState() else { return }
             pendingOperation = nil
             execute(operation)
         case .saveAndContinue:
@@ -267,6 +271,7 @@ final class ProfileViewModel {
     private func request(_ operation: ProfileWorkspaceOperation) {
         guard !isDirty else {
             pendingOperation = operation
+            unsavedChangesDecisionGeneration &+= 1
             return
         }
         execute(operation)
@@ -339,9 +344,29 @@ final class ProfileViewModel {
         catch { messageKey = "profile.message.load-failed" }
     }
 
-    private func discardEditorChanges() {
-        diagnostic = nil
-        isDirty = false
+    /// Restores the currently selected editor from authenticated persistent
+    /// storage before any replacement operation may run. This is deliberately
+    /// fail-closed: a read failure leaves the user's buffer and dirty state
+    /// untouched, and the requested operation remains pending.
+    @discardableResult
+    private func discardCurrentEditorToPersistedState() -> Bool {
+        guard let selectedID else {
+            messageKey = "profile.message.operation-failed"
+            return false
+        }
+        do {
+            let persistedText = try store.configurationText(for: selectedID)
+            editorText = persistedText
+            diagnostic = nil
+            isDirty = false
+            return true
+        } catch let error as ProfileStoreError {
+            present(error)
+            return false
+        } catch {
+            messageKey = "profile.message.operation-failed"
+            return false
+        }
     }
 
     private func loadSelectedText() {

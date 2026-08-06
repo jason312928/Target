@@ -120,31 +120,109 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         }
     }
 
-    func testSubscriptionMetadataCompletionsPreserveEditsAndCandidateApplyUsesSameDecision() async throws {
-        for outcome in SubscriptionOutcome.allCases {
-            let fixture = try makeFixture(subscriptionFetcher: DelayedSubscriptionFetcher(outcome: outcome))
-            fixture.model.updateEditor("{\"edited\":true}")
+    func testDiscardBeforeFailedDeleteRestoresPersistedEditorAndExecutesOnlyOnce() throws {
+        let usage = CountingProfileUsage(inUse: true)
+        let fixture = try makeFixture(runtimeUsage: usage)
+        let persistedText = try fixture.store.configurationText(for: fixture.first.id)
+        fixture.model.updateEditor("{\"discarded\":true}")
+        fixture.model.requestDelete(fixture.first.id)
+
+        fixture.model.resolveUnsavedChanges(.discardChanges)
+
+        XCTAssertEqual(usage.checkCount, 1)
+        XCTAssertNil(fixture.model.pendingOperation)
+        XCTAssertEqual(fixture.model.selectedID, fixture.first.id)
+        XCTAssertEqual(fixture.model.editorText, persistedText)
+        XCTAssertFalse(fixture.model.isDirty)
+        XCTAssertEqual(fixture.model.messageKey, "profile.message.stop-before-delete")
+        XCTAssertNotEqual(fixture.model.editorText, "{\"discarded\":true}")
+
+        fixture.model.resolveUnsavedChanges(.discardChanges)
+        XCTAssertEqual(usage.checkCount, 1)
+    }
+
+    func testDiscardDoesNotExecuteOperationWhenPersistedEditorCannotBeRestored() throws {
+        let usage = CountingProfileUsage(inUse: true)
+        let fixture = try makeFixture(runtimeUsage: usage)
+        try FileManager.default.removeItem(at: fixture.store.safeManagedURL("\(fixture.first.id.uuidString)/config.json"))
+        fixture.model.updateEditor("{\"keep\":true}")
+        fixture.model.requestDelete(fixture.first.id)
+
+        fixture.model.resolveUnsavedChanges(.discardChanges)
+
+        XCTAssertEqual(usage.checkCount, 0)
+        XCTAssertEqual(fixture.model.editorText, "{\"keep\":true}")
+        XCTAssertTrue(fixture.model.isDirty)
+        XCTAssertNotNil(fixture.model.pendingOperation)
+        XCTAssertEqual(fixture.model.messageKey, "profile.message.operation-failed")
+    }
+
+    func testSubscriptionCompletionAfterEditingPreservesEditorForAllFetcherOutcomes() async throws {
+        for outcome in SubscriptionRaceOutcome.allCases {
+            let fetcher = ControlledSubscriptionFetcher()
+            let fixture = try makeFixture(subscriptionFetcher: fetcher)
+            let editedText = "{\"inbounds\":["
             fixture.model.updateSubscription()
+            await fetcher.waitUntilStarted()
+            XCTAssertTrue(fixture.model.isUpdatingSubscription)
+
+            fixture.model.updateEditor(editedText)
+            let expectedDiagnostic = fixture.model.diagnostic
+            XCTAssertEqual(expectedDiagnostic?.messageKey, "profile.validation.json-syntax")
+
+            switch outcome {
+            case .updated:
+                await fetcher.complete(.updated)
+            case .notModified:
+                await fetcher.complete(.notModified)
+            case .transportFailure:
+                await fetcher.complete(.transportFailure)
+            case .userCancelled:
+                fixture.model.cancelSubscriptionUpdate()
+                await fetcher.waitUntilCancelled()
+            }
             try await waitForSubscriptionCompletion(fixture.model)
 
-            XCTAssertEqual(fixture.model.editorText, "{\"edited\":true}", "\(outcome) must not overwrite editor text")
+            XCTAssertEqual(fixture.model.editorText, editedText, "\(outcome) must not overwrite editor text")
             XCTAssertTrue(fixture.model.isDirty, "\(outcome) must retain dirty state")
+            XCTAssertEqual(fixture.model.diagnostic, expectedDiagnostic, "\(outcome) must not clear an editor diagnostic")
+            XCTAssertEqual(fixture.model.selectedID, fixture.first.id, "\(outcome) must not change selection")
+            XCTAssertEqual(try fixture.store.selectedProfileID(), fixture.first.id)
+
             switch outcome {
             case .updated:
                 XCTAssertNotNil(fixture.model.pendingSubscriptionUpdate)
                 fixture.model.confirmSubscriptionUpdate()
                 guard case .applySubscription? = fixture.model.pendingOperation else {
-                    return XCTFail("Applying a candidate with edits must ask first")
+                    return XCTFail("Applying a candidate after an in-flight edit must ask first")
                 }
-                fixture.model.resolveUnsavedChanges(.discardChanges)
-                XCTAssertTrue(fixture.model.editorText.contains("\"updated\":true"))
-                let revision = fixture.model.selectedProfile?.validRevision
-                fixture.model.resolveUnsavedChanges(.discardChanges)
-                XCTAssertEqual(fixture.model.selectedProfile?.validRevision, revision)
-            case .notModified, .failure, .cancelled:
+            case .notModified, .transportFailure, .userCancelled:
                 XCTAssertNil(fixture.model.pendingSubscriptionUpdate)
             }
         }
+    }
+
+    func testDiscardBeforeFailedSubscriptionApplyKeepsPersistedEditorClean() async throws {
+        let fetcher = ControlledSubscriptionFetcher()
+        let checker = SequenceInteractionChecker(results: [.success(()), .failure(.init(messageKey: "profile.validation.check-failed", line: nil, column: nil))])
+        let fixture = try makeFixture(checker: checker, subscriptionFetcher: fetcher)
+        let persistedText = try fixture.store.configurationText(for: fixture.first.id)
+        fixture.model.updateSubscription()
+        await fetcher.waitUntilStarted()
+        await fetcher.complete(.updated)
+        try await waitForSubscriptionCompletion(fixture.model)
+        XCTAssertNotNil(fixture.model.pendingSubscriptionUpdate)
+
+        fixture.model.updateEditor("{\"discarded\":true}")
+        fixture.model.confirmSubscriptionUpdate()
+        fixture.model.resolveUnsavedChanges(.discardChanges)
+
+        XCTAssertEqual(checker.checkCount, 2)
+        XCTAssertNil(fixture.model.pendingOperation)
+        XCTAssertEqual(fixture.model.editorText, persistedText)
+        XCTAssertFalse(fixture.model.isDirty)
+        XCTAssertEqual(fixture.model.diagnostic?.messageKey, "profile.validation.check-failed")
+        XCTAssertNotNil(fixture.model.pendingSubscriptionUpdate)
     }
 
     private func assertPending(_ kind: PendingKind, in model: ProfileViewModel, file: StaticString = #filePath, line: UInt = #line) {
@@ -157,18 +235,19 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
     }
 
     private func waitForSubscriptionCompletion(_ model: ProfileViewModel) async throws {
-        for _ in 0..<100 where model.isUpdatingSubscription {
-            try await Task.sleep(for: .milliseconds(10))
+        for _ in 0..<1_000 where model.isUpdatingSubscription {
+            await Task.yield()
         }
         XCTAssertFalse(model.isUpdatingSubscription)
     }
 
     private func makeFixture(
-        checker: InteractionChecker = InteractionChecker(result: .success(())),
-        subscriptionFetcher: any ProfileSubscriptionFetching = DelayedSubscriptionFetcher(outcome: .notModified)
+        checker: any SingBoxConfigurationChecking = InteractionChecker(result: .success(())),
+        subscriptionFetcher: any ProfileSubscriptionFetching = ControlledSubscriptionFetcher(),
+        runtimeUsage: any ProfileRuntimeUsageChecking = CountingProfileUsage(inUse: false)
     ) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory.appending(path: "TargetProfileInteraction-\(UUID().uuidString)", directoryHint: .isDirectory)
-        let store = ProfileStore(rootDirectory: root, checker: checker, keyProvider: InteractionKeyProvider())
+        let store = ProfileStore(rootDirectory: root, checker: checker, runtimeUsage: runtimeUsage, keyProvider: InteractionKeyProvider())
         let first = try store.create(name: "First", subscriptionURL: URL(string: "https://example.invalid/sub")!)
         let second = try store.create(name: "Second")
         try store.select(first.id)
@@ -185,25 +264,82 @@ private struct Fixture {
 
 private enum PendingKind { case create, duplicate, delete, restore }
 
-private enum SubscriptionOutcome: CaseIterable { case updated, notModified, failure, cancelled }
+private enum SubscriptionRaceOutcome: CaseIterable { case updated, notModified, transportFailure, userCancelled }
 
-private final class DelayedSubscriptionFetcher: ProfileSubscriptionFetching, @unchecked Sendable {
-    let outcome: SubscriptionOutcome
+private actor ControlledSubscriptionFetcher: ProfileSubscriptionFetching {
+    enum Completion {
+        case updated
+        case notModified
+        case transportFailure
+    }
 
-    init(outcome: SubscriptionOutcome) { self.outcome = outcome }
+    private var started = false
+    private var cancelled = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var responseContinuation: CheckedContinuation<SubscriptionResponse, Error>?
+    private var queuedCompletion: Completion?
 
     func fetch(subscription: RemoteSubscription) async throws -> SubscriptionResponse {
-        do { try await Task.sleep(for: .milliseconds(20)) }
-        catch { throw SubscriptionUpdateError.cancelled }
-        switch outcome {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                if cancelled {
+                    continuation.resume(throwing: SubscriptionUpdateError.cancelled)
+                } else if let queuedCompletion {
+                    self.queuedCompletion = nil
+                    resume(continuation, with: queuedCompletion)
+                } else {
+                    responseContinuation = continuation
+                }
+            }
+        }, onCancel: {
+            Task { await self.noteCancellation() }
+        })
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func waitUntilCancelled() async {
+        guard !cancelled else { return }
+        await withCheckedContinuation { cancellationWaiters.append($0) }
+    }
+
+    func complete(_ completion: Completion) {
+        if let continuation = responseContinuation {
+            responseContinuation = nil
+            resume(continuation, with: completion)
+        } else {
+            queuedCompletion = completion
+        }
+    }
+
+    private func noteCancellation() {
+        guard !cancelled else { return }
+        cancelled = true
+        let waiters = cancellationWaiters
+        cancellationWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        if let continuation = responseContinuation {
+            responseContinuation = nil
+            continuation.resume(throwing: SubscriptionUpdateError.cancelled)
+        }
+    }
+
+    private func resume(_ continuation: CheckedContinuation<SubscriptionResponse, Error>, with completion: Completion) {
+        switch completion {
         case .updated:
-            return SubscriptionResponse(data: Data("{\"inbounds\":[],\"outbounds\":[],\"route\":{},\"updated\":true}".utf8), cacheStatus: .updated, etag: "v2", lastModified: nil)
+            continuation.resume(returning: SubscriptionResponse(data: Data("{\"inbounds\":[],\"outbounds\":[],\"route\":{},\"updated\":true}".utf8), cacheStatus: .updated, etag: "v2", lastModified: nil))
         case .notModified:
-            return SubscriptionResponse(data: Data(), cacheStatus: .notModified, etag: "v1", lastModified: nil)
-        case .failure:
-            throw SubscriptionUpdateError.transportFailure
-        case .cancelled:
-            throw SubscriptionUpdateError.cancelled
+            continuation.resume(returning: SubscriptionResponse(data: Data(), cacheStatus: .notModified, etag: "v1", lastModified: nil))
+        case .transportFailure:
+            continuation.resume(throwing: SubscriptionUpdateError.transportFailure)
         }
     }
 }
@@ -214,6 +350,30 @@ private final class InteractionChecker: SingBoxConfigurationChecking, @unchecked
     init(result: Result<Void, ConfigurationDiagnostic>) { self.result = result }
 
     func check(configurationURL: URL) -> Result<Void, ConfigurationDiagnostic> { result }
+}
+
+private final class SequenceInteractionChecker: SingBoxConfigurationChecking, @unchecked Sendable {
+    private var results: [Result<Void, ConfigurationDiagnostic>]
+    private(set) var checkCount = 0
+
+    init(results: [Result<Void, ConfigurationDiagnostic>]) { self.results = results }
+
+    func check(configurationURL: URL) -> Result<Void, ConfigurationDiagnostic> {
+        checkCount += 1
+        return results.removeFirst()
+    }
+}
+
+private final class CountingProfileUsage: ProfileRuntimeUsageChecking, @unchecked Sendable {
+    private let inUse: Bool
+    private(set) var checkCount = 0
+
+    init(inUse: Bool) { self.inUse = inUse }
+
+    func isProfileInUse(_ id: UUID) -> Bool {
+        checkCount += 1
+        return inUse
+    }
 }
 
 private final class InteractionKeyProvider: ProfileEncryptionKeyProviding {

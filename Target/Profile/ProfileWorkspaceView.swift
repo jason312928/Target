@@ -8,6 +8,7 @@ struct ProfileWorkspaceView: View {
     @State private var sheet: ProfileSheet?
     @State private var isImporting = false
     @State private var deleteTarget: UUID?
+    @State private var isShowingUnsavedChangesAlert = false
 
     init(lifecycle: BackendLifecycleModel?, model: ProfileViewModel) {
         self.lifecycle = lifecycle
@@ -67,8 +68,12 @@ struct ProfileWorkspaceView: View {
             }
         }
         .sheet(isPresented: Binding(
-            get: { model.pendingImportCandidate != nil },
-            set: { if !$0 { model.cancelPreparedImport() } }
+            get: { model.pendingImportCandidate != nil && model.pendingOperation == nil },
+            set: {
+                if !$0, model.pendingOperation == nil {
+                    model.cancelPreparedImport()
+                }
+            }
         )) {
             if let candidate = model.pendingImportCandidate {
                 ProfileImportConfirmation(candidate: candidate, isCommitting: model.isCommittingImport) { name in
@@ -79,8 +84,12 @@ struct ProfileWorkspaceView: View {
             }
         }
         .sheet(isPresented: Binding(
-            get: { model.pendingSubscriptionUpdate != nil },
-            set: { if !$0 { model.discardSubscriptionPreview() } }
+            get: { model.pendingSubscriptionUpdate != nil && model.pendingOperation == nil },
+            set: {
+                if !$0, model.pendingOperation == nil {
+                    model.discardSubscriptionPreview()
+                }
+            }
         )) {
             if let pending = model.pendingSubscriptionUpdate {
                 SubscriptionDiffPreview(diff: pending.diff) {
@@ -91,6 +100,9 @@ struct ProfileWorkspaceView: View {
             }
         }
         .onChange(of: model.readinessChangeGeneration) { _, _ in lifecycle?.refresh() }
+        .onChange(of: model.unsavedChangesDecisionGeneration) { _, _ in
+            isShowingUnsavedChangesAlert = model.pendingOperation != nil
+        }
         .alert("profile.delete.title", isPresented: Binding(
             get: { deleteTarget != nil },
             set: { if !$0 { deleteTarget = nil } }
@@ -113,18 +125,24 @@ struct ProfileWorkspaceView: View {
             Text("profile.export.warning.message")
         }
         .alert("profile.unsaved.title", isPresented: Binding(
-            get: { model.pendingOperation != nil },
-            set: { if !$0 { model.cancelUnsavedChangesConfirmation() } }
+            get: { isShowingUnsavedChangesAlert },
+            // An Alert binding can be set to false as part of ordinary button
+            // dismissal. It must not discard the pending intent; only the
+            // explicit Cancel action below does that.
+            set: { isShowingUnsavedChangesAlert = $0 }
         )) {
             Button("profile.unsaved.save-and-continue") {
                 model.resolveUnsavedChanges(.saveAndContinue)
+                isShowingUnsavedChangesAlert = false
             }
             .keyboardShortcut(.defaultAction)
             Button("profile.unsaved.discard", role: .destructive) {
                 model.resolveUnsavedChanges(.discardChanges)
+                isShowingUnsavedChangesAlert = false
             }
             Button("profile.action.cancel", role: .cancel) {
                 model.cancelUnsavedChangesConfirmation()
+                isShowingUnsavedChangesAlert = false
             }
         } message: {
             Text("profile.unsaved.message")
