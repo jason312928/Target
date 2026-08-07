@@ -202,11 +202,16 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     }
 
     func testFullShellEmptyWorkspaceAtMinimumSize() {
-        assertFullShellEmptyWorkspace(size: "740x511")
+        assertFullShellEmptyWorkspace(size: "740x511", sidebarToggleLabel: "Toggle Main Sidebar")
     }
 
     func testFullShellEmptyWorkspaceAtRegularSize() {
-        assertFullShellEmptyWorkspace(size: "950x670")
+        assertFullShellEmptyWorkspace(
+            size: "950x670",
+            sidebarToggleLabel: "切换主侧边栏",
+            language: "zh-Hans",
+            locale: "zh_CN"
+        )
     }
 
     func testFullShellSelectedProfileAtMinimumSize() {
@@ -288,12 +293,25 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         }
     }
 
-    private func assertFullShellEmptyWorkspace(size: String) {
-        let app = launchFullShell(.emptyWorkspace, windowSize: size, resetDestination: true)
+    private func assertFullShellEmptyWorkspace(
+        size: String,
+        sidebarToggleLabel: String,
+        language: String = "en",
+        locale: String = "en_US"
+    ) {
+        let app = launchFullShell(
+            .emptyWorkspace,
+            windowSize: size,
+            resetDestination: true,
+            language: language,
+            locale: locale
+        )
         assertVisibleInsideWindow(element("dashboard.workspace", in: app), in: app, message: "Dashboard did not start in the shell")
+        assertExactlyOneMainSidebarToggle(in: app, expectedLabel: sidebarToggleLabel)
 
         navigateToProfiles(in: app)
         assertEmptyShellWorkspace(in: app)
+        assertExactlyOneMainSidebarToggle(in: app, expectedLabel: sidebarToggleLabel)
         let expandedWidth = detailWidth(in: app, identifier: "profile.workspace")
         assertOuterProfilesTitle(in: app)
         assertToolbarReachable(in: app)
@@ -304,8 +322,10 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         }
 
         navigateToDashboard(in: app)
+        assertExactlyOneMainSidebarToggle(in: app, expectedLabel: sidebarToggleLabel)
         navigateToProfiles(in: app)
         assertEmptyShellWorkspace(in: app)
+        assertExactlyOneMainSidebarToggle(in: app, expectedLabel: sidebarToggleLabel)
 
         assertNoModal(in: app)
     }
@@ -314,6 +334,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         let app = launchFullShell(scenario, windowSize: size, resetDestination: true)
         navigateToProfiles(in: app)
         assertSelectedShellWorkspace(in: app)
+        assertExactlyOneMainSidebarToggle(in: app, expectedLabel: "Toggle Main Sidebar")
         let expandedWidth = detailWidth(in: app, identifier: "profile.workspace.detail")
         assertOuterProfilesTitle(in: app)
 
@@ -337,6 +358,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
             restoredDestination: "profiles"
         )
         assertEmptyShellWorkspace(in: restarted)
+        assertExactlyOneMainSidebarToggle(in: restarted, expectedLabel: "Toggle Main Sidebar")
         collapseOuterSidebar(in: restarted, detailIdentifier: "profile.workspace", expandedWidth: detailWidth(in: restarted, identifier: "profile.workspace"))
         recordShellFrames(in: restarted, detailIdentifier: "profile.workspace")
         assertNoModal(in: restarted)
@@ -346,12 +368,14 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         _ scenario: Scenario,
         windowSize: String,
         resetDestination: Bool,
-        restoredDestination: String? = nil
+        restoredDestination: String? = nil,
+        language: String = "en",
+        locale: String = "en_US"
     ) -> XCUIApplication {
         let app = XCUIApplication(bundleIdentifier: "com.jason312928.TargetPresentationTestHost")
         app.launchArguments = [
-            "-AppleLanguages", "(en)",
-            "-AppleLocale", "en_US",
+            "-AppleLanguages", "(\(language))",
+            "-AppleLocale", locale,
             "-ApplePersistenceIgnoreState", "YES",
             "-NSAutomaticTextCompletionEnabled", "NO",
             "--presentation-scenario", scenario.rawValue,
@@ -385,7 +409,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         guard destination.isHittable || waitUntilHittable(destination) else {
             return XCTFail("Profiles destination is not hittable")
         }
-        destination.click()
+        destination.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         assertExists(element("profile.list", in: app), message: "Inner Profile list is unavailable")
     }
 
@@ -396,7 +420,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         guard destination.isHittable || waitUntilHittable(destination) else {
             return XCTFail("Dashboard destination is not hittable")
         }
-        destination.click()
+        destination.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         assertVisibleInsideWindow(element("dashboard.workspace", in: app), in: app, message: "Dashboard did not return")
     }
 
@@ -439,6 +463,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         expandedWidth: CGFloat
     ) {
         clickOuterSidebarToggle(in: app)
+        assertExactlyOneMainSidebarToggle(in: app, expectedLabel: sidebarToggleLabel(in: app))
         let sidebar = element("app-shell.sidebar", in: app)
         XCTAssertTrue(!sidebar.exists || sidebar.frame.width < 1, "Outer sidebar remained visible after collapse: \(sidebar.frame)")
         let detail = element(detailIdentifier, in: app).firstMatch
@@ -448,6 +473,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
 
     private func expandOuterSidebar(in app: XCUIApplication, detailIdentifier: String) {
         clickOuterSidebarToggle(in: app)
+        assertExactlyOneMainSidebarToggle(in: app, expectedLabel: sidebarToggleLabel(in: app))
         assertVisibleInsideWindow(element("app-shell.sidebar", in: app), in: app, message: "Outer sidebar did not return after expansion")
         assertOuterProfilesTitle(in: app)
         let detail = element(detailIdentifier, in: app).firstMatch
@@ -461,6 +487,35 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         activateForInteraction(app)
         assertVisibleInsideWindow(toggle, in: app, message: "Outer sidebar toggle is outside the window")
         toggle.click()
+    }
+
+    private func assertExactlyOneMainSidebarToggle(in app: XCUIApplication, expectedLabel: String) {
+        let toolbar = app.toolbars.firstMatch
+        assertExists(toolbar, message: "Main toolbar is unavailable")
+
+        let candidates = toolbar.buttons.allElementsBoundByIndex.filter { button in
+            button.exists && isVisibleInsideWindow(button, in: app) && isMainSidebarToggle(button)
+        }
+        let inventory = toolbar.buttons.allElementsBoundByIndex.map { button in
+            "label=\(button.label) id=\(button.identifier) frame=\(button.frame) enabled=\(button.isEnabled)"
+        }.joined(separator: "\\n")
+        XCTAssertEqual(candidates.count, 1, "Expected one visible main sidebar toggle. Toolbar inventory:\\n\(inventory)")
+
+        let toggle = button("app-shell.sidebar-toggle", in: app)
+        assertExists(toggle, message: "Main sidebar toggle identifier is unavailable")
+        XCTAssertEqual(toggle.label, expectedLabel, "Main sidebar toggle is not localized as expected")
+        XCTAssertTrue(toggle.isEnabled, "Main sidebar toggle is disabled")
+        assertVisibleInsideWindow(toggle, in: app, message: "Main sidebar toggle is outside the window")
+    }
+
+    private func isMainSidebarToggle(_ button: XCUIElement) -> Bool {
+        if button.identifier == "app-shell.sidebar-toggle" { return true }
+        let label = button.label.lowercased()
+        return label.contains("sidebar") || button.label.contains("侧边栏")
+    }
+
+    private func sidebarToggleLabel(in app: XCUIApplication) -> String {
+        button("app-shell.sidebar-toggle", in: app).label
     }
 
     private func detailWidth(in app: XCUIApplication, identifier: String) -> CGFloat {
@@ -698,6 +753,12 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(frame.minY, windowFrame.minY - edgeTolerance, detail)
         XCTAssertLessThanOrEqual(frame.maxX, windowFrame.maxX + edgeTolerance, detail)
         XCTAssertLessThanOrEqual(frame.maxY, windowFrame.maxY + edgeTolerance, detail)
+    }
+
+    private func isVisibleInsideWindow(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
+        let frame = element.frame
+        let window = app.windows.firstMatch.frame
+        return frame.width > 0 && frame.height > 0 && frame.intersects(window)
     }
 
     private func cleanUpPresentationFixtures() {

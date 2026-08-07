@@ -39,7 +39,7 @@ struct AppShellView: View {
                 Button(action: toggleOuterSidebar) {
                     Image(systemName: "sidebar.left")
                 }
-                .accessibilityLabel(Text("Toggle main sidebar"))
+                .accessibilityLabel(Text("app-shell.sidebar-toggle"))
                 .accessibilityIdentifier("app-shell.sidebar-toggle")
             }
         }
@@ -116,5 +116,6 @@ struct AppSidebarView: View {
         .accessibilityLabel(Text("navigation.accessibility.label"))
         .accessibilityIdentifier("app-shell.sidebar")
         .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 220)
+        .toolbar(removing: .sidebarToggle)
     }
 }
