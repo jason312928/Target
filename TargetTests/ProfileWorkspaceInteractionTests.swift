@@ -5,6 +5,14 @@ import XCTest
 
 @MainActor
 final class ProfileWorkspaceInteractionTests: XCTestCase {
+    func testImportPanelResultSelectsOnlyAcceptedURL() {
+        let url = URL(fileURLWithPath: "/tmp/Profile.json")
+
+        XCTAssertEqual(ProfileImportPanelResult.resolve(response: .OK, selectedURL: url), .selected(url))
+        XCTAssertEqual(ProfileImportPanelResult.resolve(response: .cancel, selectedURL: url), .cancelled)
+        XCTAssertEqual(ProfileImportPanelResult.resolve(response: .OK, selectedURL: nil), .cancelled)
+    }
+
     func testWorkspacePresentationMapsLocalValidationStates() {
         let profile = makePresentationProfile(subscription: nil, validation: .notChecked)
 

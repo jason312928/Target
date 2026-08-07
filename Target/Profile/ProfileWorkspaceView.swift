@@ -6,7 +6,6 @@ struct ProfileWorkspaceView: View {
     var lifecycle: BackendLifecycleModel? = nil
     @Bindable var model: ProfileViewModel
     @State private var sheet: ProfileSheet?
-    @State private var isImporting = false
     @State private var deleteTarget: UUID?
 
     init(lifecycle: BackendLifecycleModel?, model: ProfileViewModel) {
@@ -28,12 +27,6 @@ struct ProfileWorkspaceView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .fileImporter(isPresented: $isImporting, allowedContentTypes: [.json]) { result in
-            switch result {
-            case .success(let url): model.prepareImport(from: url)
-            case .failure: model.importPickerCancelled()
-            }
-        }
         .sheet(item: $sheet) { sheet in
             ProfileNameSheet(sheet: sheet) { name, url in
                 switch sheet {
@@ -165,7 +158,7 @@ struct ProfileWorkspaceView: View {
             ToolbarItemGroup {
                 Button("profile.action.create", systemImage: "plus") { sheet = .create }
                     .accessibilityIdentifier("profile.action.create")
-                Button("profile.action.import", systemImage: "square.and.arrow.down") { isImporting = true }
+                Button("profile.action.import", systemImage: "square.and.arrow.down") { presentImportPanel() }
                     .disabled(model.isPreparingImport || model.isCommittingImport)
                     .accessibilityIdentifier("profile.action.import")
                     .accessibilityLabel(Text("profile.accessibility.import"))
@@ -174,6 +167,21 @@ struct ProfileWorkspaceView: View {
                     .accessibilityIdentifier("profile.action.export")
                     .accessibilityLabel(Text("profile.accessibility.export"))
             }
+        }
+    }
+
+    private func presentImportPanel() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        switch ProfileImportPanelResult.resolve(response: panel.runModal(), selectedURL: panel.url) {
+        case .selected(let url):
+            model.prepareImport(from: url)
+        case .cancelled:
+            model.importPickerCancelled()
         }
     }
 
@@ -189,6 +197,16 @@ struct ProfileWorkspaceView: View {
         }
     }
 
+}
+
+enum ProfileImportPanelResult: Equatable {
+    case selected(URL)
+    case cancelled
+
+    static func resolve(response: NSApplication.ModalResponse, selectedURL: URL?) -> Self {
+        guard response == .OK, let selectedURL else { return .cancelled }
+        return .selected(selectedURL)
+    }
 }
 
 private struct ProfileWorkspaceEmptyState: View {

@@ -103,7 +103,12 @@ final class BackendArchitectureTests: XCTestCase {
 
     func testSafeModeBlocksNetworkWrites() async throws {
         let system = InMemorySystemProxySystem(serviceIDs: ["service-a"], settings: ["service-a": [:]])
-        let coordinator = SystemProxyCoordinator(system: system, recoveryStore: InMemoryRecoveryStore(), portProbe: TogglePortProbe(available: true))
+        let coordinator = SystemProxyCoordinator(
+            system: system,
+            recoveryStore: InMemoryRecoveryStore(),
+            portProbe: TogglePortProbe(available: true),
+            safetyMode: .safe
+        )
         await XCTAssertThrowsErrorAsync(try await coordinator.enableSystemProxy()) { error in
             XCTAssertEqual(error as? SystemProxyError, .safeModeBlocked)
         }
@@ -383,6 +388,19 @@ final class BackendArchitectureTests: XCTestCase {
         } catch let error as BackendError {
             XCTAssertEqual(error, .serviceNotInstalled)
         }
+    }
+
+    func testBuildPolicyMatchesCompilationMode() {
+        let model = BackendLifecycleModel(backend: MockBackend())
+#if DEBUG && TARGET_UTM_VALIDATION
+        XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode, .authorizedNetworkTest)
+        XCTAssertFalse(TargetValidationPolicy.isHostSafeMode)
+        XCTAssertFalse(model.isHostSafeMode)
+#else
+        XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode, .safe)
+        XCTAssertTrue(TargetValidationPolicy.isHostSafeMode)
+        XCTAssertTrue(model.isHostSafeMode)
+#endif
     }
 
     func testModelPresentsStartErrorWhenDefaultServiceIsMissing() async throws {

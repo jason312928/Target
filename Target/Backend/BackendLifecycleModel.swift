@@ -10,7 +10,7 @@ final class BackendLifecycleModel {
     private let serviceTester: (any ServiceConnectionTesting)?
     private let systemProxyClient = TargetServiceXPCClient()
     private var operationTask: Task<Void, Never>?
-    private let hostSafeMode = true
+    private let hostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode
     private let cancellationReconciliationTimeout = Duration.milliseconds(250)
 
     private(set) var status: BackendStatus
@@ -62,18 +62,18 @@ final class BackendLifecycleModel {
     var systemProxyStateKey: String { systemProxyStatus.state.localizedKey }
     var systemProxyErrorKey: String? { systemProxyStatus.error?.localizedKey }
     var canEnableSystemProxy: Bool {
-        !hostSafeMode && !isBusy && lifecycleState == .running && systemProxyStatus.state != .enabled
+        hostNetworkSafetyMode.permitsNetworkWrites && !isBusy && lifecycleState == .running && systemProxyStatus.state != .enabled
     }
     var canDisableSystemProxy: Bool {
-        !hostSafeMode && !isBusy && [.enabled, .recoveryRequired, .failed].contains(systemProxyStatus.state)
+        hostNetworkSafetyMode.permitsNetworkWrites && !isBusy && [.enabled, .recoveryRequired, .failed].contains(systemProxyStatus.state)
     }
-    var canRecoverSystemProxy: Bool { !hostSafeMode && !isBusy && systemProxyStatus.hasRecoverySnapshot }
+    var canRecoverSystemProxy: Bool { hostNetworkSafetyMode.permitsNetworkWrites && !isBusy && systemProxyStatus.hasRecoverySnapshot }
     /// Service registration is independent from host-network changes. Keep it
     /// available in Host Safe Mode so a user can approve and repair the bundled
     /// daemon without enabling proxy, DNS, route, firewall, or TUN operations.
     var canManageService: Bool { !isBusy }
     var safeModeKey: String { "host-safety.status.safe" }
-    var isHostSafeMode: Bool { hostSafeMode }
+    var isHostSafeMode: Bool { !hostNetworkSafetyMode.permitsNetworkWrites }
 
     func refresh() {
         guard !isBusy else { return }

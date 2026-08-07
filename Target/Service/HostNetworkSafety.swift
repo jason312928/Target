@@ -1,13 +1,23 @@
 import AppKit
 import Foundation
 
-enum HostNetworkSafetyMode: Sendable {
+enum HostNetworkSafetyMode: Equatable, Sendable {
     /// The only production default. Network writes require a separate, explicitly
     /// authorized test environment and are never enabled by application state alone.
     case safe
     case authorizedNetworkTest
 
     var permitsNetworkWrites: Bool { self == .authorizedNetworkTest }
+}
+
+enum TargetValidationPolicy {
+#if DEBUG && TARGET_UTM_VALIDATION
+    static let hostNetworkSafetyMode = HostNetworkSafetyMode.authorizedNetworkTest
+#else
+    static let hostNetworkSafetyMode = HostNetworkSafetyMode.safe
+#endif
+
+    static var isHostSafeMode: Bool { !hostNetworkSafetyMode.permitsNetworkWrites }
 }
 
 struct HostNetworkEnvironmentStatus: Equatable, Sendable {

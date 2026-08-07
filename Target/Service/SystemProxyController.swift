@@ -263,7 +263,7 @@ actor SystemProxyCoordinator {
         recoveryStore: any SystemProxyRecoveryStoring = UserDefaultsSystemProxyRecoveryStore(),
         portProbe: any LocalProxyProbing = TargetOwnedPortProbe(),
         environment: any HostNetworkEnvironmentChecking = HostNetworkEnvironmentProbe(),
-        safetyMode: HostNetworkSafetyMode = .safe,
+        safetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode,
         endpointProvider: @escaping @Sendable () async -> LocalEngineEndpoint? = { await EngineRuntimeOwnership().ownedEndpoint() }
     ) {
         self.system = system

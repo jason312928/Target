@@ -61,7 +61,15 @@ final class DashboardPresentationTests: XCTestCase {
     func testSafeModeStateIsExposedWithoutMakingProxyWritable() {
         let presentation = makePresentation(safeMode: true)
         XCTAssertTrue(presentation.isHostSafeMode)
+        XCTAssertEqual(presentation.hostSafetyNoticeKey, "host-safety.status.safe")
         XCTAssertEqual(presentation.systemProxyStateKey, "system-proxy.status.disabled")
+    }
+
+    func testAuthorizedValidationModeHasDistinctDashboardNotice() {
+        let presentation = makePresentation(safeMode: false)
+
+        XCTAssertFalse(presentation.isHostSafeMode)
+        XCTAssertEqual(presentation.hostSafetyNoticeKey, "host-safety.status.utm-validation")
     }
 
     func testMissingFieldsStayEmpty() {

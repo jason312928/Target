@@ -39,6 +39,7 @@ struct DashboardPresentation: Equatable {
     let systemProxyStateKey: String
     let systemProxyEngineKey: String
     let isHostSafeMode: Bool
+    let hostSafetyNoticeKey: String
 
     init(
         status: BackendStatus,
@@ -64,6 +65,7 @@ struct DashboardPresentation: Equatable {
         self.systemProxyStateKey = systemProxyStatus.state.localizedKey
         self.systemProxyEngineKey = systemProxyStatus.engineReachable ? "system-proxy.engine.reachable" : "system-proxy.engine.unreachable"
         self.isHostSafeMode = isHostSafeMode
+        self.hostSafetyNoticeKey = isHostSafeMode ? "host-safety.status.safe" : "host-safety.status.utm-validation"
 
         if isBusy || status.engineState == .starting || status.engineState == .stopping {
             statusLevel = .neutral

@@ -183,9 +183,10 @@ struct DashboardView: View {
 
     private var safetySection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if presentation.isHostSafeMode {
-                TargetNotice(level: .warning, messageKey: "host-safety.status.safe")
-            }
+            TargetNotice(
+                level: presentation.isHostSafeMode ? .warning : .positive,
+                messageKey: presentation.hostSafetyNoticeKey
+            )
             if let errorKey = presentation.systemProxyErrorKey {
                 TargetNotice(level: .critical, messageKey: errorKey)
             }
