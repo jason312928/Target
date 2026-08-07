@@ -11,6 +11,7 @@ final class BackendLifecycleModel {
     private let systemProxyClient = TargetServiceXPCClient()
     private var operationTask: Task<Void, Never>?
     private let hostSafeMode = true
+    private let cancellationReconciliationTimeout = Duration.milliseconds(250)
 
     private(set) var status: BackendStatus
     private(set) var serviceInstallation: ServiceInstallationState
@@ -79,13 +80,16 @@ final class BackendLifecycleModel {
         operationTask = Task { [weak self, backend] in
             do {
                 let engineStatus = try await backend.queryStatus()
-                guard !Task.isCancelled else { return }
+                try Task.checkCancellation()
                 self?.status = engineStatus
                 await self?.refreshServiceStatus()
                 await self?.loadSystemProxyStatus()
+                try Task.checkCancellation()
                 self?.error = nil
                 self?.lifecycleState = .settled(from: engineStatus)
                 self?.operationTask = nil
+            } catch is CancellationError {
+                await self?.finishCancellation(afterReconciling: backend)
             } catch let error as BackendError {
                 self?.finish(with: error)
             } catch {
@@ -248,8 +252,13 @@ final class BackendLifecycleModel {
         operationTask = Task { [weak self, backend] in
             do {
                 let status = try await backend.stopEngine()
-                guard !Task.isCancelled else { return }
+                if Task.isCancelled {
+                    await self?.finishCancellation(afterReconciling: backend)
+                    return
+                }
                 self?.finish(with: status)
+            } catch is CancellationError {
+                await self?.finishCancellation(afterReconciling: backend)
             } catch {
                 self?.systemProxyStatus = SystemProxyStatus(
                     state: .recoveryRequired,
@@ -270,11 +279,16 @@ final class BackendLifecycleModel {
         operationTask = Task { [weak self] in
             do {
                 _ = try await backend.stopEngine()
-                guard !Task.isCancelled else { return }
+                try Task.checkCancellation()
                 self?.lifecycleState = .starting
                 let status = try await backend.startEngine()
-                guard !Task.isCancelled else { return }
+                if Task.isCancelled {
+                    await self?.finishCancellation(afterReconciling: backend)
+                    return
+                }
                 self?.finish(with: status)
+            } catch is CancellationError {
+                await self?.finishCancellation(afterReconciling: backend)
             } catch let error as BackendError {
                 self?.finish(with: error)
             } catch {
@@ -328,10 +342,13 @@ final class BackendLifecycleModel {
         operationTask = Task { [weak self] in
             do {
                 let updatedStatus = try await action(backend)
-                guard !Task.isCancelled else { return }
+                if Task.isCancelled {
+                    await self?.finishCancellation(afterReconciling: backend)
+                    return
+                }
                 self?.finish(with: updatedStatus)
             } catch is CancellationError {
-                self?.finishCancellation()
+                await self?.finishCancellation(afterReconciling: backend)
             } catch let error as BackendError {
                 self?.finish(with: error)
             } catch {
@@ -361,10 +378,43 @@ final class BackendLifecycleModel {
         operationTask = nil
     }
 
-    private func finishCancellation() {
+    private func finishCancellation(afterReconciling backend: any EngineBackend) async {
+        if let currentStatus = await reconciledStatus(from: backend) {
+            status = currentStatus
+            lifecycleState = .settled(from: currentStatus)
+        } else {
+            lifecycleState = .failed(.operationCancelled)
+        }
         error = .operationCancelled
-        lifecycleState = .failed(.operationCancelled)
         operationTask = nil
+    }
+
+    private func reconciledStatus(from backend: any EngineBackend) async -> BackendStatus? {
+        let timeout = cancellationReconciliationTimeout
+        let reconciliation = Task.detached { () -> BackendStatus? in
+            let results = AsyncStream<BackendStatus?> { continuation in
+                Task.detached {
+                    do {
+                        continuation.yield(try await backend.queryStatus())
+                        continuation.finish()
+                    } catch {
+                        // The timeout below is authoritative when status cannot be read.
+                    }
+                }
+                Task.detached {
+                    do {
+                        try await Task.sleep(for: timeout)
+                        continuation.yield(nil)
+                        continuation.finish()
+                    } catch {
+                        continuation.finish()
+                    }
+                }
+            }
+            var iterator = results.makeAsyncIterator()
+            return await iterator.next() ?? nil
+        }
+        return await reconciliation.value
     }
 
     private func refreshServiceStatus() async {

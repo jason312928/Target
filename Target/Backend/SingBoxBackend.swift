@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 actor SingBoxBackend: EngineInstalling {
@@ -42,6 +43,9 @@ actor SingBoxBackend: EngineInstalling {
         let installation = installationStatus()
         let version = installation == .installed ? try? versionString() : nil
         let ownedRecord = await runtimeOwnership.ownedRecord()
+        if ownedRecord == nil, let expiredRecord = runtimeOwnership.discardRecordIfProcessExited() {
+            runtimeConfigurations.remove(id: expiredRecord.runtimeConfigurationID)
+        }
         let verifiedRecord: EngineRuntimeRecord?
         if let record = ownedRecord,
            runtimeConfigurations.exists(id: record.runtimeConfigurationID),
@@ -87,22 +91,26 @@ actor SingBoxBackend: EngineInstalling {
     }
 
     func startEngine() async throws -> BackendStatus {
+        try Task.checkCancellation()
         guard await runtimeOwnership.ownedRecord() == nil else { throw BackendError.invalidLifecycleTransition }
         guard installationStatus() == .installed else { throw BackendError.engineNotInstalled }
         runtimeOwnership.clearRecord()
         runtimeConfigurations.removeAll()
 
         let prepared = try prepareSelectedConfiguration()
+        try Task.checkCancellation()
         let temporary = try runtimeConfigurations.write(prepared.data)
         var launched: Process?
         var handle: FileHandle?
         do {
             try checkConfiguration(at: temporary.url)
+            try Task.checkCancellation()
             let openedLogHandle = try openLog()
             handle = openedLogHandle
             let candidate = makeEngineProcess(configurationURL: temporary.url, logHandle: openedLogHandle)
             try candidate.run()
             launched = candidate
+            try Task.checkCancellation()
             try runtimeOwnership.recordLaunchedProcess(
                 pid: candidate.processIdentifier,
                 executableURL: executableURL,
@@ -113,31 +121,38 @@ actor SingBoxBackend: EngineInstalling {
                 configurationFingerprint: prepared.configurationFingerprint,
                 runtimeConfigurationID: temporary.id
             )
-            guard await waitForPortReadiness(for: candidate) else {
+            try Task.checkCancellation()
+            guard try await waitForPortReadiness(for: candidate) else {
                 throw EngineRuntimeReadiness.startupFailure(processStillRunning: candidate.isRunning)
             }
+            try Task.checkCancellation()
             process = candidate
             logHandle = openedLogHandle
             return try await queryStatus()
+        } catch is CancellationError {
+            await cleanupFailedLaunch(process: launched, logHandle: handle, configurationID: temporary.id)
+            throw CancellationError()
         } catch let error as BackendError {
-            cleanupFailedLaunch(process: launched, logHandle: handle, configurationID: temporary.id)
+            await cleanupFailedLaunch(process: launched, logHandle: handle, configurationID: temporary.id)
             throw error
         } catch {
-            cleanupFailedLaunch(process: launched, logHandle: handle, configurationID: temporary.id)
+            await cleanupFailedLaunch(process: launched, logHandle: handle, configurationID: temporary.id)
             throw BackendError.engineLaunchFailed
         }
     }
 
     func stopEngine() async throws -> BackendStatus {
         guard let record = runtimeOwnership.currentRecord(), runtimeOwnership.ownsProcess(record) else {
-            runtimeOwnership.clearRecord()
             throw BackendError.invalidLifecycleTransition
         }
+        try Task.checkCancellation()
+        let terminated: Bool
         if let process, process.processIdentifier == record.pid, process.isRunning {
-            stopOwnedProcess(process)
+            terminated = await stopOwnedProcess(process)
         } else {
-            kill(pid_t(record.pid), SIGTERM)
+            terminated = await stopOwnedRecord(record)
         }
+        guard terminated else { throw BackendError.engineLaunchFailed }
         self.process = nil
         runtimeOwnership.clearRecord()
         runtimeConfigurations.remove(id: record.runtimeConfigurationID)
@@ -198,8 +213,8 @@ actor SingBoxBackend: EngineInstalling {
         return handle
     }
 
-    private func cleanupFailedLaunch(process: Process?, logHandle: FileHandle?, configurationID: UUID) {
-        if let process { stopOwnedProcess(process) }
+    private func cleanupFailedLaunch(process: Process?, logHandle: FileHandle?, configurationID: UUID) async {
+        if let process { _ = await stopOwnedProcess(process) }
         runtimeOwnership.clearRecord()
         runtimeConfigurations.remove(id: configurationID)
         try? logHandle?.close()
@@ -232,22 +247,55 @@ actor SingBoxBackend: EngineInstalling {
         return (process.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 
-    private func waitForPortReadiness(for process: Process) async -> Bool {
+    private func waitForPortReadiness(for process: Process) async throws -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now + readinessTimeout
         while process.isRunning && clock.now < deadline {
+            try Task.checkCancellation()
             guard let record = await runtimeOwnership.ownedRecord() else { return false }
             if await portProbe.isListening(on: record.endpoint.port) { return true }
-            try? await Task.sleep(for: .milliseconds(50))
+            try await Task.sleep(for: .milliseconds(50))
         }
+        try Task.checkCancellation()
         guard let record = await runtimeOwnership.ownedRecord() else { return false }
         return process.isRunning ? await portProbe.isListening(on: record.endpoint.port) : false
     }
 
-    private func stopOwnedProcess(_ process: Process) {
-        guard process.isRunning else { return }
+    private func stopOwnedProcess(_ process: Process) async -> Bool {
+        guard process.isRunning else { return true }
         process.terminate()
-        process.waitUntilExit()
+        if await waitForProcessExit(process) { return true }
+        _ = kill(pid_t(process.processIdentifier), SIGKILL)
+        return await waitForProcessExit(process)
+    }
+
+    private func stopOwnedRecord(_ record: EngineRuntimeRecord) async -> Bool {
+        guard runtimeOwnership.ownsProcess(record) else { return false }
+        if kill(pid_t(record.pid), SIGTERM) != 0, errno == ESRCH { return true }
+        if await waitForOwnedRecordToExit(record) { return true }
+        guard runtimeOwnership.ownsProcess(record) else { return true }
+        _ = kill(pid_t(record.pid), SIGKILL)
+        return await waitForOwnedRecordToExit(record)
+    }
+
+    private func waitForProcessExit(_ process: Process, timeout: Duration = .seconds(1)) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while process.isRunning && clock.now < deadline {
+            // Cleanup must finish even when its caller was cancelled.
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return !process.isRunning
+    }
+
+    private func waitForOwnedRecordToExit(_ record: EngineRuntimeRecord, timeout: Duration = .seconds(1)) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now + timeout
+        while runtimeOwnership.ownsProcess(record) && clock.now < deadline {
+            // A stop already signalled a verified Target-owned process.
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return !runtimeOwnership.ownsProcess(record)
     }
 
     deinit {

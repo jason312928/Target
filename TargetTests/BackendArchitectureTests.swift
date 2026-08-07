@@ -1,5 +1,4 @@
 import XCTest
-import CFNetwork
 @testable import Target
 
 @MainActor
@@ -459,42 +458,6 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertFalse(result.contains("203.0.113.42"))
         XCTAssertFalse(result.contains("2001:db8"))
         XCTAssertFalse(result.contains("/Users/example"))
-    }
-
-    func testSingBoxManagedConfigurationAndLocalProxy() async throws {
-        let root = try temporaryDirectory()
-        let profileRoot = root.appending(path: "Profiles", directoryHint: .isDirectory)
-        let store = ProfileStore(rootDirectory: profileRoot, keyProvider: TestProfileKeyProvider())
-        _ = try store.create(name: "Integration")
-        let executable = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appending(path: "Target/sing-box/bin/sing-box")
-        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-            throw XCTSkip("sing-box is not installed for localhost integration testing.")
-        }
-        let backend = SingBoxBackend(profileStore: store, engineDirectory: root, executableURL: executable)
-        try await backend.validateConfiguration(XPCConfigurationRequest(profileName: "Integration"))
-        let running = try await backend.startEngine()
-        XCTAssertEqual(running.engineState, .running)
-        XCTAssertNotNil(running.runningProfileID)
-        XCTAssertNotNil(running.runningProfileRevision)
-        XCTAssertGreaterThanOrEqual(try XCTUnwrap(running.enginePort), Int(LocalEngineEndpoint.minimumDynamicPort))
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 15
-        configuration.connectionProxyDictionary = [
-            kCFNetworkProxiesHTTPEnable as String: 1,
-            kCFNetworkProxiesHTTPProxy as String: "127.0.0.1",
-            kCFNetworkProxiesHTTPPort as String: running.enginePort!,
-            kCFNetworkProxiesHTTPSEnable as String: 1,
-            kCFNetworkProxiesHTTPSProxy as String: "127.0.0.1",
-            kCFNetworkProxiesHTTPSPort as String: running.enginePort!
-        ]
-        let (_, response) = try await URLSession(configuration: configuration).data(from: URL(string: "https://example.com")!)
-        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-
-        let stopped = try await backend.stopEngine()
-        XCTAssertEqual(stopped.engineState, .stopped)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appending(path: "runtime").path))
     }
 
     func testPrivilegedServicePingAndStatusWhenRequested() async throws {

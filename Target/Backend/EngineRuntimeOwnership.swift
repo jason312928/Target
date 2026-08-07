@@ -223,6 +223,21 @@ final class EngineRuntimeOwnership: @unchecked Sendable {
     func currentRecord() -> EngineRuntimeRecord? { try? store.load() }
     func clearRecord() { try? store.clear() }
 
+    /// A record for a PID that no longer exists cannot support recovery and its
+    /// runtime configuration is no longer needed. Records with a live but
+    /// unproven PID remain intact for manual investigation.
+    func discardRecordIfProcessExited() -> EngineRuntimeRecord? {
+        guard let record = currentRecord(), !processExists(record.pid) else { return nil }
+        clearRecord()
+        return record
+    }
+
+    private func processExists(_ pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid_t(pid), 0) == 0 { return true }
+        return errno == EPERM
+    }
+
     private func executableFingerprintMatches(_ record: EngineRuntimeRecord) -> Bool {
         guard let fingerprint = try? EngineExecutableFingerprint.sha256(of: URL(fileURLWithPath: record.executablePath)) else { return false }
         return fingerprint == record.executableFingerprint
