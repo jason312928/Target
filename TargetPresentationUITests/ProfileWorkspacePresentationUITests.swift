@@ -201,6 +201,35 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         assertVisualState(.remoteProfile, size: "950x670", expectsEditor: true)
     }
 
+    func testFullShellEmptyWorkspaceAtMinimumSize() {
+        assertFullShellEmptyWorkspace(size: "740x511")
+    }
+
+    func testFullShellEmptyWorkspaceAtRegularSize() {
+        assertFullShellEmptyWorkspace(size: "950x670")
+    }
+
+    func testFullShellSelectedProfileAtMinimumSize() {
+        assertFullShellSelectedProfile(.localProfile, size: "740x511")
+    }
+
+    func testFullShellSelectedProfileAtRegularSize() {
+        assertFullShellSelectedProfile(.localProfile, size: "950x670")
+    }
+
+    func testFullShellRemoteProfileAtMinimumSize() {
+        assertFullShellSelectedProfile(.remoteProfile, size: "740x511")
+    }
+
+    func testFullShellRemoteProfileAtRegularSize() {
+        assertFullShellSelectedProfile(.remoteProfile, size: "950x670")
+    }
+
+    func testFullShellRestoresProfilesDestinationAfterRestartAtBothSizes() {
+        assertRestoredShellWorkspace(size: "740x511")
+        assertRestoredShellWorkspace(size: "950x670")
+    }
+
     private func launch(_ scenario: Scenario) -> XCUIApplication {
         launch(scenario, windowSize: nil, activates: true)
     }
@@ -257,6 +286,219 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         if scenario == .subscriptionBusy {
             assertVisibleInsideWindow(button("Cancel Update", in: app), in: app, message: "Missing subscription cancellation")
         }
+    }
+
+    private func assertFullShellEmptyWorkspace(size: String) {
+        let app = launchFullShell(.emptyWorkspace, windowSize: size, resetDestination: true)
+        assertVisibleInsideWindow(element("dashboard.workspace", in: app), in: app, message: "Dashboard did not start in the shell")
+
+        navigateToProfiles(in: app)
+        assertEmptyShellWorkspace(in: app)
+        let expandedWidth = detailWidth(in: app, identifier: "profile.workspace")
+        assertOuterProfilesTitle(in: app)
+        assertToolbarReachable(in: app)
+
+        for _ in 0..<3 {
+            collapseOuterSidebar(in: app, detailIdentifier: "profile.workspace", expandedWidth: expandedWidth)
+            expandOuterSidebar(in: app, detailIdentifier: "profile.workspace")
+        }
+
+        navigateToDashboard(in: app)
+        navigateToProfiles(in: app)
+        assertEmptyShellWorkspace(in: app)
+
+        assertNoModal(in: app)
+    }
+
+    private func assertFullShellSelectedProfile(_ scenario: Scenario, size: String) {
+        let app = launchFullShell(scenario, windowSize: size, resetDestination: true)
+        navigateToProfiles(in: app)
+        assertSelectedShellWorkspace(in: app)
+        let expandedWidth = detailWidth(in: app, identifier: "profile.workspace.detail")
+        assertOuterProfilesTitle(in: app)
+
+        collapseOuterSidebar(in: app, detailIdentifier: "profile.workspace.detail", expandedWidth: expandedWidth)
+        assertSelectedShellWorkspace(in: app, expectsOuterSidebar: false)
+        expandOuterSidebar(in: app, detailIdentifier: "profile.workspace.detail")
+        assertSelectedShellWorkspace(in: app)
+        assertToolbarReachable(in: app)
+        recordShellFrames(in: app, detailIdentifier: "profile.workspace.detail")
+        assertNoModal(in: app)
+    }
+
+    private func assertRestoredShellWorkspace(size: String) {
+        // XCTest cannot relaunch a macOS WindowGroup for the same bundle in
+        // one test method after termination. This starts a fresh host process
+        // with the test-only persisted destination seam used at that boundary.
+        let restarted = launchFullShell(
+            .emptyWorkspace,
+            windowSize: size,
+            resetDestination: true,
+            restoredDestination: "profiles"
+        )
+        assertEmptyShellWorkspace(in: restarted)
+        collapseOuterSidebar(in: restarted, detailIdentifier: "profile.workspace", expandedWidth: detailWidth(in: restarted, identifier: "profile.workspace"))
+        recordShellFrames(in: restarted, detailIdentifier: "profile.workspace")
+        assertNoModal(in: restarted)
+    }
+
+    private func launchFullShell(
+        _ scenario: Scenario,
+        windowSize: String,
+        resetDestination: Bool,
+        restoredDestination: String? = nil
+    ) -> XCUIApplication {
+        let app = XCUIApplication(bundleIdentifier: "com.jason312928.TargetPresentationTestHost")
+        app.launchArguments = [
+            "-AppleLanguages", "(en)",
+            "-AppleLocale", "en_US",
+            "-ApplePersistenceIgnoreState", "YES",
+            "-NSAutomaticTextCompletionEnabled", "NO",
+            "--presentation-scenario", scenario.rawValue,
+            "--presentation-window-size", windowSize,
+            "--presentation-full-shell"
+        ]
+        if resetDestination {
+            app.launchArguments.append("--presentation-reset-shell-destination")
+        }
+        if let restoredDestination {
+            app.launchArguments += ["--presentation-restored-destination", restoredDestination]
+        }
+        app.launch()
+        activateIfNeeded(app)
+        assertExists(app.windows.firstMatch, message: "Full-shell host window did not appear")
+        waitForState("presentation.scenario", toEqual: scenario.rawValue, in: app)
+        addTeardownBlock {
+            if app.state != .notRunning {
+                app.terminate()
+                _ = app.wait(for: .notRunning, timeout: 5)
+            }
+            self.cleanUpPresentationFixtures()
+        }
+        return app
+    }
+
+    private func navigateToProfiles(in app: XCUIApplication) {
+        let destination = element("app-shell.destination.profiles", in: app)
+        assertExists(destination, message: "Profiles destination is unavailable")
+        activateForInteraction(app)
+        guard destination.isHittable || waitUntilHittable(destination) else {
+            return XCTFail("Profiles destination is not hittable")
+        }
+        destination.click()
+        assertExists(element("profile.list", in: app), message: "Inner Profile list is unavailable")
+    }
+
+    private func navigateToDashboard(in app: XCUIApplication) {
+        let destination = element("app-shell.destination.dashboard", in: app)
+        assertExists(destination, message: "Dashboard destination is unavailable")
+        activateForInteraction(app)
+        guard destination.isHittable || waitUntilHittable(destination) else {
+            return XCTFail("Dashboard destination is not hittable")
+        }
+        destination.click()
+        assertVisibleInsideWindow(element("dashboard.workspace", in: app), in: app, message: "Dashboard did not return")
+    }
+
+    private func assertEmptyShellWorkspace(in app: XCUIApplication) {
+        assertVisibleInsideWindow(element("app-shell.sidebar", in: app), in: app, message: "Outer sidebar is unavailable")
+        assertVisibleInsideWindow(element("profile.list", in: app), in: app, message: "Inner Profile list is unavailable")
+        let empty = element("profile.workspace.empty", in: app)
+        assertVisibleInsideWindow(empty, in: app, message: "Empty Profile workspace is unavailable")
+        XCTAssertGreaterThan(empty.firstMatch.frame.width, 150, "Empty state title is constrained to a character column")
+        assertDetailUsesAvailableWidth(element("profile.workspace", in: app), in: app)
+        recordShellFrames(in: app, detailIdentifier: "profile.workspace")
+    }
+
+    private func assertSelectedShellWorkspace(in app: XCUIApplication, expectsOuterSidebar: Bool = true) {
+        if expectsOuterSidebar {
+            assertVisibleInsideWindow(element("app-shell.sidebar", in: app), in: app, message: "Outer sidebar is unavailable")
+        }
+        assertVisibleInsideWindow(element("profile.list", in: app), in: app, message: "Inner Profile list is unavailable")
+        assertVisibleInsideWindow(app.staticTexts["profile.summary.name"], in: app, message: "Profile name is unavailable")
+        XCTAssertGreaterThan(app.staticTexts["profile.summary.name"].frame.width, 60, "Profile name is constrained to a character column")
+        assertVisibleInsideWindow(element("profile.summary.source", in: app), in: app, message: "Profile source summary is unavailable")
+        assertVisibleInsideWindow(element("profile.summary.validation", in: app), in: app, message: "Profile validation summary is unavailable")
+        assertVisibleInsideWindow(app.scrollViews["profile.json-editor.scroll"], in: app, message: "JSON editor is unavailable")
+        assertVisibleInsideWindow(app.buttons["Validate & Save"], in: app, message: "Save is unavailable")
+        assertVisibleInsideWindow(app.buttons["Format"], in: app, message: "Format is unavailable")
+        assertVisibleInsideWindow(app.menuButtons["More Actions"], in: app, message: "More Actions is unavailable")
+        assertDetailUsesAvailableWidth(element("profile.workspace.detail", in: app), in: app)
+    }
+
+    private func assertOuterProfilesTitle(in app: XCUIApplication) {
+        let profiles = element("app-shell.destination.profiles", in: app)
+        assertVisibleInsideWindow(profiles, in: app, message: "Profiles title is unavailable")
+        XCTAssertGreaterThan(profiles.frame.width, 55, "Profiles title is constrained to a character column")
+        XCTAssertLessThan(profiles.frame.height, 32, "Profiles title wrapped vertically")
+    }
+
+    private func collapseOuterSidebar(
+        in app: XCUIApplication,
+        detailIdentifier: String,
+        expandedWidth: CGFloat
+    ) {
+        clickOuterSidebarToggle(in: app)
+        let sidebar = element("app-shell.sidebar", in: app)
+        XCTAssertTrue(!sidebar.exists || sidebar.frame.width < 1, "Outer sidebar remained visible after collapse: \(sidebar.frame)")
+        let detail = element(detailIdentifier, in: app).firstMatch
+        assertVisibleInsideWindow(detail, in: app, message: "Profile detail disappeared after outer sidebar toggle")
+        XCTAssertGreaterThan(detail.frame.width, expandedWidth + 80, "Profile detail did not receive the collapsed sidebar width")
+    }
+
+    private func expandOuterSidebar(in app: XCUIApplication, detailIdentifier: String) {
+        clickOuterSidebarToggle(in: app)
+        assertVisibleInsideWindow(element("app-shell.sidebar", in: app), in: app, message: "Outer sidebar did not return after expansion")
+        assertOuterProfilesTitle(in: app)
+        let detail = element(detailIdentifier, in: app).firstMatch
+        assertVisibleInsideWindow(detail, in: app, message: "Profile detail disappeared after outer sidebar expansion")
+        XCTAssertGreaterThan(detail.frame.width, 300, "Profile detail is too narrow after outer sidebar expansion")
+    }
+
+    private func clickOuterSidebarToggle(in app: XCUIApplication) {
+        let toggle = button("app-shell.sidebar-toggle", in: app)
+        assertExists(toggle, message: "Outer sidebar toggle is unavailable")
+        activateForInteraction(app)
+        assertVisibleInsideWindow(toggle, in: app, message: "Outer sidebar toggle is outside the window")
+        toggle.click()
+    }
+
+    private func detailWidth(in app: XCUIApplication, identifier: String) -> CGFloat {
+        let detail = element(identifier, in: app).firstMatch
+        assertVisibleInsideWindow(detail, in: app, message: "Profile detail is unavailable")
+        return detail.frame.width
+    }
+
+    private func assertDetailUsesAvailableWidth(_ detail: XCUIElement, in app: XCUIApplication) {
+        let rootDetail = detail.firstMatch
+        assertVisibleInsideWindow(rootDetail, in: app, message: "Profile detail is unavailable")
+        let window = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(rootDetail.frame.width, 300, "Profile detail is too narrow for usable content")
+        XCTAssertLessThanOrEqual(window.maxX - rootDetail.frame.maxX, 24, "Unused right-side shell space remains while Profile detail is narrow")
+    }
+
+    private func assertNoModal(in app: XCUIApplication) {
+        XCTAssertFalse(app.sheets.firstMatch.exists, "Unexpected Sheet in shell layout test")
+        XCTAssertFalse(app.alerts.firstMatch.exists, "Unexpected Alert in shell layout test")
+    }
+
+    private func assertToolbarReachable(in app: XCUIApplication) {
+        let create = button("profile.action.create", in: app)
+        assertVisibleInsideWindow(create, in: app, message: "Profile toolbar is unavailable")
+        XCTAssertTrue(create.isHittable || waitUntilHittable(create), "Profile toolbar is not reachable")
+    }
+
+    private func recordShellFrames(in app: XCUIApplication, detailIdentifier: String) {
+        let window = app.windows.firstMatch.frame
+        let outerSidebar = element("app-shell.sidebar", in: app)
+        let profileList = element("profile.list", in: app)
+        let outer = outerSidebar.exists ? outerSidebar.frame : .zero
+        let list = profileList.exists ? profileList.frame : .zero
+        let detail = element(detailIdentifier, in: app).firstMatch.frame
+        let record = XCTAttachment(string: "window=\(window) outer=\(outer) list=\(list) detail=\(detail)")
+        record.name = "Profiles full-shell frames"
+        record.lifetime = .keepAlways
+        add(record)
     }
 
     private func selectSecondProfile(in app: XCUIApplication) {
@@ -408,6 +650,14 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         }
     }
 
+    private func activateForInteraction(_ app: XCUIApplication) {
+        app.activate()
+        guard app.wait(for: .runningForeground, timeout: timeout) else {
+            XCTFail("Application did not enter the foreground for interaction")
+            return
+        }
+    }
+
     private func assertStateRemains(
         _ identifier: String,
         value: String,
@@ -437,12 +687,17 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         assertExists(visibleElement, message: message)
         let frame = visibleElement.frame
         let windowFrame = app.windows.firstMatch.frame
-        XCTAssertGreaterThan(frame.width, 0, message)
-        XCTAssertGreaterThan(frame.height, 0, message)
-        XCTAssertGreaterThanOrEqual(frame.minX, windowFrame.minX, message)
-        XCTAssertGreaterThanOrEqual(frame.minY, windowFrame.minY, message)
-        XCTAssertLessThanOrEqual(frame.maxX, windowFrame.maxX, message)
-        XCTAssertLessThanOrEqual(frame.maxY, windowFrame.maxY, message)
+        let detail = "\(message) element=\(frame) window=\(windowFrame)"
+        // macOS reports a native List scroller's accessibility frame a few
+        // points beyond the content border. Keep this tight enough to catch
+        // real clipping while accepting that platform-only edge rounding.
+        let edgeTolerance: CGFloat = 6
+        XCTAssertGreaterThan(frame.width, 0, detail)
+        XCTAssertGreaterThan(frame.height, 0, detail)
+        XCTAssertGreaterThanOrEqual(frame.minX, windowFrame.minX - edgeTolerance, detail)
+        XCTAssertGreaterThanOrEqual(frame.minY, windowFrame.minY - edgeTolerance, detail)
+        XCTAssertLessThanOrEqual(frame.maxX, windowFrame.maxX + edgeTolerance, detail)
+        XCTAssertLessThanOrEqual(frame.maxY, windowFrame.maxY + edgeTolerance, detail)
     }
 
     private func cleanUpPresentationFixtures() {

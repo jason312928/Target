@@ -11,6 +11,7 @@ struct TargetPresentationTestHostApp: App {
 
     init() {
         do {
+            PresentationShellState.resetDestinationIfRequested()
             _fixture = State(initialValue: try PresentationFixture(scenario: .fromLaunchArguments()))
         } catch {
             fatalError("Unable to create presentation fixture: \(error)")
@@ -19,7 +20,7 @@ struct TargetPresentationTestHostApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ProfileWorkspaceView(lifecycle: nil, model: fixture.model)
+            presentationRoot
                 .overlay(alignment: .bottomLeading) {
                     PresentationStateProbe(fixture: fixture)
                 }
@@ -32,6 +33,38 @@ struct TargetPresentationTestHostApp: App {
                 .onDisappear { fixture.cleanUp() }
         }
     }
+
+    @ViewBuilder
+    private var presentationRoot: some View {
+        if PresentationShellState.usesFullShell {
+            AppShellView(
+                lifecycle: fixture.lifecycle,
+                profileModel: fixture.model,
+                refreshOnTask: false,
+                restoredDestination: PresentationShellState.restoredDestination
+            )
+        } else {
+            ProfileWorkspaceView(lifecycle: nil, model: fixture.model)
+        }
+    }
+}
+
+private enum PresentationShellState {
+    static var usesFullShell: Bool {
+        ProcessInfo.processInfo.arguments.contains("--presentation-full-shell")
+    }
+
+    static func resetDestinationIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("--presentation-reset-shell-destination") else { return }
+        UserDefaults.standard.removeObject(forKey: "app-shell.destination")
+    }
+
+    static var restoredDestination: AppDestination? {
+        guard let index = ProcessInfo.processInfo.arguments.firstIndex(of: "--presentation-restored-destination"),
+              ProcessInfo.processInfo.arguments.indices.contains(index + 1) else { return nil }
+        return AppDestination(rawValue: ProcessInfo.processInfo.arguments[index + 1])
+    }
+
 }
 
 private enum PresentationWindowSize {

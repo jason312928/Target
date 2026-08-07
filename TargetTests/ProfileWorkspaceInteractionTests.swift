@@ -53,11 +53,17 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(presentation.subscriptionLevel, ProfileWorkspaceStatusLevel.positive)
     }
 
-    func testWorkspaceLayoutUsesCompactMetadataBelowNarrowDetailWidth() {
-        XCTAssertFalse(ProfileWorkspaceLayout.usesCompactMetadata(for: 430))
-        XCTAssertTrue(ProfileWorkspaceLayout.usesCompactMetadata(for: 429))
+    func testWorkspaceLayoutDefinesEditorAndSidebarBounds() {
         XCTAssertEqual(ProfileWorkspaceLayout.minimumEditorHeight, 180)
         XCTAssertGreaterThan(ProfileWorkspaceLayout.preferredEditorHeight, ProfileWorkspaceLayout.minimumEditorHeight)
+        XCTAssertLessThanOrEqual(
+            ProfileWorkspaceLayout.sidebarMinimumWidth,
+            ProfileWorkspaceLayout.sidebarIdealWidth
+        )
+        XCTAssertLessThanOrEqual(
+            ProfileWorkspaceLayout.sidebarIdealWidth,
+            ProfileWorkspaceLayout.sidebarMaximumWidth
+        )
     }
 
     func testDirtySelectionRequestRecordsOperationWithoutChangingCommittedEditorState() throws {

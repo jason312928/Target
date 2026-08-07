@@ -71,9 +71,6 @@ enum ProfileWorkspaceLayout {
     static let sidebarIdealWidth: CGFloat = 170
     static let sidebarMaximumWidth: CGFloat = 210
 
-    static func usesCompactMetadata(for availableWidth: CGFloat) -> Bool {
-        availableWidth < 430
-    }
 }
 
 /// An auditable description of a Profile action that must not replace a dirty

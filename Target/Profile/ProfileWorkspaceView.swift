@@ -15,29 +15,19 @@ struct ProfileWorkspaceView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        HStack(spacing: 0) {
             profileList
-        } detail: {
-            if let profile = model.selectedProfile {
-                ProfileWorkspaceDetailView(
-                    profile: profile,
-                    model: model,
-                    showRename: { sheet = .rename(profile.id, profile.name) },
-                    requestDelete: { deleteTarget = profile.id },
-                    requestExport: { model.requestExport() }
+                .frame(
+                    minWidth: ProfileWorkspaceLayout.sidebarMinimumWidth,
+                    idealWidth: ProfileWorkspaceLayout.sidebarIdealWidth,
+                    maxWidth: ProfileWorkspaceLayout.sidebarMaximumWidth,
+                    maxHeight: .infinity
                 )
-            } else {
-                ProfileWorkspaceEmptyState(
-                    isPreparingImport: model.isPreparingImport,
-                    messageKey: model.messageKey
-                )
-            }
+            Divider()
+            workspaceDetail
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .navigationSplitViewColumnWidth(
-            min: ProfileWorkspaceLayout.sidebarMinimumWidth,
-            ideal: ProfileWorkspaceLayout.sidebarIdealWidth,
-            max: ProfileWorkspaceLayout.sidebarMaximumWidth
-        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .fileImporter(isPresented: $isImporting, allowedContentTypes: [.json]) { result in
             switch result {
             case .success(let url): model.prepareImport(from: url)
@@ -128,6 +118,24 @@ struct ProfileWorkspaceView: View {
             .accessibilityIdentifier("profile.unsaved.cancel")
         } message: {
             Text("profile.unsaved.message")
+        }
+    }
+
+    @ViewBuilder
+    private var workspaceDetail: some View {
+        if let profile = model.selectedProfile {
+            ProfileWorkspaceDetailView(
+                profile: profile,
+                model: model,
+                showRename: { sheet = .rename(profile.id, profile.name) },
+                requestDelete: { deleteTarget = profile.id },
+                requestExport: { model.requestExport() }
+            )
+        } else {
+            ProfileWorkspaceEmptyState(
+                isPreparingImport: model.isPreparingImport,
+                messageKey: model.messageKey
+            )
         }
     }
 

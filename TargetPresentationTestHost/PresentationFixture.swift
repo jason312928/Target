@@ -30,6 +30,7 @@ final class PresentationFixture {
     let root: URL
     let store: ProfileStore
     let model: ProfileViewModel
+    let lifecycle = BackendLifecycleModel()
     let first: Profile
     let second: Profile
     private let importURL: URL

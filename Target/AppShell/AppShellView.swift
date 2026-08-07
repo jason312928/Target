@@ -6,29 +6,55 @@ enum AppShellLayout {
 }
 
 struct AppShellView: View {
-    @Bindable var lifecycle: BackendLifecycleModel
+    let lifecycle: BackendLifecycleModel
     @SceneStorage("app-shell.destination") private var persistedDestinationRawValue: String?
-    @State private var profileModel = ProfileViewModel()
+    @State private var profileModel: ProfileViewModel
+    @State private var outerColumnVisibility: NavigationSplitViewVisibility = .all
+    private let refreshOnTask: Bool
+    private let restoredDestination: AppDestination?
+
+    /// The injected model is an internal test seam. The production initializer
+    /// keeps the existing single shell-owned Profile model and lifecycle refresh.
+    init(
+        lifecycle: BackendLifecycleModel,
+        profileModel: ProfileViewModel? = nil,
+        refreshOnTask: Bool = true,
+        restoredDestination: AppDestination? = nil
+    ) {
+        self.lifecycle = lifecycle
+        _profileModel = State(initialValue: profileModel ?? ProfileViewModel())
+        self.refreshOnTask = refreshOnTask
+        self.restoredDestination = restoredDestination
+    }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $outerColumnVisibility) {
             AppSidebarView(selection: destination)
         } detail: {
-            switch AppDestination.destination(for: persistedDestinationRawValue) {
-            case .dashboard:
-                DashboardView(lifecycle: lifecycle, onRoute: handle)
-            case .profiles:
-                ProfileWorkspaceView(lifecycle: lifecycle, model: profileModel)
-            }
+            shellDetail
         }
         .navigationSplitViewStyle(.balanced)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button(action: toggleOuterSidebar) {
+                    Image(systemName: "sidebar.left")
+                }
+                .accessibilityLabel(Text("Toggle main sidebar"))
+                .accessibilityIdentifier("app-shell.sidebar-toggle")
+            }
+        }
         .frame(
             minWidth: AppShellLayout.minimumWindowWidth,
             minHeight: AppShellLayout.minimumWindowHeight
         )
         .task {
+            if let restoredDestination {
+                persistedDestinationRawValue = restoredDestination.rawValue
+            }
             normalizePersistedDestination()
-            lifecycle.refresh()
+            if refreshOnTask {
+                lifecycle.refresh()
+            }
         }
     }
 
@@ -49,6 +75,20 @@ struct AppShellView: View {
             persistedDestinationRawValue = destination.rawValue
         }
     }
+
+    private func toggleOuterSidebar() {
+        outerColumnVisibility = outerColumnVisibility == .detailOnly ? .all : .detailOnly
+    }
+
+    @ViewBuilder
+    private var shellDetail: some View {
+        switch AppDestination.destination(for: persistedDestinationRawValue) {
+        case .dashboard:
+            DashboardView(lifecycle: lifecycle, onRoute: handle)
+        case .profiles:
+            ProfileWorkspaceView(lifecycle: lifecycle, model: profileModel)
+        }
+    }
 }
 
 struct AppSidebarView: View {
@@ -66,6 +106,7 @@ struct AppSidebarView: View {
                         }
                         .tag(metadata.destination)
                         .accessibilityLabel(Text(metadata.title))
+                        .accessibilityIdentifier("app-shell.destination.\(metadata.destination.rawValue)")
                     }
                 }
             }
@@ -73,6 +114,7 @@ struct AppSidebarView: View {
         .listStyle(.sidebar)
         .navigationTitle("app.title")
         .accessibilityLabel(Text("navigation.accessibility.label"))
+        .accessibilityIdentifier("app-shell.sidebar")
         .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 220)
     }
 }
