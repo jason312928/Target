@@ -42,10 +42,20 @@ actor SingBoxBackend: EngineInstalling {
     func queryStatus() async throws -> BackendStatus {
         let installation = installationStatus()
         let version = installation == .installed ? try? versionString() : nil
-        let disposition = try? await runtimeOwnership.recordDisposition()
+        let disposition: EngineRuntimeRecordDisposition?
+        if let record = runtimeOwnership.currentRecord(), retainedProcessHasExited(for: record) {
+            disposition = .processExited(record)
+        } else {
+            disposition = try? await runtimeOwnership.recordDisposition()
+        }
         if case let .processExited(expiredRecord)? = disposition,
            runtimeOwnership.discardExitedRecord(expiredRecord) {
             runtimeConfigurations.remove(id: expiredRecord.runtimeConfigurationID)
+            if process?.processIdentifier == expiredRecord.pid {
+                process = nil
+                try? logHandle?.close()
+                logHandle = nil
+            }
         }
         let ownedRecord: EngineRuntimeRecord?
         if case let .ownedRunning(record)? = disposition {
@@ -282,6 +292,11 @@ actor SingBoxBackend: EngineInstalling {
         try Task.checkCancellation()
         guard let record = await runtimeOwnership.ownedRecord() else { return false }
         return process.isRunning ? await portProbe.isListening(on: record.endpoint.port) : false
+    }
+
+    private func retainedProcessHasExited(for record: EngineRuntimeRecord) -> Bool {
+        guard let process, process.processIdentifier == record.pid else { return false }
+        return !process.isRunning
     }
 
     private func stopOwnedProcess(_ process: Process) async -> Bool {
