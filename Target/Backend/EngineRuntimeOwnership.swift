@@ -35,6 +35,13 @@ struct EngineRuntimeRecord: Codable, Equatable, Sendable {
     }
 }
 
+enum EngineRuntimeRecordDisposition: Sendable {
+    case noRecord
+    case ownedRunning(EngineRuntimeRecord)
+    case processExited(EngineRuntimeRecord)
+    case liveUnproven(EngineRuntimeRecord)
+}
+
 protocol EngineRuntimeStoring: Sendable {
     func load() throws -> EngineRuntimeRecord?
     func save(_ record: EngineRuntimeRecord) throws
@@ -176,13 +183,20 @@ final class EngineRuntimeOwnership: @unchecked Sendable {
         self.portProbe = portProbe
     }
 
-    func ownedRecord() async -> EngineRuntimeRecord? {
-        guard let record = try? store.load(), record.isValid,
+    func recordDisposition() async throws -> EngineRuntimeRecordDisposition {
+        guard let record = try store.load() else { return .noRecord }
+        guard processExists(record.pid) else { return .processExited(record) }
+        guard record.isValid,
               processInspector.matches(pid: record.pid, executablePath: record.executablePath),
               executableFingerprintMatches(record),
               await portProbe.isListening(on: record.endpoint.port) else {
-            return nil
+            return .liveUnproven(record)
         }
+        return .ownedRunning(record)
+    }
+
+    func ownedRecord() async -> EngineRuntimeRecord? {
+        guard case let .ownedRunning(record)? = try? await recordDisposition() else { return nil }
         return record
     }
 
@@ -223,13 +237,16 @@ final class EngineRuntimeOwnership: @unchecked Sendable {
     func currentRecord() -> EngineRuntimeRecord? { try? store.load() }
     func clearRecord() { try? store.clear() }
 
-    /// A record for a PID that no longer exists cannot support recovery and its
-    /// runtime configuration is no longer needed. Records with a live but
-    /// unproven PID remain intact for manual investigation.
-    func discardRecordIfProcessExited() -> EngineRuntimeRecord? {
-        guard let record = currentRecord(), !processExists(record.pid) else { return nil }
-        clearRecord()
-        return record
+    /// A record is only removable after its recorded PID is confirmed gone.
+    /// Live records remain recovery evidence even when ownership proof fails.
+    func discardExitedRecord(_ record: EngineRuntimeRecord) -> Bool {
+        guard !processExists(record.pid) else { return false }
+        do {
+            try store.clear()
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func processExists(_ pid: Int32) -> Bool {

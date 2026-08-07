@@ -42,9 +42,16 @@ actor SingBoxBackend: EngineInstalling {
     func queryStatus() async throws -> BackendStatus {
         let installation = installationStatus()
         let version = installation == .installed ? try? versionString() : nil
-        let ownedRecord = await runtimeOwnership.ownedRecord()
-        if ownedRecord == nil, let expiredRecord = runtimeOwnership.discardRecordIfProcessExited() {
+        let disposition = try? await runtimeOwnership.recordDisposition()
+        if case let .processExited(expiredRecord)? = disposition,
+           runtimeOwnership.discardExitedRecord(expiredRecord) {
             runtimeConfigurations.remove(id: expiredRecord.runtimeConfigurationID)
+        }
+        let ownedRecord: EngineRuntimeRecord?
+        if case let .ownedRunning(record)? = disposition {
+            ownedRecord = record
+        } else {
+            ownedRecord = nil
         }
         let verifiedRecord: EngineRuntimeRecord?
         if let record = ownedRecord,
@@ -92,10 +99,26 @@ actor SingBoxBackend: EngineInstalling {
 
     func startEngine() async throws -> BackendStatus {
         try Task.checkCancellation()
-        guard await runtimeOwnership.ownedRecord() == nil else { throw BackendError.invalidLifecycleTransition }
+        let disposition: EngineRuntimeRecordDisposition
+        do {
+            disposition = try await runtimeOwnership.recordDisposition()
+        } catch {
+            throw BackendError.invalidLifecycleTransition
+        }
+        switch disposition {
+        case .noRecord:
+            // A Target-owned runtime directory with no record contains only
+            // unassociated artifacts from a previous interrupted launch.
+            runtimeConfigurations.removeAll()
+        case .processExited(let record):
+            guard runtimeOwnership.discardExitedRecord(record) else {
+                throw BackendError.invalidLifecycleTransition
+            }
+            runtimeConfigurations.remove(id: record.runtimeConfigurationID)
+        case .ownedRunning, .liveUnproven:
+            throw BackendError.invalidLifecycleTransition
+        }
         guard installationStatus() == .installed else { throw BackendError.engineNotInstalled }
-        runtimeOwnership.clearRecord()
-        runtimeConfigurations.removeAll()
 
         let prepared = try prepareSelectedConfiguration()
         try Task.checkCancellation()

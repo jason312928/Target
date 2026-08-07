@@ -157,6 +157,66 @@ final class EngineLifecycleTests: XCTestCase {
         }
     }
 
+    func testLiveUnprovenRecordBlocksStartAndPreservesRecoveryEvidence() async throws {
+        let fixture = try EngineLifecycleFixture(mode: .listening, permissiveOwnershipInspector: false, forcePortReadiness: false)
+        let external = Process()
+        external.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        external.arguments = ["10"]
+        try external.run()
+        do {
+            let version = try fixture.store.selectedValidVersion()
+            let runtimeID = UUID()
+            let runtimeConfiguration = try RuntimeConfigurationStore(directory: fixture.runtimeDirectory)
+                .write(Data("recovery evidence".utf8), id: runtimeID)
+            try fixture.ownership.recordLaunchedProcess(
+                pid: external.processIdentifier,
+                executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                port: 51_234,
+                profileID: version.profile.id,
+                profileRevision: version.revision,
+                sourceConfigurationFingerprint: TargetConfigurationFingerprint.sha256(version.data),
+                configurationFingerprint: "test-runtime",
+                runtimeConfigurationID: runtimeID
+            )
+            let recordURL = fixture.root.appending(path: "Ownership/runtime.json")
+            let recordBeforeStart = try Data(contentsOf: recordURL)
+            let runtimeConfigurationBeforeStart = try Data(contentsOf: runtimeConfiguration.url)
+
+            XCTAssertTrue(external.isRunning)
+            let stopped = try await fixture.backend.queryStatus()
+            XCTAssertEqual(stopped.engineState, .stopped)
+            XCTAssertNotNil(fixture.ownership.currentRecord())
+
+            do {
+                _ = try await fixture.backend.startEngine()
+                XCTFail("A live record without listener proof must block start")
+            } catch let error as BackendError {
+                XCTAssertEqual(error, .invalidLifecycleTransition)
+            }
+
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.candidateLaunchMarker.path))
+            XCTAssertTrue(external.isRunning)
+            XCTAssertEqual(try Data(contentsOf: recordURL), recordBeforeStart)
+            XCTAssertEqual(try Data(contentsOf: runtimeConfiguration.url), runtimeConfigurationBeforeStart)
+
+            external.terminate()
+            try await waitUntil { !external.isRunning }
+            _ = try await fixture.backend.queryStatus()
+            XCTAssertNil(fixture.ownership.currentRecord())
+            XCTAssertFalse(FileManager.default.fileExists(atPath: runtimeConfiguration.url.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.runtimeDirectory.path))
+            await fixture.removeRoot()
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root.path))
+        } catch {
+            if external.isRunning {
+                external.terminate()
+                try? await waitUntil { !external.isRunning }
+            }
+            await fixture.cleanup()
+            throw error
+        }
+    }
+
     func testCancelledRefreshLeavesModelSettled() async throws {
         let status = BackendStatus(serviceInstallation: .notRegistered, engineState: .stopped, engineInstallation: .installed, hasSelectedValidProfile: true)
         let model = BackendLifecycleModel(backend: DelayedQueryBackend(status: status))
@@ -381,6 +441,7 @@ private final class EngineLifecycleFixture: @unchecked Sendable {
     let root: URL
     let executable: URL
     let runtimeDirectory: URL
+    let candidateLaunchMarker: URL
     let ownership: EngineRuntimeOwnership
     let store: ProfileStore
     let profile: Profile
@@ -396,6 +457,7 @@ private final class EngineLifecycleFixture: @unchecked Sendable {
         let engineDirectory = root.appending(path: "Engine", directoryHint: .isDirectory)
         executable = engineDirectory.appending(path: "sing-box")
         runtimeDirectory = engineDirectory.appending(path: "runtime", directoryHint: .isDirectory)
+        candidateLaunchMarker = engineDirectory.appending(path: "candidate-launches")
         try FileManager.default.createDirectory(at: engineDirectory, withIntermediateDirectories: true)
         try Data(Self.script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
@@ -454,6 +516,7 @@ private final class EngineLifecycleFixture: @unchecked Sendable {
         exit 0
         ;;
       run)
+        printf '%s\\n' "$$" >> "$(dirname "$(dirname "$3")")/candidate-launches"
         mode=$(cat "$(dirname "$(dirname "$3")")/mode")
         case "$mode" in
           early-exit) exit 0 ;;
