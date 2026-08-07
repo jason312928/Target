@@ -3,7 +3,7 @@ import SwiftUI
 
 struct JSONCodeEditor: NSViewRepresentable {
     @Binding var text: String
-    var onTextChange: (String) -> Void
+    var isEditable = true
     var accessibilityIdentifier: String? = nil
     var accessibilityLabel: String? = nil
 
@@ -19,8 +19,6 @@ struct JSONCodeEditor: NSViewRepresentable {
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.borderType = .bezelBorder
-        scrollView.hasVerticalRuler = true
-        scrollView.rulersVisible = true
         scrollView.setAccessibilityIdentifier(accessibilityIdentifier.map { "\($0).scroll" })
         scrollView.setAccessibilityLabel(accessibilityLabel)
 
@@ -31,23 +29,19 @@ struct JSONCodeEditor: NSViewRepresentable {
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.delegate = context.coordinator
-        textView.string = text
+        textView.isEditable = isEditable
         textView.setAccessibilityIdentifier(accessibilityIdentifier.map { "\($0).text" })
         textView.setAccessibilityLabel(accessibilityLabel)
-        scrollView.documentView = textView
-        scrollView.verticalRulerView = JSONLineNumberRulerView(textView: textView)
-        JSONSyntaxHighlighter.apply(to: textView)
+        container.replaceText(text, resetScrollPosition: true)
         return container
     }
 
     func updateNSView(_ container: JSONCodeEditorContainerView, context: Context) {
-        let textView = container.textView
-        guard textView.string != text,
+        context.coordinator.parent = self
+        container.textView.isEditable = isEditable
+        guard container.textView.string != text,
               !context.coordinator.isEditing else { return }
-        textView.string = text
-        JSONSyntaxHighlighter.apply(to: textView)
-        (container.scrollView.verticalRulerView as? JSONLineNumberRulerView)?.updateLineStarts(for: text)
-        container.scrollView.verticalRulerView?.needsDisplay = true
+        container.replaceText(text, resetScrollPosition: true)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -63,10 +57,7 @@ struct JSONCodeEditor: NSViewRepresentable {
             JSONSyntaxHighlighter.apply(to: textView)
             textView.setSelectedRange(selection)
             parent.text = textView.string
-            parent.onTextChange(textView.string)
-            (textView.enclosingScrollView?.verticalRulerView as? JSONLineNumberRulerView)?
-                .updateLineStarts(for: textView.string)
-            textView.enclosingScrollView?.verticalRulerView?.needsDisplay = true
+            (textView.enclosingScrollView?.superview as? JSONCodeEditorContainerView)?.updateDocumentSize()
             isEditing = false
         }
     }
@@ -83,6 +74,10 @@ final class JSONCodeEditorContainerView: NSView {
         setAccessibilityIdentifier(accessibilityIdentifier)
         setAccessibilityLabel(accessibilityLabel)
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .bezelBorder
         addSubview(scrollView)
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -90,9 +85,57 @@ final class JSONCodeEditorContainerView: NSView {
             scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
+
+        textView.isRichText = false
+        textView.drawsBackground = true
+        textView.backgroundColor = .textBackgroundColor
+        textView.textColor = .labelColor
+        textView.insertionPointColor = .labelColor
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = true
+        textView.minSize = .zero
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.heightTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        scrollView.documentView = textView
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        updateDocumentSize()
+    }
+
+    func replaceText(_ text: String, resetScrollPosition: Bool) {
+        textView.string = text
+        JSONSyntaxHighlighter.apply(to: textView)
+        updateDocumentSize()
+        if resetScrollPosition {
+            scrollView.contentView.scroll(to: .zero)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+    }
+
+    func updateDocumentSize() {
+        guard let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer else { return }
+        layoutManager.ensureLayout(for: textContainer)
+        let usedRect = layoutManager.usedRect(for: textContainer)
+        let inset = textView.textContainerInset
+        textView.frame.size = NSSize(
+            width: max(scrollView.contentSize.width, ceil(usedRect.maxX + inset.width * 2)),
+            height: max(scrollView.contentSize.height, ceil(usedRect.maxY + inset.height * 2))
+        )
+    }
 }
 
 struct JSONLineNumberCalculation {
@@ -197,65 +240,6 @@ private enum JSONSyntaxHighlighter {
         expression.enumerateMatches(in: textView.string, range: range) { match, _, _ in
             guard let match else { return }
             textView.textStorage?.addAttribute(.foregroundColor, value: color, range: match.range)
-        }
-    }
-}
-
-private final class JSONLineNumberRulerView: NSRulerView {
-    private weak var textView: NSTextView?
-    private var lineStartOffsets: [Int]
-
-    init(textView: NSTextView) {
-        self.textView = textView
-        lineStartOffsets = JSONLineNumberCalculation.lineStartOffsets(in: textView.string)
-        super.init(scrollView: textView.enclosingScrollView!, orientation: .verticalRuler)
-        clientView = textView
-        ruleThickness = 42
-    }
-
-    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func updateLineStarts(for text: String) {
-        lineStartOffsets = JSONLineNumberCalculation.lineStartOffsets(in: text)
-    }
-
-    override func drawHashMarksAndLabels(in rect: NSRect) {
-        guard let textView, let layoutManager = textView.layoutManager, let container = textView.textContainer else { return }
-        let visible = textView.enclosingScrollView?.contentView.bounds ?? .zero
-        let glyphRange = layoutManager.glyphRange(forBoundingRect: visible, in: container)
-        let characterRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-        let textLength = (textView.string as NSString).length
-        let lines = JSONLineNumberCalculation.visibleLines(
-            lineStartOffsets: lineStartOffsets,
-            textUTF16Length: textLength,
-            visibleRange: characterRange
-        )
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor.secondaryLabelColor
-        ]
-
-        for line in lines {
-            let fragmentY: CGFloat
-            if line.utf16Offset == textLength {
-                guard layoutManager.extraLineFragmentTextContainer != nil else { continue }
-                fragmentY = layoutManager.extraLineFragmentRect.minY
-            } else {
-                let glyph = layoutManager.glyphRange(
-                    forCharacterRange: NSRange(location: line.utf16Offset, length: 0),
-                    actualCharacterRange: nil
-                ).location
-                guard glyph < layoutManager.numberOfGlyphs else { continue }
-                fragmentY = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil).minY
-            }
-
-            let y = fragmentY + textView.textContainerOrigin.y - visible.origin.y
-            let label = "\(line.number)" as NSString
-            label.draw(
-                at: NSPoint(x: ruleThickness - label.size(withAttributes: attributes).width - 6, y: y),
-                withAttributes: attributes
-            )
         }
     }
 }

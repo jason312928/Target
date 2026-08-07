@@ -74,6 +74,70 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         )
     }
 
+    func testImportedProfileActivationLoadsExactBytesAndStartsClean() async throws {
+        let fixture = try makeFixture()
+        let source = "{\n  \"inbounds\": [],\n  \"outbounds\": [{\"type\":\"direct\",\"tag\":\"direct\"}],\n  \"route\": {\"final\":\"direct\"},\n  \"unknown\": [true, 7]\n}\n"
+        let importURL = FileManager.default.temporaryDirectory
+            .appending(path: "TargetProfileActivationImport-\(UUID().uuidString).json")
+        try Data(source.utf8).write(to: importURL)
+        defer { try? FileManager.default.removeItem(at: importURL) }
+
+        fixture.model.prepareImport(from: importURL)
+        for _ in 0..<1_000 where fixture.model.pendingImportCandidate == nil {
+            await Task.yield()
+        }
+        XCTAssertNotNil(fixture.model.pendingImportCandidate)
+
+        fixture.model.commitPreparedImport(name: "Imported")
+
+        let selectedID = try XCTUnwrap(fixture.model.selectedID)
+        XCTAssertEqual(fixture.model.editorText.data(using: .utf8), Data(source.utf8))
+        XCTAssertEqual(try fixture.store.configurationText(for: selectedID).data(using: .utf8), Data(source.utf8))
+        XCTAssertTrue(fixture.model.isConfigurationLoaded)
+        XCTAssertFalse(fixture.model.isDirty)
+        XCTAssertNil(fixture.model.diagnostic)
+    }
+
+    func testConfigurationReadFailureIsUnavailableAndCannotOverwriteLastValidRevision() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "TargetProfileReadFailure-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let store = ProfileStore(
+            rootDirectory: root,
+            checker: InteractionChecker(result: .success(())),
+            runtimeUsage: CountingProfileUsage(inUse: false),
+            keyProvider: InteractionKeyProvider()
+        )
+        let first = try store.create(name: "First")
+        let second = try store.create(name: "Second")
+        try store.select(first.id)
+        let model = ProfileViewModel(
+            store: store,
+            subscriptionFetcher: ControlledSubscriptionFetcher(),
+            configurationLoader: { id in
+                if id == second.id { throw ProfileStoreError.invalidStoredMetadata }
+                return try store.configurationText(for: id)
+            }
+        )
+        let lastValid = try store.validVersion(for: second.id, revision: 1).data
+
+        model.requestSelection(second.id)
+
+        XCTAssertEqual(model.selectedID, second.id)
+        XCTAssertFalse(model.isConfigurationLoaded)
+        XCTAssertFalse(model.canEditConfiguration)
+        XCTAssertEqual(model.editorText, "")
+        XCTAssertFalse(model.isDirty)
+        XCTAssertEqual(model.messageKey, "profile.message.configuration-read-failed")
+
+        model.updateEditor("")
+        model.save()
+
+        XCTAssertFalse(model.isDirty)
+        XCTAssertEqual(model.messageKey, "profile.message.configuration-read-failed")
+        XCTAssertEqual(try store.validVersion(for: second.id, revision: 1).data, lastValid)
+        XCTAssertEqual(try store.availableValidVersions(for: second.id).map(\.revision), [1])
+    }
+
     func testDirtySelectionRequestRecordsOperationWithoutChangingCommittedEditorState() throws {
         let fixture = try makeFixture()
         fixture.model.updateEditor("{\"edited\":true}")
@@ -231,7 +295,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(fixture.model.editorText, "{\"keep\":true}")
         XCTAssertTrue(fixture.model.isDirty)
         XCTAssertNotNil(fixture.model.pendingOperation)
-        XCTAssertEqual(fixture.model.messageKey, "profile.message.operation-failed")
+        XCTAssertEqual(fixture.model.messageKey, "profile.message.configuration-read-failed")
         XCTAssertTrue(fixture.model.unsavedChangesPresentation.isPresented)
     }
 

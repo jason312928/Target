@@ -5,6 +5,7 @@ import Observation
 @Observable
 final class ProfileViewModel {
     private let store: ProfileStore
+    private let configurationLoader: (UUID) throws -> String
     private let subscriptionFetcher: any ProfileSubscriptionFetching
     private var subscriptionTask: Task<Void, Never>?
     private var importTask: Task<Void, Never>?
@@ -14,6 +15,7 @@ final class ProfileViewModel {
     var editorText = ""
     private(set) var diagnostic: ConfigurationDiagnostic?
     private(set) var isDirty = false
+    private(set) var isConfigurationLoaded = false
     private(set) var messageKey: String?
     private(set) var pendingSubscriptionUpdate: PendingSubscriptionUpdate?
     private(set) var isUpdatingSubscription = false
@@ -31,14 +33,20 @@ final class ProfileViewModel {
     /// subscription-cache metadata updates.
     private(set) var readinessChangeGeneration = 0
 
-    init(store: ProfileStore = ProfileStore(), subscriptionFetcher: any ProfileSubscriptionFetching = SecureSubscriptionFetcher()) {
+    init(
+        store: ProfileStore = ProfileStore(),
+        subscriptionFetcher: any ProfileSubscriptionFetching = SecureSubscriptionFetcher(),
+        configurationLoader: ((UUID) throws -> String)? = nil
+    ) {
         self.store = store
         self.subscriptionFetcher = subscriptionFetcher
+        self.configurationLoader = configurationLoader ?? { try store.configurationText(for: $0) }
         reloadInitialState()
     }
 
     var selectedProfile: Profile? { profiles.first { $0.id == selectedID } }
-    var canExport: Bool { selectedProfile != nil && !isDirty && !isExporting }
+    var canEditConfiguration: Bool { selectedProfile != nil && isConfigurationLoaded }
+    var canExport: Bool { canEditConfiguration && !isDirty && !isExporting }
     var defaultExportFileName: String { store.defaultExportFileNameForSelectedProfile() ?? "Profile.json" }
     var shouldPresentImportConfirmation: Bool { pendingImportCandidate != nil && pendingOperation == nil }
     var shouldPresentSubscriptionPreview: Bool { pendingSubscriptionUpdate != nil && pendingOperation == nil }
@@ -111,6 +119,7 @@ final class ProfileViewModel {
             profiles = []
             selectedID = nil
             editorText = ""
+            isConfigurationLoaded = false
             messageKey = "profile.message.load-failed"
         }
     }
@@ -196,6 +205,7 @@ final class ProfileViewModel {
     }
 
     func updateEditor(_ text: String) {
+        guard canEditConfiguration else { return }
         editorText = text
         isDirty = true
         diagnostic = JSONSyntaxChecker.validate(text)
@@ -203,6 +213,7 @@ final class ProfileViewModel {
     }
 
     func format() {
+        guard canEditConfiguration else { return }
         guard JSONSyntaxChecker.validate(editorText) == nil,
               let object = try? JSONSerialization.jsonObject(with: Data(editorText.utf8)),
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
@@ -224,7 +235,10 @@ final class ProfileViewModel {
 
     @discardableResult
     private func saveCurrentEditor() -> Bool {
-        guard let selectedID else { return false }
+        guard let selectedID, isConfigurationLoaded else {
+            messageKey = "profile.message.configuration-read-failed"
+            return false
+        }
         do {
             try store.save(json: editorText, for: selectedID)
             diagnostic = nil
@@ -380,29 +394,43 @@ final class ProfileViewModel {
             return false
         }
         do {
-            let persistedText = try store.configurationText(for: selectedID)
+            let persistedText = try configurationLoader(selectedID)
             editorText = persistedText
             diagnostic = nil
             isDirty = false
+            isConfigurationLoaded = true
             return true
-        } catch let error as ProfileStoreError {
-            present(error)
+        } catch is ProfileStoreError {
+            messageKey = "profile.message.configuration-read-failed"
             return false
         } catch {
-            messageKey = "profile.message.operation-failed"
+            messageKey = "profile.message.configuration-read-failed"
             return false
         }
     }
 
     private func loadSelectedText() {
-        guard let selectedID, let text = try? store.configurationText(for: selectedID) else {
+        guard let selectedID else {
             editorText = ""
+            diagnostic = nil
             isDirty = false
+            isConfigurationLoaded = false
             return
         }
-        editorText = text
-        diagnostic = nil
-        isDirty = false
+        do {
+            editorText = try configurationLoader(selectedID)
+            diagnostic = nil
+            isDirty = false
+            isConfigurationLoaded = true
+            messageKey = nil
+        } catch {
+            if !isDirty {
+                editorText = ""
+                diagnostic = nil
+            }
+            isConfigurationLoaded = false
+            messageKey = "profile.message.configuration-read-failed"
+        }
     }
 
     private func markReadinessChanged() {

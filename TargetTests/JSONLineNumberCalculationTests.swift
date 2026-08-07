@@ -1,8 +1,10 @@
+import AppKit
 import Foundation
 import XCTest
 
 @testable import Target
 
+@MainActor
 final class JSONLineNumberCalculationTests: XCTestCase {
     func testEmptyStringHasOneLineAtZero() {
         XCTAssertEqual(offsets(in: ""), [0])
@@ -72,6 +74,56 @@ final class JSONLineNumberCalculationTests: XCTestCase {
         }
     }
 
+    func testEditorScrollViewAndDocumentStayInsideComponentBounds() {
+        let container = makeEditorContainer()
+        let multiline = (1...80).map { "  \"line\($0)\": \"value\($0)\"" }.joined(separator: ",\n")
+        container.replaceText("{\n\(multiline)\n}", resetScrollPosition: true)
+        container.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(container.scrollView.frame, container.bounds)
+        XCTAssertTrue(container.bounds.contains(container.scrollView.frame))
+        XCTAssertNil(container.scrollView.verticalRulerView)
+        XCTAssertFalse(container.scrollView.hasVerticalRuler)
+        XCTAssertEqual(container.textView.string, "{\n\(multiline)\n}")
+        XCTAssertGreaterThanOrEqual(container.textView.frame.width, container.scrollView.contentSize.width)
+        XCTAssertGreaterThan(container.textView.frame.height, container.scrollView.contentSize.height)
+    }
+
+    func testModelReplacementResetsLongProfileScrollAndShowsShortProfileStart() {
+        let container = makeEditorContainer()
+        let longLine = String(repeating: "x", count: 500)
+        let longText = (0..<200).map { "\($0): \(longLine)" }.joined(separator: "\n")
+        container.replaceText(longText, resetScrollPosition: true)
+        container.layoutSubtreeIfNeeded()
+        container.scrollView.contentView.scroll(to: NSPoint(x: 400, y: 800))
+        container.scrollView.reflectScrolledClipView(container.scrollView.contentView)
+        XCTAssertGreaterThan(container.scrollView.contentView.bounds.origin.x, 0)
+        XCTAssertGreaterThan(container.scrollView.contentView.bounds.origin.y, 0)
+
+        let shortText = "{\n  \"outbounds\": []\n}\n"
+        container.replaceText(shortText, resetScrollPosition: true)
+        container.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(container.textView.string, shortText)
+        XCTAssertEqual(container.scrollView.contentView.bounds.origin.x, 0, accuracy: 0.5)
+        XCTAssertEqual(container.scrollView.contentView.bounds.origin.y, 0, accuracy: 0.5)
+    }
+
+    func testEditorUsesDarkAppearanceReadableSystemColorsAtUTMSize() {
+        let container = makeEditorContainer()
+        container.appearance = NSAppearance(named: .darkAqua)
+        container.replaceText("{\n  \"enabled\": true\n}\n", resetScrollPosition: true)
+        container.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(container.textView.drawsBackground)
+        XCTAssertEqual(container.textView.backgroundColor, .textBackgroundColor)
+        XCTAssertEqual(
+            container.textView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor,
+            NSColor.labelColor
+        )
+        XCTAssertEqual(container.scrollView.frame, container.bounds)
+    }
+
     private func offsets(in text: String) -> [Int] {
         JSONLineNumberCalculation.lineStartOffsets(in: text)
     }
@@ -82,5 +134,15 @@ final class JSONLineNumberCalculationTests: XCTestCase {
             textUTF16Length: text.utf16.count,
             visibleRange: range
         ).map(\.utf16Offset)
+    }
+
+    private func makeEditorContainer() -> JSONCodeEditorContainerView {
+        let container = JSONCodeEditorContainerView(
+            accessibilityIdentifier: "test.editor",
+            accessibilityLabel: "Test JSON editor"
+        )
+        container.frame = NSRect(x: 0, y: 0, width: 620, height: 300)
+        container.layoutSubtreeIfNeeded()
+        return container
     }
 }

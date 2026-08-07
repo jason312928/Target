@@ -280,12 +280,24 @@ private struct ProfileWorkspaceDetailView: View {
                     }
                 }
 
-                JSONCodeEditor(
-                    text: Binding(get: { model.editorText }, set: model.updateEditor),
-                    onTextChange: model.updateEditor,
-                    accessibilityIdentifier: "profile.json-editor",
-                    accessibilityLabel: String(localized: "profile.editor.accessibility.label")
-                )
+                ZStack {
+                    JSONCodeEditor(
+                        text: Binding(get: { model.editorText }, set: model.updateEditor),
+                        isEditable: model.canEditConfiguration,
+                        accessibilityIdentifier: "profile.json-editor",
+                        accessibilityLabel: String(localized: "profile.editor.accessibility.label")
+                    )
+                    .id(profile.id)
+
+                    if !model.isConfigurationLoaded {
+                        ContentUnavailableView(
+                            "profile.editor.unavailable.title",
+                            systemImage: "lock.trianglebadge.exclamationmark",
+                            description: Text("profile.editor.unavailable.description")
+                        )
+                        .accessibilityIdentifier("profile.editor.unavailable")
+                    }
+                }
                 .frame(
                     maxWidth: .infinity,
                     minHeight: ProfileWorkspaceLayout.minimumEditorHeight,
@@ -482,6 +494,7 @@ private struct ProfileEditorActions: View {
                 HStack(spacing: 10) {
                     Button("profile.action.format") { model.format() }
                         .accessibilityIdentifier("profile.action.format")
+                        .disabled(!model.canEditConfiguration)
                     ProfileMoreActions(
                         profile: profile,
                         model: model,
@@ -504,6 +517,7 @@ private struct ProfileEditorActions: View {
     private var actions: some View {
         Button("profile.action.format") { model.format() }
             .accessibilityIdentifier("profile.action.format")
+            .disabled(!model.canEditConfiguration)
         Text("profile.history.available") + Text(" \(profile.validRevision)")
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -522,7 +536,7 @@ private struct ProfileEditorActions: View {
         Button("profile.action.save") { model.save() }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut("s")
-            .disabled(!model.isDirty)
+            .disabled(!model.isDirty || !model.canEditConfiguration)
             .accessibilityIdentifier("profile.action.save")
     }
 }
