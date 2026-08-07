@@ -8,9 +8,10 @@ final class BackendLifecycleModel {
     private let engineInstaller: (any EngineInstalling)?
     private let serviceManager: (any ServiceLifecycleManaging)?
     private let serviceTester: (any ServiceConnectionTesting)?
-    private let systemProxyClient = TargetServiceXPCClient()
+    private let systemProxyClient: any SystemProxyClient
+    private let runtimeOperations: any TargetRuntimeOperating
     private var operationTask: Task<Void, Never>?
-    private let hostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode
+    private let hostNetworkSafetyMode: HostNetworkSafetyMode
     private let cancellationReconciliationTimeout = Duration.milliseconds(250)
 
     private(set) var status: BackendStatus
@@ -21,11 +22,23 @@ final class BackendLifecycleModel {
     private(set) var pingResult: String?
     private(set) var systemProxyStatus = SystemProxyStatus.disabled
 
-    init(backend: any EngineBackend = SingBoxBackend()) {
+    init(
+        backend: any EngineBackend = SingBoxBackend(),
+        systemProxyClient: any SystemProxyClient = TargetServiceXPCClient(),
+        runtimeOperations: (any TargetRuntimeOperating)? = nil,
+        hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode
+    ) {
         self.backend = backend
         self.engineInstaller = backend as? any EngineInstalling
         self.serviceManager = backend as? any ServiceLifecycleManaging
         self.serviceTester = backend as? any ServiceConnectionTesting
+        self.systemProxyClient = systemProxyClient
+        self.runtimeOperations = runtimeOperations ?? TargetRuntimeOperations(
+            backend: backend,
+            systemProxyClient: systemProxyClient,
+            hostNetworkSafetyMode: hostNetworkSafetyMode
+        )
+        self.hostNetworkSafetyMode = hostNetworkSafetyMode
         self.status = .mockDefault
         self.serviceInstallation = TargetServiceRegistration.status
         self.xpcState = .unknown
@@ -249,24 +262,24 @@ final class BackendLifecycleModel {
         }
         lifecycleState = .stopping
         error = nil
+        let runtimeOperations = runtimeOperations
         operationTask = Task { [weak self, backend] in
             do {
-                let status = try await backend.stopEngine()
+                let result = try await runtimeOperations.stopEngineSafely()
                 if Task.isCancelled {
                     await self?.finishCancellation(afterReconciling: backend)
                     return
                 }
-                self?.finish(with: status)
+                if let proxyStatus = result.systemProxyStatus {
+                    self?.systemProxyStatus = proxyStatus
+                }
+                self?.finish(with: result.engineStatus)
             } catch is CancellationError {
                 await self?.finishCancellation(afterReconciling: backend)
+            } catch let error as BackendError {
+                await self?.finishStopFailure(afterReconciling: backend, error: error)
             } catch {
-                self?.systemProxyStatus = SystemProxyStatus(
-                    state: .recoveryRequired,
-                    engineReachable: true,
-                    affectedServiceCount: self?.systemProxyStatus.affectedServiceCount ?? 0,
-                    error: .recoveryFailed
-                )
-                self?.finish(with: .serviceUnavailable)
+                await self?.finishStopFailure(afterReconciling: backend, error: .serviceUnavailable)
             }
         }
     }
@@ -276,9 +289,13 @@ final class BackendLifecycleModel {
         lifecycleState = .stopping
         error = nil
         let backend = backend
+        let runtimeOperations = runtimeOperations
         operationTask = Task { [weak self] in
             do {
-                _ = try await backend.stopEngine()
+                let stopResult = try await runtimeOperations.stopEngineSafely()
+                if let proxyStatus = stopResult.systemProxyStatus {
+                    self?.systemProxyStatus = proxyStatus
+                }
                 try Task.checkCancellation()
                 self?.lifecycleState = .starting
                 let status = try await backend.startEngine()
@@ -290,9 +307,9 @@ final class BackendLifecycleModel {
             } catch is CancellationError {
                 await self?.finishCancellation(afterReconciling: backend)
             } catch let error as BackendError {
-                self?.finish(with: error)
+                await self?.finishStopFailure(afterReconciling: backend, error: error)
             } catch {
-                self?.finish(with: .serviceUnavailable)
+                await self?.finishStopFailure(afterReconciling: backend, error: .serviceUnavailable)
             }
         }
     }
@@ -309,8 +326,8 @@ final class BackendLifecycleModel {
 
     func stopOnApplicationTermination() {
         guard status.engineState == .running else { return }
-        Task { [backend] in
-            _ = try? await backend.stopEngine()
+        Task { [runtimeOperations] in
+            _ = try? await runtimeOperations.stopEngineSafely()
         }
     }
 
@@ -392,7 +409,24 @@ final class BackendLifecycleModel {
         } else {
             lifecycleState = .failed(.operationCancelled)
         }
+        if hostNetworkSafetyMode.permitsNetworkWrites {
+            await loadSystemProxyStatus()
+        }
         error = .operationCancelled
+        operationTask = nil
+    }
+
+    private func finishStopFailure(afterReconciling backend: any EngineBackend, error: BackendError) async {
+        if let currentStatus = await reconciledStatus(from: backend) {
+            status = currentStatus
+            lifecycleState = .settled(from: currentStatus)
+        } else {
+            lifecycleState = .failed(error)
+        }
+        if hostNetworkSafetyMode.permitsNetworkWrites {
+            await loadSystemProxyStatus()
+        }
+        self.error = error
         operationTask = nil
     }
 

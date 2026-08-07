@@ -179,8 +179,13 @@ final class AutomationControlPlaneTests: XCTestCase {
         for (serviceCode, expected) in [
             (100, "proxy_safe_mode_blocked"),
             (101, "proxy_conflict"),
+            (102, "proxy_no_active_service"),
             (103, "proxy_engine_unavailable"),
+            (104, "proxy_snapshot_failed"),
+            (105, "proxy_snapshot_owner_invalid"),
             (106, "proxy_external_change_conflict"),
+            (107, "proxy_apply_failed"),
+            (108, "proxy_verification_failed"),
             (109, "proxy_recovery_failed"),
             (999, "service_operation_failed")
         ] {

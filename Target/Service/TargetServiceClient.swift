@@ -62,7 +62,7 @@ enum TargetServiceBundleLocation {
     }
 }
 
-final class TargetServiceXPCClient {
+final class TargetServiceXPCClient: SystemProxyClient, @unchecked Sendable {
     func makeConnection() -> NSXPCConnection {
         let connection = NSXPCConnection(
             machServiceName: TargetServiceIdentifiers.machService,

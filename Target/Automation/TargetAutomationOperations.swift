@@ -3,18 +3,24 @@ import Foundation
 actor TargetAutomationOperations {
     private let profileStore: ProfileStore
     private let backend: any EngineBackend
-    private let serviceClient: TargetServiceXPCClient
+    private let serviceClient: any SystemProxyClient
+    private let runtimeOperations: any TargetRuntimeOperating
     private let engineStatusObserver: (@Sendable (BackendStatus) async -> Void)?
 
     init(
         profileStore: ProfileStore = ProfileStore(),
         backend: any EngineBackend = SingBoxBackend(),
-        serviceClient: TargetServiceXPCClient = TargetServiceXPCClient(),
+        serviceClient: any SystemProxyClient = TargetServiceXPCClient(),
+        runtimeOperations: (any TargetRuntimeOperating)? = nil,
         engineStatusObserver: (@Sendable (BackendStatus) async -> Void)? = nil
     ) {
         self.profileStore = profileStore
         self.backend = backend
         self.serviceClient = serviceClient
+        self.runtimeOperations = runtimeOperations ?? TargetRuntimeOperations(
+            backend: backend,
+            systemProxyClient: serviceClient
+        )
         self.engineStatusObserver = engineStatusObserver
     }
 
@@ -51,6 +57,8 @@ actor TargetAutomationOperations {
             return profileStoreFailure(error)
         } catch let error as BackendError {
             return backendFailure(error)
+        } catch let error as SystemProxyError {
+            return serviceFailure(xpcError(error).code)
         } catch let error as NSError where error.domain == "com.jason312928.Target.TargetService" {
             return serviceFailure(error.code)
         } catch {
@@ -139,9 +147,9 @@ actor TargetAutomationOperations {
     }
 
     private func engineStop() async throws -> AutomationResponse {
-        let status = try await backend.stopEngine()
-        await engineStatusObserver?(status)
-        return engineResult(status)
+        let result = try await runtimeOperations.stopEngineSafely()
+        await engineStatusObserver?(result.engineStatus)
+        return engineResult(result.engineStatus)
     }
 
     private func engineResult(_ status: BackendStatus) -> AutomationResponse {

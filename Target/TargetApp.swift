@@ -8,11 +8,22 @@ struct TargetApp: App {
     init() {
         let profileStore = ProfileStore()
         let backend = SingBoxBackend(profileStore: profileStore)
-        let lifecycle = BackendLifecycleModel(backend: backend)
+        let systemProxyClient = TargetServiceXPCClient()
+        let runtimeOperations = TargetRuntimeOperations(
+            backend: backend,
+            systemProxyClient: systemProxyClient
+        )
+        let lifecycle = BackendLifecycleModel(
+            backend: backend,
+            systemProxyClient: systemProxyClient,
+            runtimeOperations: runtimeOperations
+        )
         _lifecycle = State(initialValue: lifecycle)
         let operations = TargetAutomationOperations(
             profileStore: profileStore,
             backend: backend,
+            serviceClient: systemProxyClient,
+            runtimeOperations: runtimeOperations,
             engineStatusObserver: { status in
                 await MainActor.run { lifecycle.applyAutomationEngineStatus(status) }
             }

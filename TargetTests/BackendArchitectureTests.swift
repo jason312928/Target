@@ -184,11 +184,14 @@ final class BackendArchitectureTests: XCTestCase {
         await XCTAssertThrowsErrorAsync(try await coordinator.recoverSystemProxy()) { error in
             XCTAssertEqual(error as? SystemProxyError, .externalModificationConflict)
         }
+        XCTAssertEqual(try system.proxySettings(for: "service-a"), ["HTTPEnable": .integer(0)])
+        XCTAssertNotNil(try store.load())
         let foreign = SystemProxyRecoveryRecord(owner: "foreign", snapshots: [], writtenSettings: [:])
         try store.save(foreign)
         await XCTAssertThrowsErrorAsync(try await coordinator.recoverSystemProxy()) { error in
             XCTAssertEqual(error as? SystemProxyError, .invalidSnapshotOwner)
         }
+        XCTAssertEqual(try store.load(), foreign)
     }
 
     func testNoSnapshotDisablesRecovery() async throws {
