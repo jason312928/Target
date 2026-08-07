@@ -51,6 +51,8 @@ actor TargetAutomationOperations {
             return profileStoreFailure(error)
         } catch let error as BackendError {
             return backendFailure(error)
+        } catch let error as NSError where error.domain == "com.jason312928.Target.TargetService" {
+            return serviceFailure(error.code)
         } catch {
             return .failure(code: "operation_failed", message: "The operation could not be completed.")
         }
@@ -190,6 +192,24 @@ actor TargetAutomationOperations {
             "recoveryRequired": .boolean(status.state == .recoveryRequired),
             "systemProxyState": .string(status.state.rawValue)
         ]))
+    }
+
+    func serviceFailure(_ code: Int) -> AutomationResponse {
+        let stableCode: String
+        switch code {
+        case 100: stableCode = "proxy_safe_mode_blocked"
+        case 101: stableCode = "proxy_conflict"
+        case 102: stableCode = "proxy_no_active_service"
+        case 103: stableCode = "proxy_engine_unavailable"
+        case 104: stableCode = "proxy_snapshot_failed"
+        case 105: stableCode = "proxy_snapshot_owner_invalid"
+        case 106: stableCode = "proxy_external_change_conflict"
+        case 107: stableCode = "proxy_apply_failed"
+        case 108: stableCode = "proxy_verification_failed"
+        case 109: stableCode = "proxy_recovery_failed"
+        default: stableCode = "service_operation_failed"
+        }
+        return .failure(code: stableCode, message: "The privileged service operation failed safely.")
     }
 
     private func profileTransferFailure(_ error: ProfileTransferError) -> AutomationResponse {

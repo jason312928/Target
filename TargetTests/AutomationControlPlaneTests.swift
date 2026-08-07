@@ -174,6 +174,23 @@ final class AutomationControlPlaneTests: XCTestCase {
         XCTAssertTrue(try store.configurationText(for: profiles[0].id).contains(secretFixture))
     }
 
+    func testPrivilegedServiceErrorsUseStableRedactedCodes() async {
+        let operations = makeOperations(root: temporaryRoot())
+        for (serviceCode, expected) in [
+            (100, "proxy_safe_mode_blocked"),
+            (101, "proxy_conflict"),
+            (103, "proxy_engine_unavailable"),
+            (106, "proxy_external_change_conflict"),
+            (109, "proxy_recovery_failed"),
+            (999, "service_operation_failed")
+        ] {
+            let response = await operations.serviceFailure(serviceCode)
+            XCTAssertFalse(response.ok)
+            XCTAssertEqual(response.error?.code, expected)
+            XCTAssertFalse(String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self).contains("NSError"))
+        }
+    }
+
     func testTargetctlBinaryHasNoProfileStoreOrKeychainSymbols() throws {
         let executable = Bundle.main.bundleURL.appending(path: "Contents/Helpers/targetctl")
         let binary = try Data(contentsOf: executable)
