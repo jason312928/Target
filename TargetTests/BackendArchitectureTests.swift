@@ -216,6 +216,103 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertNil(endpoint)
     }
 
+    func testCrossUIDRuntimeStoreAcceptsOnlyFixedOwnedRuntime() throws {
+        let fixture = try CrossUIDRuntimeFixture()
+        defer { fixture.remove() }
+        let store = UserEngineRuntimeStore(uid: geteuid(), homeDirectory: fixture.home)
+        XCTAssertEqual(try store.load(), fixture.record)
+    }
+
+    func testCrossUIDRuntimeStoreRejectsWrongUID() throws {
+        let fixture = try CrossUIDRuntimeFixture()
+        defer { fixture.remove() }
+        let store = UserEngineRuntimeStore(uid: geteuid() &+ 1, homeDirectory: fixture.home)
+        XCTAssertThrowsError(try store.load())
+    }
+
+    func testServicePeerAuthorizationRejectsRootAndUnrelatedUser() {
+        XCTAssertTrue(TargetServicePeerAuthorization.allows(peerUID: 501, consoleUID: 501))
+        XCTAssertFalse(TargetServicePeerAuthorization.allows(peerUID: 0, consoleUID: 0))
+        XCTAssertFalse(TargetServicePeerAuthorization.allows(peerUID: 502, consoleUID: 501))
+    }
+
+    func testCrossUIDRuntimeStoreRejectsWrongExecutableAndArbitraryPath() throws {
+        let fixture = try CrossUIDRuntimeFixture(executablePath: "/private/etc/hosts")
+        defer { fixture.remove() }
+        let store = UserEngineRuntimeStore(uid: geteuid(), homeDirectory: fixture.home)
+        XCTAssertThrowsError(try store.load())
+    }
+
+    func testCrossUIDRuntimeStoreRejectsSymlinkedRecord() throws {
+        let fixture = try CrossUIDRuntimeFixture()
+        defer { fixture.remove() }
+        let external = fixture.home.appending(path: "external.json")
+        try FileManager.default.moveItem(at: fixture.recordURL, to: external)
+        try FileManager.default.createSymbolicLink(at: fixture.recordURL, withDestinationURL: external)
+        let store = UserEngineRuntimeStore(uid: geteuid(), homeDirectory: fixture.home)
+        XCTAssertThrowsError(try store.load())
+    }
+
+    func testCrossUIDRuntimeStoreIsReadOnly() throws {
+        let fixture = try CrossUIDRuntimeFixture()
+        defer { fixture.remove() }
+        let store = UserEngineRuntimeStore(uid: geteuid(), homeDirectory: fixture.home)
+        XCTAssertThrowsError(try store.save(fixture.record))
+        XCTAssertThrowsError(try store.clear())
+    }
+
+    func testCrossUIDOwnershipRejectsWrongPID() async throws {
+        let fixture = try CrossUIDRuntimeFixture(pid: Int32.max)
+        defer { fixture.remove() }
+        let ownership = EngineRuntimeOwnership(
+            store: UserEngineRuntimeStore(uid: geteuid(), homeDirectory: fixture.home),
+            processInspector: FixedEngineProcessInspector(shouldMatch: true),
+            portProbe: FixedEnginePortProbe(listening: true)
+        )
+        guard case .processExited = try await ownership.recordDisposition() else {
+            return XCTFail("A missing PID must not produce an owned endpoint")
+        }
+    }
+
+    func testCrossUIDOwnershipRejectsWrongExecutableProof() async throws {
+        let fixture = try CrossUIDRuntimeFixture(pid: getpid())
+        defer { fixture.remove() }
+        let ownership = EngineRuntimeOwnership(
+            store: UserEngineRuntimeStore(uid: geteuid(), homeDirectory: fixture.home),
+            processInspector: FixedEngineProcessInspector(shouldMatch: false),
+            portProbe: FixedEnginePortProbe(listening: true)
+        )
+        guard case .liveUnproven = try await ownership.recordDisposition() else {
+            return XCTFail("An executable mismatch must remain live but unproven")
+        }
+    }
+
+    func testCrossUIDOwnershipRejectsWrongSHA() async throws {
+        let fixture = try CrossUIDRuntimeFixture(pid: getpid(), executableFingerprint: "wrong")
+        defer { fixture.remove() }
+        let ownership = EngineRuntimeOwnership(
+            store: UserEngineRuntimeStore(uid: geteuid(), homeDirectory: fixture.home),
+            processInspector: FixedEngineProcessInspector(shouldMatch: true),
+            portProbe: FixedEnginePortProbe(listening: true)
+        )
+        guard case .liveUnproven = try await ownership.recordDisposition() else {
+            return XCTFail("A fingerprint mismatch must remain live but unproven")
+        }
+    }
+
+    func testCrossUIDOwnershipRejectsMissingListener() async throws {
+        let fixture = try CrossUIDRuntimeFixture(pid: getpid())
+        defer { fixture.remove() }
+        let ownership = EngineRuntimeOwnership(
+            store: UserEngineRuntimeStore(uid: geteuid(), homeDirectory: fixture.home),
+            processInspector: FixedEngineProcessInspector(shouldMatch: true),
+            portProbe: FixedEnginePortProbe(listening: false)
+        )
+        guard case .liveUnproven = try await ownership.recordDisposition() else {
+            return XCTFail("A missing listener must remain live but unproven")
+        }
+    }
+
     func testDynamicPortSelectorReturnsHighPort() throws {
         XCTAssertGreaterThanOrEqual(try DynamicHighLocalPortSelector().selectAvailablePort(), LocalEngineEndpoint.minimumDynamicPort)
     }
@@ -555,6 +652,50 @@ private final class FixedEngineRuntimeStore: EngineRuntimeStoring, @unchecked Se
     func load() throws -> EngineRuntimeRecord? { record }
     func save(_ record: EngineRuntimeRecord) throws { XCTFail("Unexpected runtime record write") }
     func clear() throws { XCTFail("Unexpected runtime record removal") }
+}
+
+private final class CrossUIDRuntimeFixture {
+    let home: URL
+    let recordURL: URL
+    let record: EngineRuntimeRecord
+
+    init(
+        pid: Int32 = 42,
+        executablePath: String? = nil,
+        executableFingerprint: String? = nil
+    ) throws {
+        home = FileManager.default.temporaryDirectory
+            .appending(path: "TargetCrossUID-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let runtime = home
+            .appending(path: "Library/Application Support/Target/sing-box", directoryHint: .isDirectory)
+        let executable = runtime.appending(path: "bin/sing-box")
+        recordURL = runtime.appending(path: "runtime.json")
+        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("test executable".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let fingerprint: String
+        if let executableFingerprint {
+            fingerprint = executableFingerprint
+        } else {
+            fingerprint = try EngineExecutableFingerprint.sha256(of: executable)
+        }
+        record = EngineRuntimeRecord(
+            pid: pid,
+            executablePath: executablePath ?? executable.path,
+            executableFingerprint: fingerprint,
+            endpoint: LocalEngineEndpoint(port: 51_234),
+            profileID: UUID(),
+            profileRevision: 1,
+            sourceConfigurationFingerprint: "source",
+            configurationFingerprint: "runtime",
+            startedAt: Date(),
+            runtimeConfigurationID: UUID()
+        )
+        try JSONEncoder().encode(record).write(to: recordURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: recordURL.path)
+    }
+
+    func remove() { try? FileManager.default.removeItem(at: home) }
 }
 
 private struct FixedEngineProcessInspector: EngineProcessInspecting {

@@ -48,6 +48,139 @@ protocol EngineRuntimeStoring: Sendable {
     func clear() throws
 }
 
+enum UserEngineRuntimeStoreError: Error {
+    case invalidUser
+    case unsafePath
+    case unsupportedMutation
+}
+
+/// Root-side, read-only view of one authenticated XPC user's fixed Target runtime.
+/// No path, PID, port, or executable location is accepted from the caller.
+final class UserEngineRuntimeStore: EngineRuntimeStoring, @unchecked Sendable {
+    static let maximumRecordSize: off_t = 64 * 1_024
+
+    private let uid: uid_t
+    private let homeDirectory: URL
+    private let runtimeDirectory: URL
+    private let recordURL: URL
+    private let executableURL: URL
+
+    convenience init?(uid: uid_t) {
+        guard uid != 0, let home = Self.homeDirectory(for: uid) else { return nil }
+        self.init(uid: uid, homeDirectory: home)
+    }
+
+    init(uid: uid_t, homeDirectory: URL) {
+        self.uid = uid
+        self.homeDirectory = homeDirectory
+        runtimeDirectory = homeDirectory
+            .appending(path: "Library", directoryHint: .isDirectory)
+            .appending(path: "Application Support", directoryHint: .isDirectory)
+            .appending(path: "Target", directoryHint: .isDirectory)
+            .appending(path: "sing-box", directoryHint: .isDirectory)
+        recordURL = runtimeDirectory.appending(path: "runtime.json")
+        executableURL = runtimeDirectory.appending(path: "bin/sing-box")
+    }
+
+    func load() throws -> EngineRuntimeRecord? {
+        let runtimeDescriptor = try openRuntimeDirectory()
+        defer { close(runtimeDescriptor) }
+        let descriptor = openat(runtimeDescriptor, "runtime.json", O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        if descriptor < 0, errno == ENOENT { return nil }
+        guard descriptor >= 0 else { throw UserEngineRuntimeStoreError.unsafePath }
+        defer { close(descriptor) }
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              metadata.st_uid == uid,
+              metadata.st_mode & S_IFMT == S_IFREG,
+              metadata.st_mode & 0o077 == 0,
+              metadata.st_size > 0,
+              metadata.st_size <= Self.maximumRecordSize else {
+            throw UserEngineRuntimeStoreError.unsafePath
+        }
+        let data = try FileHandle(fileDescriptor: descriptor, closeOnDealloc: false).readToEnd()
+        guard let data, data.count <= Self.maximumRecordSize else {
+            throw UserEngineRuntimeStoreError.unsafePath
+        }
+        let record = try JSONDecoder().decode(EngineRuntimeRecord.self, from: data)
+        guard record.executablePath == executableURL.path else {
+            throw UserEngineRuntimeStoreError.unsafePath
+        }
+        let binDescriptor = try openOwnedDirectory(named: "bin", relativeTo: runtimeDescriptor)
+        defer { close(binDescriptor) }
+        let executableDescriptor = openat(binDescriptor, "sing-box", O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard executableDescriptor >= 0 else { throw UserEngineRuntimeStoreError.unsafePath }
+        defer { close(executableDescriptor) }
+        var executable = stat()
+        guard fstat(executableDescriptor, &executable) == 0,
+              executable.st_uid == uid,
+              executable.st_mode & S_IFMT == S_IFREG,
+              executable.st_mode & 0o022 == 0 else {
+            throw UserEngineRuntimeStoreError.unsafePath
+        }
+        return record
+    }
+
+    func save(_ record: EngineRuntimeRecord) throws {
+        throw UserEngineRuntimeStoreError.unsupportedMutation
+    }
+
+    func clear() throws {
+        throw UserEngineRuntimeStoreError.unsupportedMutation
+    }
+
+    private func openRuntimeDirectory() throws -> Int32 {
+        var descriptor = open(homeDirectory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw UserEngineRuntimeStoreError.unsafePath }
+        do {
+            try validateOwnedDirectory(descriptor)
+            for component in ["Library", "Application Support", "Target", "sing-box"] {
+                let next = try openOwnedDirectory(named: component, relativeTo: descriptor)
+                close(descriptor)
+                descriptor = next
+            }
+            return descriptor
+        } catch {
+            close(descriptor)
+            throw error
+        }
+    }
+
+    private func openOwnedDirectory(named name: String, relativeTo parent: Int32) throws -> Int32 {
+        let descriptor = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw UserEngineRuntimeStoreError.unsafePath }
+        do {
+            try validateOwnedDirectory(descriptor)
+            return descriptor
+        } catch {
+            close(descriptor)
+            throw error
+        }
+    }
+
+    private func validateOwnedDirectory(_ descriptor: Int32) throws {
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              metadata.st_uid == uid,
+              metadata.st_mode & S_IFMT == S_IFDIR,
+              metadata.st_mode & 0o022 == 0 else {
+            throw UserEngineRuntimeStoreError.unsafePath
+        }
+    }
+
+    private static func homeDirectory(for uid: uid_t) -> URL? {
+        var entry = passwd()
+        var result: UnsafeMutablePointer<passwd>?
+        var buffer = [CChar](repeating: 0, count: Int(sysconf(_SC_GETPW_R_SIZE_MAX) > 0 ? sysconf(_SC_GETPW_R_SIZE_MAX) : 16_384))
+        guard getpwuid_r(uid, &entry, &buffer, buffer.count, &result) == 0,
+              result != nil,
+              let home = entry.pw_dir else { return nil }
+        let path = String(cString: home)
+        guard path.hasPrefix("/Users/"), !path.contains("/../") else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+}
+
 final class FileEngineRuntimeStore: EngineRuntimeStoring, @unchecked Sendable {
     private let fileURL: URL
 

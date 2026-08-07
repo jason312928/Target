@@ -1,19 +1,26 @@
 import Foundation
+import SystemConfiguration
 
 private final class TargetServiceServer: NSObject, NSXPCListenerDelegate {
     private let listener = NSXPCListener(machServiceName: TargetServiceIdentifiers.machService)
-    private let endpoint = TargetServiceEndpoint()
 
     func run() {
         listener.delegate = self
-        endpoint.start()
         listener.resume()
         RunLoop.current.run()
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+        let peerUID = connection.effectiveUserIdentifier
+        var consoleUID: uid_t = 0
+        guard SCDynamicStoreCopyConsoleUser(nil, &consoleUID, nil) != nil,
+              TargetServicePeerAuthorization.allows(peerUID: peerUID, consoleUID: consoleUID),
+              let store = UserEngineRuntimeStore(uid: peerUID) else { return false }
+        let ownership = EngineRuntimeOwnership(store: store)
+        let endpoint = TargetServiceEndpoint(runtimeOwnership: ownership)
         connection.exportedInterface = NSXPCInterface(with: TargetServiceXPCProtocol.self)
         connection.exportedObject = endpoint
+        endpoint.start()
         connection.resume()
         return true
     }
@@ -23,7 +30,14 @@ private let server = TargetServiceServer()
 server.run()
 
 private final class TargetServiceEndpoint: NSObject, TargetServiceXPCProtocol {
-    private let systemProxy = SystemProxyCoordinator()
+    private let systemProxy: SystemProxyCoordinator
+
+    init(runtimeOwnership: EngineRuntimeOwnership) {
+        systemProxy = SystemProxyCoordinator(
+            portProbe: TargetOwnedPortProbe(runtimeOwnership: runtimeOwnership),
+            endpointProvider: { await runtimeOwnership.ownedEndpoint() }
+        )
+    }
 
     func start() {
         Task { await systemProxy.start() }

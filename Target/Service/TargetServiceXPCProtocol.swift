@@ -6,6 +6,12 @@ enum TargetServiceIdentifiers {
     static let snapshotOwner = "com.jason312928.Target.system-proxy-snapshot.v1"
 }
 
+enum TargetServicePeerAuthorization {
+    static func allows(peerUID: uid_t, consoleUID: uid_t) -> Bool {
+        peerUID != 0 && peerUID == consoleUID
+    }
+}
+
 /// Deliberately narrow XPC contract. No shell, command, path, or process APIs are exposed.
 @objc(TargetServiceXPCProtocol)
 protocol TargetServiceXPCProtocol: NSObjectProtocol {
