@@ -318,6 +318,24 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.listProfiles()) { XCTAssertEqual($0 as? ProfileStoreError, .invalidStoredMetadata) }
     }
 
+    func testEmptyStoreRepairsAuthenticatedStaleSelection() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let store = ProfileStore(rootDirectory: root, keyProvider: keys)
+        XCTAssertEqual(try store.listProfiles(), [])
+        let storage = ProfileEncryptedStorage(root: root, keyProvider: keys)
+        try storage.write(
+            try JSONEncoder().encode(UUID().uuidString),
+            kind: .selection,
+            logicalPath: "selected-profile.json",
+            url: root.appending(path: "selected-profile.json")
+        )
+
+        let reopened = ProfileStore(rootDirectory: root, keyProvider: keys)
+        XCTAssertEqual(try reopened.listProfiles(), [])
+        XCTAssertNil(try reopened.selectedProfileID())
+    }
+
     func testListProfilesRejectsAuthenticatedSelectionOutsideManifest() throws {
         let root = try temporaryDirectory()
         let keys = TestProfileKeyProvider()
@@ -330,7 +348,7 @@ final class ProfileStoreTests: XCTestCase {
             logicalPath: "selected-profile.json",
             url: root.appending(path: "selected-profile.json")
         )
-        XCTAssertThrowsError(try store.listProfiles()) { XCTAssertEqual($0 as? ProfileStoreError, .invalidStoredMetadata) }
+        XCTAssertThrowsError(try store.listProfiles()) { XCTAssertEqual($0 as? ProfileStoreError, .invalidStoredSelection) }
     }
 
     func testListProfilesRejectsAuthenticatedDuplicateProfileIDs() throws {

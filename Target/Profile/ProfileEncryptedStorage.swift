@@ -117,7 +117,12 @@ final class ProfileEncryptedStorage {
         let marker = root.appending(path: Self.markerName)
         if fileManager.fileExists(atPath: marker.path) {
             try setDirectoryPermissions(root)
-            _ = try validateEncryptedTree()
+            do {
+                _ = try validateEncryptedTree()
+            } catch ProfileStoreError.invalidStoredSelection {
+                try repairAuthenticatedEmptyStoreSelection()
+                _ = try validateEncryptedTree()
+            }
             try removeStagingAfterAuthoritativeLiveValidation()
             return
         }
@@ -283,7 +288,7 @@ final class ProfileEncryptedStorage {
         }
 
         let selectionData = try authenticatedRecord(at: selectionURL, kind: .selection, logicalPath: Self.selectionName)
-        let selectedProfileID = try decodeSelection(selectionData, allowedProfileIDs: Set(profileIDs), failure: .invalidStoredMetadata)
+        let selectedProfileID = try decodeSelection(selectionData, allowedProfileIDs: Set(profileIDs), failure: .invalidStoredSelection)
         let expectedRootEntries = Set([Self.markerName, Self.manifestName, Self.selectionName] + profileIDs.map(\.uuidString))
         let rootEntries = try directoryEntries(root, failure: .mixedOrDowngradedStorage)
         guard Set(rootEntries.map(\.lastPathComponent)) == expectedRootEntries else {
@@ -332,6 +337,40 @@ final class ProfileEncryptedStorage {
             selectionData: selectionData,
             selectedProfileID: selectedProfileID,
             records: records
+        )
+    }
+
+    /// A stale authenticated selection cannot identify user data when the
+    /// authenticated manifest is empty and the root contains no Profile records.
+    /// Canonicalize only that exact state; every nonempty or ambiguous tree still
+    /// fails closed.
+    private func repairAuthenticatedEmptyStoreSelection() throws {
+        let marker = root.appending(path: Self.markerName)
+        let manifestURL = root.appending(path: Self.manifestName)
+        let selectionURL = root.appending(path: Self.selectionName)
+        try requireRegularFile(marker, failure: .mixedOrDowngradedStorage)
+        try verifyMarker(marker)
+        try requireExistingKey()
+        try requireRegularFile(manifestURL, failure: .mixedOrDowngradedStorage)
+        try requireRegularFile(selectionURL, failure: .mixedOrDowngradedStorage)
+        let manifestData = try authenticatedRecord(at: manifestURL, kind: .manifest, logicalPath: Self.manifestName)
+        guard let profiles = try? JSONDecoder().decode([Profile].self, from: manifestData), profiles.isEmpty else {
+            throw ProfileStoreError.invalidStoredSelection
+        }
+        let entries = try directoryEntries(root, failure: .mixedOrDowngradedStorage)
+        guard Set(entries.map(\.lastPathComponent)) == [Self.markerName, Self.manifestName, Self.selectionName] else {
+            throw ProfileStoreError.mixedOrDowngradedStorage
+        }
+        let selectionData = try authenticatedRecord(at: selectionURL, kind: .selection, logicalPath: Self.selectionName)
+        let selected: String?
+        do { selected = try JSONDecoder().decode(String?.self, from: selectionData) }
+        catch { throw ProfileStoreError.invalidStoredSelection }
+        guard let selected, UUID(uuidString: selected) != nil else { throw ProfileStoreError.invalidStoredSelection }
+        try write(
+            try JSONEncoder().encode(String?.none),
+            kind: .selection,
+            logicalPath: Self.selectionName,
+            url: selectionURL
         )
     }
 

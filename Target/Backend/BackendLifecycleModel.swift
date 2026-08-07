@@ -314,6 +314,13 @@ final class BackendLifecycleModel {
         }
     }
 
+    func applyAutomationEngineStatus(_ engineStatus: BackendStatus) {
+        guard !isBusy else { return }
+        status = engineStatus
+        lifecycleState = .settled(from: engineStatus)
+        error = nil
+    }
+
     private func begin(
         _ operation: BackendOperation,
         action: @escaping @Sendable (any EngineBackend) async throws -> BackendStatus

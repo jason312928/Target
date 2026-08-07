@@ -105,6 +105,7 @@ enum ProfileStoreError: LocalizedError, Equatable {
     case invalidJSON(ConfigurationDiagnostic)
     case validationFailed(ConfigurationDiagnostic)
     case invalidStoredMetadata
+    case invalidStoredSelection
     case keychainReadFailed
     case encryptedStoreKeyMissing
     case invalidEncryptionKey
@@ -130,7 +131,7 @@ enum ProfileStoreError: LocalizedError, Equatable {
         case .invalidName: "A profile name is required."
         case .unsafePath: "The requested path is outside Target-managed storage."
         case .invalidJSON, .validationFailed: "The configuration could not be validated."
-        case .invalidStoredMetadata: "Profile metadata is invalid."
+        case .invalidStoredMetadata, .invalidStoredSelection: "Profile metadata is invalid."
         case .keychainReadFailed, .encryptedStoreKeyMissing, .invalidEncryptionKey,
              .encryptionFailed, .invalidEncryptedEnvelope, .unsupportedStorageVersion,
              .encryptedStorageAuthenticationFailed, .encryptedStorageAADMismatch,

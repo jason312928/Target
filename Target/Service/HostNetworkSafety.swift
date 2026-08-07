@@ -13,8 +13,10 @@ enum HostNetworkSafetyMode: Equatable, Sendable {
 enum TargetValidationPolicy {
 #if DEBUG && TARGET_UTM_VALIDATION
     static let hostNetworkSafetyMode = HostNetworkSafetyMode.authorizedNetworkTest
+    static let isUTMValidation = true
 #else
     static let hostNetworkSafetyMode = HostNetworkSafetyMode.safe
+    static let isUTMValidation = false
 #endif
 
     static var isHostSafeMode: Bool { !hostNetworkSafetyMode.permitsNetworkWrites }
