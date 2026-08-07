@@ -327,7 +327,7 @@ actor SystemProxyCoordinator {
     }
 
     func enableSystemProxy() async throws -> SystemProxyStatus {
-        try requireNetworkWritePermission()
+        try requireNetworkTakeoverPermission()
         guard let endpoint = await endpointProvider(), await portProbe.isAvailable() else {
             throw SystemProxyError.localProxyUnavailable
         }
@@ -372,7 +372,7 @@ actor SystemProxyCoordinator {
     }
 
     func disableSystemProxy() async throws -> SystemProxyStatus {
-        try requireNetworkWritePermission()
+        try requireAuthorizedNetworkWrite()
         guard let record = try recoveryStore.load() else {
             return SystemProxyStatus(state: .disabled, engineReachable: await portProbe.isAvailable(), affectedServiceCount: 0, error: nil, hasRecoverySnapshot: false)
         }
@@ -410,8 +410,12 @@ actor SystemProxyCoordinator {
         }
     }
 
-    private func requireNetworkWritePermission() throws {
+    private func requireAuthorizedNetworkWrite() throws {
         guard safetyMode.permitsNetworkWrites else { throw SystemProxyError.safeModeBlocked }
+    }
+
+    private func requireNetworkTakeoverPermission() throws {
+        try requireAuthorizedNetworkWrite()
         guard environment.inspect().mayTakeOverNetwork else { throw SystemProxyError.existingNetworkController }
     }
 

@@ -71,6 +71,27 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertEqual(try system.proxySettings(for: "service-a"), original)
     }
 
+    func testDisableRestoresManagedProxyEvenWhenEnvironmentNowReportsConfiguredProxy() async throws {
+        let original = ["HTTPEnable": SystemProxyValue.integer(0)]
+        let system = InMemorySystemProxySystem(serviceIDs: ["service-a"], settings: ["service-a": original])
+        let store = InMemoryRecoveryStore()
+        let probe = TogglePortProbe(available: true)
+        let enabling = testCoordinator(system: system, store: store, probe: probe)
+        _ = try await enabling.enableSystemProxy()
+
+        let disabling = SystemProxyCoordinator(
+            system: system,
+            recoveryStore: store,
+            portProbe: probe,
+            environment: FixedHostEnvironment(proxyConfigured: true, proxyApplicationRunning: false),
+            safetyMode: .authorizedNetworkTest,
+            endpointProvider: { LocalEngineEndpoint(port: 51_234) }
+        )
+        let status = try await disabling.disableSystemProxy()
+        XCTAssertEqual(status.state, .disabled)
+        XCTAssertEqual(try system.proxySettings(for: "service-a"), original)
+    }
+
     func testSystemProxyAutomaticallyRestoresWhenLocalPortDisappears() async throws {
         let original = ["HTTPEnable": SystemProxyValue.integer(0)]
         let system = InMemorySystemProxySystem(serviceIDs: ["service-a"], settings: ["service-a": original])
