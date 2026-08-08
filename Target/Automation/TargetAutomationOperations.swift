@@ -28,10 +28,12 @@ actor TargetAutomationOperations {
         self.profileStore = profileStore
         self.backend = backend
         self.serviceClient = serviceClient
-        self.systemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: serviceClient)
+        let resolvedSystemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: serviceClient)
+        self.systemProxyOperations = resolvedSystemProxyOperations
         self.runtimeOperations = runtimeOperations ?? TargetRuntimeOperations(
             backend: backend,
-            systemProxyClient: serviceClient
+            systemProxyClient: serviceClient,
+            systemProxyOperations: resolvedSystemProxyOperations
         )
         self.hostNetworkSafetyMode = hostNetworkSafetyMode
         self.engineStatusObserver = engineStatusObserver
@@ -171,14 +173,16 @@ actor TargetAutomationOperations {
     }
 
     private func engineStart() async throws -> AutomationResponse {
-        let status = try await backend.startEngine()
-        await engineStatusObserver?(status)
-        return engineResult(status)
+        let result = try await runtimeOperations.startEngine()
+        await engineStatusObserver?(result.engineStatus)
+        await observeSystemProxyStatus(result.systemProxyStatus)
+        return engineResult(result.engineStatus)
     }
 
     private func engineStop() async throws -> AutomationResponse {
         let result = try await runtimeOperations.stopEngineSafely()
         await engineStatusObserver?(result.engineStatus)
+        await observeSystemProxyStatus(result.systemProxyStatus)
         return engineResult(result.engineStatus)
     }
 

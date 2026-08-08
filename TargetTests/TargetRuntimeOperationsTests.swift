@@ -3,6 +3,77 @@ import XCTest
 
 @MainActor
 final class TargetRuntimeOperationsTests: XCTestCase {
+    func testStartCalibratesSystemProxyStatusAfterEngineStarts() async throws {
+        let backend = SafeStopBackend(initialStatus: stoppedBackendStatus())
+        let calibrated = SystemProxyStatus(
+            state: .disabled,
+            engineReachable: true,
+            affectedServiceCount: 0,
+            error: nil,
+            hasRecoverySnapshot: false
+        )
+        let proxy = SafeStopProxyClient(queryStatus: calibrated)
+        let sharedProxy = TargetSystemProxyOperations(client: proxy)
+        let operations = TargetRuntimeOperations(
+            backend: backend,
+            systemProxyClient: proxy,
+            systemProxyOperations: sharedProxy,
+            hostNetworkSafetyMode: .safe
+        )
+
+        let result = try await operations.startEngine()
+
+        XCTAssertEqual(result.engineStatus.engineState, .running)
+        XCTAssertEqual(result.systemProxyStatus, calibrated)
+        let startCount = await backend.startCount
+        let queryCount = await proxy.queryCount
+        XCTAssertEqual(startCount, 1)
+        XCTAssertEqual(queryCount, 1)
+    }
+
+    func testStartStatusQueryFailureKeepsEngineRunningAndFailsProxyAuthorityClosed() async throws {
+        let backend = SafeStopBackend(initialStatus: stoppedBackendStatus())
+        let proxy = SafeStopProxyClient(queryStatus: .disabled, queryError: .statusUnavailable)
+        let operations = TargetRuntimeOperations(
+            backend: backend,
+            systemProxyClient: proxy,
+            systemProxyOperations: TargetSystemProxyOperations(client: proxy),
+            hostNetworkSafetyMode: .safe
+        )
+
+        let result = try await operations.startEngine()
+
+        XCTAssertEqual(result.engineStatus.engineState, .running)
+        XCTAssertEqual(result.systemProxyStatus.state, .failed)
+        XCTAssertEqual(result.systemProxyStatus.error, .statusUnavailable)
+        XCTAssertFalse(result.systemProxyStatus.hasRecoverySnapshot)
+    }
+
+    func testStartStatusQueryFailurePreservesSharedRecoveryEvidence() async throws {
+        let backend = SafeStopBackend(initialStatus: stoppedBackendStatus())
+        let reconciled = SystemProxyStatus(
+            state: .failed,
+            engineReachable: false,
+            affectedServiceCount: 1,
+            error: .statusUnavailable,
+            hasRecoverySnapshot: true
+        )
+        let proxyOperation = StartProxyOperationStub(result: .failure(
+            TargetSystemProxyOperationError(operationError: .statusUnavailable, reconciledStatus: reconciled)
+        ))
+        let operations = TargetRuntimeOperations(
+            backend: backend,
+            systemProxyOperations: proxyOperation,
+            hostNetworkSafetyMode: .safe
+        )
+
+        let result = try await operations.startEngine()
+
+        XCTAssertEqual(result.engineStatus.engineState, .running)
+        XCTAssertEqual(result.systemProxyStatus, reconciled)
+        XCTAssertTrue(result.systemProxyStatus.hasRecoverySnapshot)
+    }
+
     func testNoManagedProxyStopsEngineExactlyOnce() async throws {
         let events = RuntimeEventRecorder()
         let backend = SafeStopBackend(events: events)
@@ -138,6 +209,30 @@ final class TargetRuntimeOperationsTests: XCTestCase {
         XCTAssertTrue(model.canStop)
     }
 
+    func testLifecycleModelStopPublishesReturnedProxyStatus() async throws {
+        let finalProxy = SystemProxyStatus(
+            state: .disabled,
+            engineReachable: false,
+            affectedServiceCount: 0,
+            error: nil,
+            hasRecoverySnapshot: false
+        )
+        let sharedOperation = RuntimeOperationSpy(result: .success(EngineStopResult(
+            engineStatus: stoppedBackendStatus(),
+            systemProxyStatus: finalProxy
+        )))
+        let model = BackendLifecycleModel(backend: SafeStopBackend(), runtimeOperations: sharedOperation)
+        model.applyAutomationEngineStatus(runningBackendStatus())
+        model.applyAutomationSystemProxyStatus(managedProxyStatus())
+
+        model.stop()
+        try await waitUntil { !model.isBusy }
+
+        XCTAssertEqual(model.status.engineState, .stopped)
+        XCTAssertEqual(model.systemProxyStatus, finalProxy)
+        XCTAssertNil(model.error)
+    }
+
     func testAutomationEngineStopUsesSharedOperationAndReturnsStableJSON() async {
         let backend = SafeStopBackend()
         let sharedOperation = RuntimeOperationSpy(result: .success(EngineStopResult(
@@ -157,6 +252,93 @@ final class TargetRuntimeOperationsTests: XCTestCase {
             String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self),
             #"{"error":null,"ok":true,"protocolVersion":1,"result":{"engineInstallation":"installed","engineState":"stopped","restartRequired":false,"selectedValidProfile":true}}"#
         )
+    }
+
+    func testAutomationEngineStopPublishesEngineAndReturnedProxyStatus() async {
+        let finalProxy = SystemProxyStatus(
+            state: .disabled,
+            engineReachable: false,
+            affectedServiceCount: 0,
+            error: nil,
+            hasRecoverySnapshot: false
+        )
+        let sharedOperation = RuntimeOperationSpy(result: .success(EngineStopResult(
+            engineStatus: stoppedBackendStatus(),
+            systemProxyStatus: finalProxy
+        )))
+        let model = BackendLifecycleModel(backend: SafeStopBackend(), runtimeOperations: sharedOperation)
+        model.applyAutomationEngineStatus(runningBackendStatus())
+        model.applyAutomationSystemProxyStatus(managedProxyStatus())
+        let operations = TargetAutomationOperations(
+            profileStore: testProfileStore(),
+            backend: SafeStopBackend(),
+            runtimeOperations: sharedOperation,
+            engineStatusObserver: { status in
+                await MainActor.run { model.applyAutomationEngineStatus(status) }
+            },
+            systemProxyStatusObserver: { status in
+                await MainActor.run { model.applyAutomationSystemProxyStatus(status) }
+            }
+        )
+
+        let response = await operations.handle(AutomationRequest(protocolVersion: 1, action: "engine.stop"))
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(model.status.engineState, .stopped)
+        XCTAssertEqual(model.systemProxyStatus, finalProxy)
+    }
+
+    func testGUIAndAutomationEngineStartPublishSameCalibratedProxyStatus() async throws {
+        let calibrated = SystemProxyStatus(
+            state: .disabled,
+            engineReachable: true,
+            affectedServiceCount: 0,
+            error: nil,
+            hasRecoverySnapshot: false
+        )
+        let startResult = EngineStartResult(engineStatus: runningBackendStatus(), systemProxyStatus: calibrated)
+        let sharedOperation = RuntimeOperationSpy(
+            result: .success(EngineStopResult(engineStatus: stoppedBackendStatus(), systemProxyStatus: .disabled)),
+            startResult: .success(startResult)
+        )
+        let model = BackendLifecycleModel(
+            backend: SafeStopBackend(initialStatus: stoppedBackendStatus()),
+            runtimeOperations: sharedOperation
+        )
+        model.applyAutomationEngineStatus(stoppedBackendStatus())
+        model.applyAutomationSystemProxyStatus(SystemProxyStatus(
+            state: .failed,
+            engineReachable: false,
+            affectedServiceCount: 0,
+            error: .localProxyUnavailable,
+            hasRecoverySnapshot: false
+        ))
+
+        model.start()
+        try await waitUntil { !model.isBusy }
+        XCTAssertEqual(model.status.engineState, .running)
+        XCTAssertEqual(model.systemProxyStatus, calibrated)
+
+        model.applyAutomationEngineStatus(stoppedBackendStatus())
+        model.applyAutomationSystemProxyStatus(.disabled)
+        let automation = TargetAutomationOperations(
+            profileStore: testProfileStore(),
+            backend: SafeStopBackend(initialStatus: stoppedBackendStatus()),
+            runtimeOperations: sharedOperation,
+            engineStatusObserver: { status in
+                await MainActor.run { model.applyAutomationEngineStatus(status) }
+            },
+            systemProxyStatusObserver: { status in
+                await MainActor.run { model.applyAutomationSystemProxyStatus(status) }
+            }
+        )
+        let response = await automation.handle(AutomationRequest(protocolVersion: 1, action: "engine.start"))
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(model.status.engineState, .running)
+        XCTAssertEqual(model.systemProxyStatus, calibrated)
+        let startCallCount = await sharedOperation.startCallCount
+        XCTAssertEqual(startCallCount, 2)
     }
 
     func testAutomationRestoreFailureUsesStableRedactedProxyError() async {
@@ -252,6 +434,7 @@ private actor SafeStopBackend: EngineBackend {
     private var status: BackendStatus
     private let events: RuntimeEventRecorder?
     private(set) var stopCount = 0
+    private(set) var startCount = 0
 
     init(initialStatus: BackendStatus = runningBackendStatus(), events: RuntimeEventRecorder? = nil) {
         status = initialStatus
@@ -260,7 +443,11 @@ private actor SafeStopBackend: EngineBackend {
 
     func queryStatus() async throws -> BackendStatus { status }
     func validateConfiguration(_ request: XPCConfigurationRequest) async throws {}
-    func startEngine() async throws -> BackendStatus { status }
+    func startEngine() async throws -> BackendStatus {
+        startCount += 1
+        status.engineState = .running
+        return status
+    }
 
     func stopEngine() async throws -> BackendStatus {
         stopCount += 1
@@ -336,14 +523,36 @@ private actor RuntimeGate {
 
 private actor RuntimeOperationSpy: TargetRuntimeOperating {
     private let result: Result<EngineStopResult, Error>
+    private let startResult: Result<EngineStartResult, Error>
     private(set) var callCount = 0
+    private(set) var startCallCount = 0
 
-    init(result: Result<EngineStopResult, Error>) { self.result = result }
+    init(
+        result: Result<EngineStopResult, Error>,
+        startResult: Result<EngineStartResult, Error> = .failure(BackendError.notImplemented)
+    ) {
+        self.result = result
+        self.startResult = startResult
+    }
+
+    func startEngine() async throws -> EngineStartResult {
+        startCallCount += 1
+        return try startResult.get()
+    }
 
     func stopEngineSafely() async throws -> EngineStopResult {
         callCount += 1
         return try result.get()
     }
+}
+
+private actor StartProxyOperationStub: TargetSystemProxyOperating {
+    private let result: Result<SystemProxyStatus, Error>
+    init(result: Result<SystemProxyStatus, Error>) { self.result = result }
+    func queryStatus() async throws -> SystemProxyStatus { try result.get() }
+    func enable() async throws -> SystemProxyStatus { try result.get() }
+    func disable() async throws -> SystemProxyStatus { try result.get() }
+    func recover() async throws -> SystemProxyStatus { try result.get() }
 }
 
 private struct RuntimePassingChecker: SingBoxConfigurationChecking {

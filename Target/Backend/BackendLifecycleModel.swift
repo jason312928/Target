@@ -35,10 +35,12 @@ final class BackendLifecycleModel {
         self.serviceManager = backend as? any ServiceLifecycleManaging
         self.serviceTester = backend as? any ServiceConnectionTesting
         self.systemProxyClient = systemProxyClient
-        self.systemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: systemProxyClient)
+        let resolvedSystemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: systemProxyClient)
+        self.systemProxyOperations = resolvedSystemProxyOperations
         self.runtimeOperations = runtimeOperations ?? TargetRuntimeOperations(
             backend: backend,
             systemProxyClient: systemProxyClient,
+            systemProxyOperations: resolvedSystemProxyOperations,
             hostNetworkSafetyMode: hostNetworkSafetyMode
         )
         self.hostNetworkSafetyMode = hostNetworkSafetyMode
@@ -273,8 +275,34 @@ final class BackendLifecycleModel {
 
     func start() {
         guard canStart else { return }
-        begin(.start) { backend in
-            try await backend.startEngine()
+        do {
+            lifecycleState = try BackendLifecycleState.begin(.start, from: lifecycleState)
+            error = nil
+        } catch let error as BackendError {
+            self.error = error
+            lifecycleState = .failed(error)
+            return
+        } catch {
+            finish(with: .serviceUnavailable)
+            return
+        }
+        let runtimeOperations = runtimeOperations
+        operationTask = Task { [weak self, backend] in
+            do {
+                let result = try await runtimeOperations.startEngine()
+                if Task.isCancelled {
+                    await self?.finishCancellation(afterReconciling: backend)
+                    return
+                }
+                self?.systemProxyStatus = result.systemProxyStatus
+                self?.finish(with: result.engineStatus)
+            } catch is CancellationError {
+                await self?.finishCancellation(afterReconciling: backend)
+            } catch let error as BackendError {
+                self?.finish(with: error)
+            } catch {
+                self?.finish(with: .serviceUnavailable)
+            }
         }
     }
 
@@ -322,12 +350,13 @@ final class BackendLifecycleModel {
                 }
                 try Task.checkCancellation()
                 self?.lifecycleState = .starting
-                let status = try await backend.startEngine()
+                let startResult = try await runtimeOperations.startEngine()
                 if Task.isCancelled {
                     await self?.finishCancellation(afterReconciling: backend)
                     return
                 }
-                self?.finish(with: status)
+                self?.systemProxyStatus = startResult.systemProxyStatus
+                self?.finish(with: startResult.engineStatus)
             } catch is CancellationError {
                 await self?.finishCancellation(afterReconciling: backend)
             } catch let error as BackendError {

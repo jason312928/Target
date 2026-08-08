@@ -13,23 +13,45 @@ struct EngineStopResult: Equatable, Sendable {
     let systemProxyStatus: SystemProxyStatus?
 }
 
+struct EngineStartResult: Equatable, Sendable {
+    let engineStatus: BackendStatus
+    let systemProxyStatus: SystemProxyStatus
+}
+
 protocol TargetRuntimeOperating: Sendable {
+    func startEngine() async throws -> EngineStartResult
     func stopEngineSafely() async throws -> EngineStopResult
 }
 
 actor TargetRuntimeOperations: TargetRuntimeOperating {
     private let backend: any EngineBackend
     private let systemProxyClient: any SystemProxyClient
+    private let systemProxyOperations: any TargetSystemProxyOperating
     private let hostNetworkSafetyMode: HostNetworkSafetyMode
 
     init(
         backend: any EngineBackend,
         systemProxyClient: any SystemProxyClient = TargetServiceXPCClient(),
+        systemProxyOperations: (any TargetSystemProxyOperating)? = nil,
         hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode
     ) {
         self.backend = backend
         self.systemProxyClient = systemProxyClient
+        self.systemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: systemProxyClient)
         self.hostNetworkSafetyMode = hostNetworkSafetyMode
+    }
+
+    func startEngine() async throws -> EngineStartResult {
+        let engineStatus = try await backend.startEngine()
+        let proxyStatus: SystemProxyStatus
+        do {
+            proxyStatus = try await systemProxyOperations.queryStatus()
+        } catch let error as TargetSystemProxyOperationError {
+            proxyStatus = error.reconciledStatus
+        } catch {
+            proxyStatus = SystemProxyStatus.disabled.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+        }
+        return EngineStartResult(engineStatus: engineStatus, systemProxyStatus: proxyStatus)
     }
 
     func stopEngineSafely() async throws -> EngineStopResult {

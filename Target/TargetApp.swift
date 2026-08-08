@@ -9,11 +9,12 @@ struct TargetApp: App {
         let profileStore = ProfileStore()
         let backend = SingBoxBackend(profileStore: profileStore)
         let systemProxyClient = TargetServiceXPCClient()
+        let systemProxyOperations = TargetSystemProxyOperations(client: systemProxyClient)
         let runtimeOperations = TargetRuntimeOperations(
             backend: backend,
-            systemProxyClient: systemProxyClient
+            systemProxyClient: systemProxyClient,
+            systemProxyOperations: systemProxyOperations
         )
-        let systemProxyOperations = TargetSystemProxyOperations(client: systemProxyClient)
         let lifecycle = BackendLifecycleModel(
             backend: backend,
             systemProxyClient: systemProxyClient,

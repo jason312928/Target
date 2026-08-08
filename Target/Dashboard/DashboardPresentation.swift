@@ -38,6 +38,7 @@ struct DashboardPresentation: Equatable {
     let xpcStateKey: String
     let systemProxyStateKey: String
     let systemProxyEngineKey: String
+    let isSystemProxyToggleOn: Bool
     let isHostSafeMode: Bool
     let hostSafetyNoticeKey: String
 
@@ -64,6 +65,7 @@ struct DashboardPresentation: Equatable {
         self.xpcStateKey = xpcState.localizedKey
         self.systemProxyStateKey = systemProxyStatus.state.localizedKey
         self.systemProxyEngineKey = systemProxyStatus.engineReachable ? "system-proxy.engine.reachable" : "system-proxy.engine.unreachable"
+        self.isSystemProxyToggleOn = [.enabling, .enabled].contains(systemProxyStatus.state)
         self.isHostSafeMode = isHostSafeMode
         self.hostSafetyNoticeKey = isHostSafeMode ? "host-safety.status.safe" : "host-safety.status.utm-validation"
 

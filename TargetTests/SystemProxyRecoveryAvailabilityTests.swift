@@ -197,6 +197,126 @@ final class SystemProxyRecoveryAvailabilityTests: XCTestCase {
         XCTAssertFalse(model.canRecoverSystemProxy)
     }
 
+    func testSuccessfulGUIEnableUsesSharedResultAndSettlesToggleOn() async throws {
+        let enabled = SystemProxyStatus(
+            state: .enabled,
+            engineReachable: true,
+            affectedServiceCount: 1,
+            error: nil,
+            hasRecoverySnapshot: true
+        )
+        let shared = StaticSystemProxyOperation(status: enabled)
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+        model.applyAutomationEngineStatus(BackendStatus(
+            serviceInstallation: .enabled,
+            engineState: .running,
+            engineInstallation: .installed,
+            hasSelectedValidProfile: true
+        ))
+
+        model.enableSystemProxy()
+        model.enableSystemProxy()
+        try await waitUntil { !model.isBusy }
+
+        let enableCount = await shared.enableCount
+        XCTAssertEqual(enableCount, 1)
+        XCTAssertEqual(model.systemProxyStatus, enabled)
+        XCTAssertNil(model.systemProxyStatus.error)
+        XCTAssertTrue(DashboardPresentation(
+            status: model.status,
+            lifecycleState: model.lifecycleState,
+            serviceInstallation: model.serviceInstallation,
+            xpcState: model.xpcState,
+            error: model.error,
+            systemProxyStatus: model.systemProxyStatus,
+            isBusy: model.isBusy,
+            isHostSafeMode: model.isHostSafeMode
+        ).isSystemProxyToggleOn)
+    }
+
+    func testSuccessfulGUIDisableUsesSharedResultAndSettlesToggleOff() async throws {
+        let disabled = SystemProxyStatus(
+            state: .disabled,
+            engineReachable: true,
+            affectedServiceCount: 0,
+            error: nil,
+            hasRecoverySnapshot: false
+        )
+        let shared = StaticSystemProxyOperation(status: disabled)
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+        model.applyAutomationSystemProxyStatus(SystemProxyStatus(
+            state: .enabled,
+            engineReachable: true,
+            affectedServiceCount: 1,
+            error: nil,
+            hasRecoverySnapshot: true
+        ))
+
+        model.disableSystemProxy()
+        model.disableSystemProxy()
+        try await waitUntil { !model.isBusy }
+
+        let disableCount = await shared.disableCount
+        XCTAssertEqual(disableCount, 1)
+        XCTAssertEqual(model.systemProxyStatus, disabled)
+        XCTAssertFalse(DashboardPresentation(
+            status: model.status,
+            lifecycleState: model.lifecycleState,
+            serviceInstallation: model.serviceInstallation,
+            xpcState: model.xpcState,
+            error: model.error,
+            systemProxyStatus: model.systemProxyStatus,
+            isBusy: model.isBusy,
+            isHostSafeMode: model.isHostSafeMode
+        ).isSystemProxyToggleOn)
+    }
+
+    func testFailedEnableKeepsSpecificErrorAndReconciledToggleTruth() async throws {
+        let reconciled = SystemProxyStatus(
+            state: .failed,
+            engineReachable: false,
+            affectedServiceCount: 0,
+            error: .localProxyUnavailable,
+            hasRecoverySnapshot: false
+        )
+        let shared = FailingEnableSystemProxyOperation(reconciledStatus: reconciled)
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+        model.applyAutomationEngineStatus(BackendStatus(
+            serviceInstallation: .enabled,
+            engineState: .running,
+            engineInstallation: .installed,
+            hasSelectedValidProfile: true
+        ))
+
+        model.enableSystemProxy()
+        try await waitUntil { !model.isBusy }
+
+        XCTAssertEqual(model.systemProxyStatus, reconciled)
+        XCTAssertEqual(model.systemProxyErrorKey, "system-proxy.error.local-proxy-unavailable")
+        XCTAssertFalse(DashboardPresentation(
+            status: model.status,
+            lifecycleState: model.lifecycleState,
+            serviceInstallation: model.serviceInstallation,
+            xpcState: model.xpcState,
+            error: model.error,
+            systemProxyStatus: model.systemProxyStatus,
+            isBusy: model.isBusy,
+            isHostSafeMode: model.isHostSafeMode
+        ).isSystemProxyToggleOn)
+    }
+
     func testBusyModelPreventsDuplicateRecovery() async throws {
         let gate = RecoveryOperationGate()
         let shared = GatedSystemProxyOperation(status: recoveryStatus(error: .localProxyUnavailable), gate: gate)
@@ -444,6 +564,77 @@ final class SystemProxyRecoveryAvailabilityTests: XCTestCase {
         XCTAssertNil(model.systemProxyRecoveryCapability.blocker)
     }
 
+    func testAutomationProxyEnablePublishesSameFinalStatusAndJSON() async {
+        let enabled = SystemProxyStatus(
+            state: .enabled,
+            engineReachable: true,
+            affectedServiceCount: 1,
+            error: nil,
+            hasRecoverySnapshot: true
+        )
+        let shared = StaticSystemProxyOperation(status: enabled)
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+        let automation = TargetAutomationOperations(
+            profileStore: testProfileStore(),
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest,
+            systemProxyStatusObserver: { status in
+                await MainActor.run { model.applyAutomationSystemProxyStatus(status) }
+            }
+        )
+
+        let response = await automation.handle(AutomationRequest(protocolVersion: 1, action: "proxy.enable"))
+        guard case let .object(fields) = response.result else { return XCTFail("Expected result") }
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(fields["systemProxyState"], .string("enabled"))
+        XCTAssertEqual(fields["engineReachable"], .boolean(true))
+        XCTAssertEqual(model.systemProxyStatus, enabled)
+        let enableCount = await shared.enableCount
+        XCTAssertEqual(enableCount, 1)
+    }
+
+    func testAutomationProxyDisablePublishesSameFinalStatusAndJSON() async {
+        let disabled = SystemProxyStatus(
+            state: .disabled,
+            engineReachable: true,
+            affectedServiceCount: 0,
+            error: nil,
+            hasRecoverySnapshot: false
+        )
+        let shared = StaticSystemProxyOperation(status: disabled)
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+        model.applyAutomationSystemProxyStatus(managedProxyStatusForIssue4())
+        let automation = TargetAutomationOperations(
+            profileStore: testProfileStore(),
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest,
+            systemProxyStatusObserver: { status in
+                await MainActor.run { model.applyAutomationSystemProxyStatus(status) }
+            }
+        )
+
+        let response = await automation.handle(AutomationRequest(protocolVersion: 1, action: "proxy.disable"))
+        guard case let .object(fields) = response.result else { return XCTFail("Expected result") }
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(fields["systemProxyState"], .string("disabled"))
+        XCTAssertEqual(fields["hasRecoverySnapshot"], .boolean(false))
+        XCTAssertEqual(model.systemProxyStatus, disabled)
+        let disableCount = await shared.disableCount
+        XCTAssertEqual(disableCount, 1)
+    }
+
     func testFailedAutomationProxyMutationPublishesReconciledStatusToDashboardModel() async {
         let reconciled = recoveryStatus(error: .externalModificationConflict)
         let shared = TargetSystemProxyOperations(client: SensitiveRecoveryClient(
@@ -521,6 +712,16 @@ private func recoveryStatus(
     )
 }
 
+private func managedProxyStatusForIssue4() -> SystemProxyStatus {
+    SystemProxyStatus(
+        state: .enabled,
+        engineReachable: true,
+        affectedServiceCount: 1,
+        error: nil,
+        hasRecoverySnapshot: true
+    )
+}
+
 private actor SequencedSystemProxyClient: SystemProxyClient {
     private var queries: [Result<SystemProxyStatus, SystemProxyError>]
     private let disableError: SystemProxyError?
@@ -579,11 +780,27 @@ private actor GatedSystemProxyOperation: TargetSystemProxyOperating {
 private actor StaticSystemProxyOperation: TargetSystemProxyOperating {
     private let status: SystemProxyStatus
     private(set) var queryCount = 0
+    private(set) var enableCount = 0
+    private(set) var disableCount = 0
     init(status: SystemProxyStatus) { self.status = status }
     func queryStatus() async throws -> SystemProxyStatus { queryCount += 1; return status }
-    func enable() async throws -> SystemProxyStatus { status }
-    func disable() async throws -> SystemProxyStatus { status }
+    func enable() async throws -> SystemProxyStatus { enableCount += 1; return status }
+    func disable() async throws -> SystemProxyStatus { disableCount += 1; return status }
     func recover() async throws -> SystemProxyStatus { .disabled }
+}
+
+private actor FailingEnableSystemProxyOperation: TargetSystemProxyOperating {
+    private let reconciledStatus: SystemProxyStatus
+    init(reconciledStatus: SystemProxyStatus) { self.reconciledStatus = reconciledStatus }
+    func queryStatus() async throws -> SystemProxyStatus { reconciledStatus }
+    func enable() async throws -> SystemProxyStatus {
+        throw TargetSystemProxyOperationError(
+            operationError: .localProxyUnavailable,
+            reconciledStatus: reconciledStatus
+        )
+    }
+    func disable() async throws -> SystemProxyStatus { reconciledStatus }
+    func recover() async throws -> SystemProxyStatus { reconciledStatus }
 }
 
 private actor SensitiveRecoveryClient: SystemProxyClient {

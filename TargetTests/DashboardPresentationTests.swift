@@ -72,6 +72,21 @@ final class DashboardPresentationTests: XCTestCase {
         XCTAssertEqual(presentation.hostSafetyNoticeKey, "host-safety.status.utm-validation")
     }
 
+    func testProxyTogglePresentationTracksRequestedTransitionThenFinalTruth() {
+        let enabling = SystemProxyStatus(state: .enabling, engineReachable: true, affectedServiceCount: 0, error: nil)
+        let enabled = SystemProxyStatus(state: .enabled, engineReachable: true, affectedServiceCount: 1, error: nil, hasRecoverySnapshot: true)
+        let disabling = SystemProxyStatus(state: .disabling, engineReachable: true, affectedServiceCount: 1, error: nil, hasRecoverySnapshot: true)
+        let recoveryRequired = SystemProxyStatus(state: .recoveryRequired, engineReachable: false, affectedServiceCount: 1, error: .localProxyUnavailable, hasRecoverySnapshot: true)
+        let failed = SystemProxyStatus(state: .failed, engineReachable: false, affectedServiceCount: 0, error: .applyFailed)
+
+        XCTAssertFalse(makePresentation(proxy: .disabled).isSystemProxyToggleOn)
+        XCTAssertTrue(makePresentation(proxy: enabling, busy: true).isSystemProxyToggleOn)
+        XCTAssertTrue(makePresentation(proxy: enabled).isSystemProxyToggleOn)
+        XCTAssertFalse(makePresentation(proxy: disabling, busy: true).isSystemProxyToggleOn)
+        XCTAssertFalse(makePresentation(proxy: recoveryRequired).isSystemProxyToggleOn)
+        XCTAssertFalse(makePresentation(proxy: failed).isSystemProxyToggleOn)
+    }
+
     func testMissingFieldsStayEmpty() {
         let status = BackendStatus(serviceInstallation: .enabled, engineState: .running, engineInstallation: .installed)
         let presentation = makePresentation(status: status, lifecycle: .running)

@@ -212,7 +212,7 @@ struct DashboardView: View {
 
     private var proxyToggle: some View {
         Toggle("system-proxy.action.toggle", isOn: Binding(
-            get: { lifecycle.systemProxyStatus.state == .enabled },
+            get: { presentation.isSystemProxyToggleOn },
             set: { $0 ? lifecycle.enableSystemProxy() : lifecycle.disableSystemProxy() }
         ))
         .disabled(!lifecycle.canEnableSystemProxy && !lifecycle.canDisableSystemProxy)
