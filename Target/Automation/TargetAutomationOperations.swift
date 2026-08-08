@@ -4,23 +4,29 @@ actor TargetAutomationOperations {
     private let profileStore: ProfileStore
     private let backend: any EngineBackend
     private let serviceClient: any SystemProxyClient
+    private let systemProxyOperations: any TargetSystemProxyOperating
     private let runtimeOperations: any TargetRuntimeOperating
+    private let hostNetworkSafetyMode: HostNetworkSafetyMode
     private let engineStatusObserver: (@Sendable (BackendStatus) async -> Void)?
 
     init(
         profileStore: ProfileStore = ProfileStore(),
         backend: any EngineBackend = SingBoxBackend(),
         serviceClient: any SystemProxyClient = TargetServiceXPCClient(),
+        systemProxyOperations: (any TargetSystemProxyOperating)? = nil,
         runtimeOperations: (any TargetRuntimeOperating)? = nil,
+        hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode,
         engineStatusObserver: (@Sendable (BackendStatus) async -> Void)? = nil
     ) {
         self.profileStore = profileStore
         self.backend = backend
         self.serviceClient = serviceClient
+        self.systemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: serviceClient)
         self.runtimeOperations = runtimeOperations ?? TargetRuntimeOperations(
             backend: backend,
             systemProxyClient: serviceClient
         )
+        self.hostNetworkSafetyMode = hostNetworkSafetyMode
         self.engineStatusObserver = engineStatusObserver
     }
 
@@ -46,9 +52,9 @@ actor TargetAutomationOperations {
             case "service.ping": return await servicePing()
             case "service.remove": return try serviceRemove()
             case "proxy.status": return await proxyStatus()
-            case "proxy.enable": return try await proxyAction(serviceClient.enableSystemProxy)
-            case "proxy.disable": return try await proxyAction(serviceClient.disableSystemProxy)
-            case "proxy.recover": return try await proxyAction(serviceClient.recoverSystemProxy)
+            case "proxy.enable": return try await proxyAction(systemProxyOperations.enable)
+            case "proxy.disable": return try await proxyAction(systemProxyOperations.disable)
+            case "proxy.recover": return try await proxyAction(systemProxyOperations.recover)
             default: return .failure(code: "unknown_action", message: "The requested action is not supported.")
             }
         } catch let error as ProfileTransferError {
@@ -59,6 +65,8 @@ actor TargetAutomationOperations {
             return backendFailure(error)
         } catch let error as SystemProxyError {
             return serviceFailure(xpcError(error).code)
+        } catch let error as TargetSystemProxyOperationError {
+            return serviceFailure(xpcError(error.operationError).code)
         } catch let error as NSError where error.domain == "com.jason312928.Target.TargetService" {
             return serviceFailure(error.code)
         } catch {
@@ -78,13 +86,24 @@ actor TargetAutomationOperations {
         let engine = try? await backend.queryStatus()
         let service = TargetServiceRegistration.status
         let xpcReachable = service == .enabled ? (try? await serviceClient.ping()) != nil : nil
-        let proxy = service == .enabled ? try? await serviceClient.querySystemProxyStatus() : nil
+        let proxy = try? await systemProxyOperations.queryStatus()
+        let recoveryCapability = proxy?.recoveryCapability(
+            hostNetworkSafetyMode: hostNetworkSafetyMode,
+            isOperationInProgress: false
+        )
         let selectedValid = (try? profileStore.selectedValidVersion()) != nil
         return .success(.object([
             "buildChannel": .string(Bundle.main.object(forInfoDictionaryKey: "TargetBuildChannel") as? String ?? "unknown"),
             "engineState": .string(engine?.engineState.rawValue ?? "unknown"),
-            "hostSafety": .string(TargetValidationPolicy.isHostSafeMode ? "safe" : "authorizedValidation"),
+            "engineReachable": .boolean(proxy?.engineReachable ?? false),
+            "affectedServiceCount": .integer(proxy?.affectedServiceCount ?? 0),
+            "hasRecoverySnapshot": .boolean(proxy?.hasRecoverySnapshot ?? false),
+            "hostSafety": .string(hostNetworkSafetyMode.permitsNetworkWrites ? "authorizedValidation" : "safe"),
             "recoveryRequired": .boolean(proxy?.state == .recoveryRequired),
+            "recoveryAvailable": .boolean(recoveryCapability?.isAvailable ?? false),
+            "recoveryBlocker": recoveryCapability.map {
+                $0.blocker.map { .string($0.rawValue) } ?? .null
+            } ?? .string(SystemProxyRecoveryBlocker.statusUnavailable.rawValue),
             "selectedValidProfile": .boolean(selectedValid),
             "serviceState": .string(service.rawValue),
             "sourceSHA": .string(Bundle.main.object(forInfoDictionaryKey: "TargetSourceCommit") as? String ?? "unknown"),
@@ -185,7 +204,7 @@ actor TargetAutomationOperations {
     }
 
     private func proxyStatus() async -> AutomationResponse {
-        do { return proxyResult(try await serviceClient.querySystemProxyStatus()) }
+        do { return proxyResult(try await systemProxyOperations.queryStatus()) }
         catch { return .failure(code: "xpc_unavailable", message: "System proxy status is unavailable.") }
     }
 
@@ -194,9 +213,16 @@ actor TargetAutomationOperations {
     }
 
     private func proxyResult(_ status: SystemProxyStatus) -> AutomationResponse {
-        .success(.object([
+        let capability = status.recoveryCapability(
+            hostNetworkSafetyMode: hostNetworkSafetyMode,
+            isOperationInProgress: false
+        )
+        return .success(.object([
             "affectedServiceCount": .integer(status.affectedServiceCount),
             "engineReachable": .boolean(status.engineReachable),
+            "hasRecoverySnapshot": .boolean(status.hasRecoverySnapshot),
+            "recoveryAvailable": .boolean(capability.isAvailable),
+            "recoveryBlocker": capability.blocker.map { .string($0.rawValue) } ?? .null,
             "recoveryRequired": .boolean(status.state == .recoveryRequired),
             "systemProxyState": .string(status.state.rawValue)
         ]))
@@ -215,6 +241,7 @@ actor TargetAutomationOperations {
         case 107: stableCode = "proxy_apply_failed"
         case 108: stableCode = "proxy_verification_failed"
         case 109: stableCode = "proxy_recovery_failed"
+        case 110: stableCode = "proxy_status_unavailable"
         default: stableCode = "service_operation_failed"
         }
         return .failure(code: stableCode, message: "The privileged service operation failed safely.")

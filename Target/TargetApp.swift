@@ -13,9 +13,11 @@ struct TargetApp: App {
             backend: backend,
             systemProxyClient: systemProxyClient
         )
+        let systemProxyOperations = TargetSystemProxyOperations(client: systemProxyClient)
         let lifecycle = BackendLifecycleModel(
             backend: backend,
             systemProxyClient: systemProxyClient,
+            systemProxyOperations: systemProxyOperations,
             runtimeOperations: runtimeOperations
         )
         _lifecycle = State(initialValue: lifecycle)
@@ -23,6 +25,7 @@ struct TargetApp: App {
             profileStore: profileStore,
             backend: backend,
             serviceClient: systemProxyClient,
+            systemProxyOperations: systemProxyOperations,
             runtimeOperations: runtimeOperations,
             engineStatusObserver: { status in
                 await MainActor.run { lifecycle.applyAutomationEngineStatus(status) }

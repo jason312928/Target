@@ -24,6 +24,7 @@ enum SystemProxyError: String, Codable, Error, Equatable, Sendable {
     case applyFailed
     case verificationFailed
     case recoveryFailed
+    case statusUnavailable
 
     var localizedKey: String {
         switch self {
@@ -37,6 +38,30 @@ enum SystemProxyError: String, Codable, Error, Equatable, Sendable {
         case .applyFailed: "system-proxy.error.apply-failed"
         case .verificationFailed: "system-proxy.error.verification-failed"
         case .recoveryFailed: "system-proxy.error.recovery-failed"
+        case .statusUnavailable: "system-proxy.error.status-unavailable"
+        }
+    }
+
+    init?(serviceError error: Error) {
+        if let error = error as? SystemProxyError {
+            self = error
+            return
+        }
+        let error = error as NSError
+        guard error.domain == "com.jason312928.Target.TargetService" else { return nil }
+        switch error.code {
+        case 100: self = .safeModeBlocked
+        case 101: self = .existingNetworkController
+        case 102: self = .noActiveNetworkService
+        case 103: self = .localProxyUnavailable
+        case 104: self = .snapshotFailed
+        case 105: self = .invalidSnapshotOwner
+        case 106: self = .externalModificationConflict
+        case 107: self = .applyFailed
+        case 108: self = .verificationFailed
+        case 109: self = .recoveryFailed
+        case 110: self = .statusUnavailable
+        default: return nil
         }
     }
 }

@@ -66,6 +66,7 @@ func xpcError(_ error: SystemProxyError) -> NSError {
     case .applyFailed: code = 107
     case .verificationFailed: code = 108
     case .recoveryFailed: code = 109
+    case .statusUnavailable: code = 110
     }
     return NSError(
         domain: "com.jason312928.Target.TargetService",

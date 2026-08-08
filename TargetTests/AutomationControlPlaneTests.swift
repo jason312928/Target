@@ -187,6 +187,7 @@ final class AutomationControlPlaneTests: XCTestCase {
             (107, "proxy_apply_failed"),
             (108, "proxy_verification_failed"),
             (109, "proxy_recovery_failed"),
+            (110, "proxy_status_unavailable"),
             (999, "service_operation_failed")
         ] {
             let response = await operations.serviceFailure(serviceCode)

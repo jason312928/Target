@@ -9,6 +9,7 @@ final class BackendLifecycleModel {
     private let serviceManager: (any ServiceLifecycleManaging)?
     private let serviceTester: (any ServiceConnectionTesting)?
     private let systemProxyClient: any SystemProxyClient
+    private let systemProxyOperations: any TargetSystemProxyOperating
     private let runtimeOperations: any TargetRuntimeOperating
     private var operationTask: Task<Void, Never>?
     private let hostNetworkSafetyMode: HostNetworkSafetyMode
@@ -25,6 +26,7 @@ final class BackendLifecycleModel {
     init(
         backend: any EngineBackend = SingBoxBackend(),
         systemProxyClient: any SystemProxyClient = TargetServiceXPCClient(),
+        systemProxyOperations: (any TargetSystemProxyOperating)? = nil,
         runtimeOperations: (any TargetRuntimeOperating)? = nil,
         hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode
     ) {
@@ -33,6 +35,7 @@ final class BackendLifecycleModel {
         self.serviceManager = backend as? any ServiceLifecycleManaging
         self.serviceTester = backend as? any ServiceConnectionTesting
         self.systemProxyClient = systemProxyClient
+        self.systemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: systemProxyClient)
         self.runtimeOperations = runtimeOperations ?? TargetRuntimeOperations(
             backend: backend,
             systemProxyClient: systemProxyClient,
@@ -80,7 +83,13 @@ final class BackendLifecycleModel {
     var canDisableSystemProxy: Bool {
         hostNetworkSafetyMode.permitsNetworkWrites && !isBusy && [.enabled, .recoveryRequired, .failed].contains(systemProxyStatus.state)
     }
-    var canRecoverSystemProxy: Bool { hostNetworkSafetyMode.permitsNetworkWrites && !isBusy && systemProxyStatus.hasRecoverySnapshot }
+    var systemProxyRecoveryCapability: SystemProxyRecoveryCapability {
+        systemProxyStatus.recoveryCapability(
+            hostNetworkSafetyMode: hostNetworkSafetyMode,
+            isOperationInProgress: isBusy
+        )
+    }
+    var canRecoverSystemProxy: Bool { systemProxyRecoveryCapability.isAvailable }
     /// Service registration is independent from host-network changes. Keep it
     /// available in Host Safe Mode so a user can approve and repair the bundled
     /// daemon without enabling proxy, DNS, route, firewall, or TUN operations.
@@ -173,45 +182,60 @@ final class BackendLifecycleModel {
         systemProxyStatus = SystemProxyStatus(state: .enabling, engineReachable: true, affectedServiceCount: 0, error: nil)
         operationTask = Task { [weak self] in
             do {
-                let status = try await self?.systemProxyClient.enableSystemProxy()
+                let status = try await self?.systemProxyOperations.enable()
                 guard !Task.isCancelled, let status else { return }
                 self?.systemProxyStatus = status
                 self?.operationTask = nil
+            } catch let error as TargetSystemProxyOperationError {
+                self?.finishSystemProxyFailure(error)
             } catch {
-                self?.systemProxyStatus = SystemProxyStatus(state: .failed, engineReachable: false, affectedServiceCount: 0, error: .applyFailed)
-                self?.operationTask = nil
+                self?.finishUnknownSystemProxyFailure()
             }
         }
     }
 
     func disableSystemProxy() {
         guard canDisableSystemProxy else { return }
-        systemProxyStatus = SystemProxyStatus(state: .disabling, engineReachable: lifecycleState == .running, affectedServiceCount: systemProxyStatus.affectedServiceCount, error: nil)
+        systemProxyStatus = SystemProxyStatus(
+            state: .disabling,
+            engineReachable: systemProxyStatus.engineReachable,
+            affectedServiceCount: systemProxyStatus.affectedServiceCount,
+            error: nil,
+            hasRecoverySnapshot: systemProxyStatus.hasRecoverySnapshot
+        )
         operationTask = Task { [weak self] in
             do {
-                let status = try await self?.systemProxyClient.disableSystemProxy()
+                let status = try await self?.systemProxyOperations.disable()
                 guard !Task.isCancelled, let status else { return }
                 self?.systemProxyStatus = status
                 self?.operationTask = nil
+            } catch let error as TargetSystemProxyOperationError {
+                self?.finishSystemProxyFailure(error)
             } catch {
-                self?.systemProxyStatus = SystemProxyStatus(state: .recoveryRequired, engineReachable: self?.lifecycleState == .running, affectedServiceCount: self?.systemProxyStatus.affectedServiceCount ?? 0, error: .recoveryFailed)
-                self?.operationTask = nil
+                self?.finishUnknownSystemProxyFailure()
             }
         }
     }
 
     func recoverSystemProxy() {
         guard canRecoverSystemProxy else { return }
-        systemProxyStatus = SystemProxyStatus(state: .recoveryRequired, engineReachable: lifecycleState == .running, affectedServiceCount: systemProxyStatus.affectedServiceCount, error: nil)
+        systemProxyStatus = SystemProxyStatus(
+            state: .recoveryRequired,
+            engineReachable: systemProxyStatus.engineReachable,
+            affectedServiceCount: systemProxyStatus.affectedServiceCount,
+            error: systemProxyStatus.error,
+            hasRecoverySnapshot: systemProxyStatus.hasRecoverySnapshot
+        )
         operationTask = Task { [weak self] in
             do {
-                let status = try await self?.systemProxyClient.recoverSystemProxy()
+                let status = try await self?.systemProxyOperations.recover()
                 guard !Task.isCancelled, let status else { return }
                 self?.systemProxyStatus = status
                 self?.operationTask = nil
+            } catch let error as TargetSystemProxyOperationError {
+                self?.finishSystemProxyFailure(error)
             } catch {
-                self?.systemProxyStatus.error = .recoveryFailed
-                self?.operationTask = nil
+                self?.finishUnknownSystemProxyFailure()
             }
         }
     }
@@ -475,14 +499,25 @@ final class BackendLifecycleModel {
 
     private func loadSystemProxyStatus() async {
         do {
-            systemProxyStatus = try await systemProxyClient.querySystemProxyStatus()
+            systemProxyStatus = try await systemProxyOperations.queryStatus()
+        } catch let error as TargetSystemProxyOperationError {
+            systemProxyStatus = error.reconciledStatus
         } catch {
-            systemProxyStatus = SystemProxyStatus(
-                state: .failed,
-                engineReachable: false,
-                affectedServiceCount: 0,
-                error: .recoveryFailed
-            )
+            systemProxyStatus = systemProxyStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
         }
+    }
+
+    private func finishSystemProxyFailure(_ failure: TargetSystemProxyOperationError) {
+        var status = failure.reconciledStatus
+        if status.error == nil {
+            status.error = failure.operationError
+        }
+        systemProxyStatus = status
+        operationTask = nil
+    }
+
+    private func finishUnknownSystemProxyFailure() {
+        systemProxyStatus = systemProxyStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+        operationTask = nil
     }
 }
