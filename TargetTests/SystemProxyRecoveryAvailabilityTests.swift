@@ -415,6 +415,67 @@ final class SystemProxyRecoveryAvailabilityTests: XCTestCase {
         XCTAssertEqual(queryCount, 2)
     }
 
+    func testAutomationProxyStatusPublishesRecoveryAvailabilityToDashboardModel() async throws {
+        let authoritative = recoveryStatus(error: .localProxyUnavailable)
+        let shared = StaticSystemProxyOperation(status: authoritative)
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+        let automation = TargetAutomationOperations(
+            profileStore: testProfileStore(),
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest,
+            systemProxyStatusObserver: { status in
+                await MainActor.run { model.applyAutomationSystemProxyStatus(status) }
+            }
+        )
+
+        let response = await automation.handle(AutomationRequest(
+            protocolVersion: 1,
+            action: "proxy.status"
+        ))
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(model.systemProxyStatus, authoritative)
+        XCTAssertTrue(model.canRecoverSystemProxy)
+        XCTAssertNil(model.systemProxyRecoveryCapability.blocker)
+    }
+
+    func testFailedAutomationProxyMutationPublishesReconciledStatusToDashboardModel() async {
+        let reconciled = recoveryStatus(error: .externalModificationConflict)
+        let shared = TargetSystemProxyOperations(client: SensitiveRecoveryClient(
+            status: reconciled,
+            error: NSError(domain: "com.jason312928.Target.TargetService", code: 106)
+        ))
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+        let automation = TargetAutomationOperations(
+            profileStore: testProfileStore(),
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest,
+            systemProxyStatusObserver: { status in
+                await MainActor.run { model.applyAutomationSystemProxyStatus(status) }
+            }
+        )
+
+        let response = await automation.handle(AutomationRequest(
+            protocolVersion: 1,
+            action: "proxy.recover"
+        ))
+
+        XCTAssertEqual(response.error?.code, "proxy_external_change_conflict")
+        XCTAssertEqual(model.systemProxyStatus, reconciled)
+        XCTAssertEqual(model.systemProxyRecoveryCapability.blocker, .externalModificationConflict)
+        XCTAssertFalse(model.canRecoverSystemProxy)
+    }
+
     private func objectFields(_ response: AutomationResponse) -> [String: JSONValue] {
         guard case let .object(fields) = response.result else {
             XCTFail("Expected object response")

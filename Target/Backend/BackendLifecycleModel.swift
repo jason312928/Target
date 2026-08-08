@@ -362,6 +362,11 @@ final class BackendLifecycleModel {
         error = nil
     }
 
+    func applyAutomationSystemProxyStatus(_ proxyStatus: SystemProxyStatus) {
+        guard !isBusy else { return }
+        systemProxyStatus = proxyStatus
+    }
+
     private func begin(
         _ operation: BackendOperation,
         action: @escaping @Sendable (any EngineBackend) async throws -> BackendStatus

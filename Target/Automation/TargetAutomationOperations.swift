@@ -13,6 +13,7 @@ actor TargetAutomationOperations {
     private let runtimeOperations: any TargetRuntimeOperating
     private let hostNetworkSafetyMode: HostNetworkSafetyMode
     private let engineStatusObserver: (@Sendable (BackendStatus) async -> Void)?
+    private let systemProxyStatusObserver: (@Sendable (SystemProxyStatus) async -> Void)?
 
     init(
         profileStore: ProfileStore = ProfileStore(),
@@ -21,7 +22,8 @@ actor TargetAutomationOperations {
         systemProxyOperations: (any TargetSystemProxyOperating)? = nil,
         runtimeOperations: (any TargetRuntimeOperating)? = nil,
         hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode,
-        engineStatusObserver: (@Sendable (BackendStatus) async -> Void)? = nil
+        engineStatusObserver: (@Sendable (BackendStatus) async -> Void)? = nil,
+        systemProxyStatusObserver: (@Sendable (SystemProxyStatus) async -> Void)? = nil
     ) {
         self.profileStore = profileStore
         self.backend = backend
@@ -33,6 +35,7 @@ actor TargetAutomationOperations {
         )
         self.hostNetworkSafetyMode = hostNetworkSafetyMode
         self.engineStatusObserver = engineStatusObserver
+        self.systemProxyStatusObserver = systemProxyStatusObserver
     }
 
     func handle(_ request: AutomationRequest) async -> AutomationResponse {
@@ -92,6 +95,7 @@ actor TargetAutomationOperations {
         let service = TargetServiceRegistration.status
         let xpcReachable = service == .enabled ? (try? await serviceClient.ping()) != nil : nil
         let proxyRead = await systemProxyStatusRead()
+        await observeSystemProxyStatus(proxyRead.status)
         let proxy = proxyRead.status
         let recoveryCapability = proxy?.recoveryCapability(
             hostNetworkSafetyMode: hostNetworkSafetyMode,
@@ -211,11 +215,24 @@ actor TargetAutomationOperations {
     }
 
     private func proxyStatus() async -> AutomationResponse {
-        proxyResult(await systemProxyStatusRead())
+        let read = await systemProxyStatusRead()
+        await observeSystemProxyStatus(read.status)
+        return proxyResult(read)
     }
 
     private func proxyAction(_ operation: () async throws -> SystemProxyStatus) async throws -> AutomationResponse {
-        proxyResult(SystemProxyStatusRead(status: try await operation(), isAuthoritative: true))
+        do {
+            let status = try await operation()
+            await observeSystemProxyStatus(status)
+            return proxyResult(SystemProxyStatusRead(status: status, isAuthoritative: true))
+        } catch let error as TargetSystemProxyOperationError {
+            await observeSystemProxyStatus(error.reconciledStatus)
+            throw error
+        }
+    }
+
+    private func observeSystemProxyStatus(_ status: SystemProxyStatus?) async {
+        if let status { await systemProxyStatusObserver?(status) }
     }
 
     private func systemProxyStatusRead() async -> SystemProxyStatusRead {

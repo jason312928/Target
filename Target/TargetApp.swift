@@ -29,6 +29,9 @@ struct TargetApp: App {
             runtimeOperations: runtimeOperations,
             engineStatusObserver: { status in
                 await MainActor.run { lifecycle.applyAutomationEngineStatus(status) }
+            },
+            systemProxyStatusObserver: { status in
+                await MainActor.run { lifecycle.applyAutomationSystemProxyStatus(status) }
             }
         )
         TargetApplicationDelegate.shared.configure(lifecycle: lifecycle, automationOperations: operations)
