@@ -1,6 +1,11 @@
 import Foundation
 
 actor TargetAutomationOperations {
+    private struct SystemProxyStatusRead {
+        let status: SystemProxyStatus?
+        let isAuthoritative: Bool
+    }
+
     private let profileStore: ProfileStore
     private let backend: any EngineBackend
     private let serviceClient: any SystemProxyClient
@@ -86,7 +91,8 @@ actor TargetAutomationOperations {
         let engine = try? await backend.queryStatus()
         let service = TargetServiceRegistration.status
         let xpcReachable = service == .enabled ? (try? await serviceClient.ping()) != nil : nil
-        let proxy = try? await systemProxyOperations.queryStatus()
+        let proxyRead = await systemProxyStatusRead()
+        let proxy = proxyRead.status
         let recoveryCapability = proxy?.recoveryCapability(
             hostNetworkSafetyMode: hostNetworkSafetyMode,
             isOperationInProgress: false
@@ -107,6 +113,7 @@ actor TargetAutomationOperations {
             "selectedValidProfile": .boolean(selectedValid),
             "serviceState": .string(service.rawValue),
             "sourceSHA": .string(Bundle.main.object(forInfoDictionaryKey: "TargetSourceCommit") as? String ?? "unknown"),
+            "statusAuthoritative": .boolean(proxyRead.isAuthoritative),
             "systemProxyState": .string(proxy?.state.rawValue ?? "unavailable"),
             "utmValidation": .boolean(TargetValidationPolicy.isUTMValidation),
             "xpcState": .string(ServiceConnectionAssessment.xpcState(registration: service, xpcReachable: xpcReachable).rawValue)
@@ -204,27 +211,42 @@ actor TargetAutomationOperations {
     }
 
     private func proxyStatus() async -> AutomationResponse {
-        do { return proxyResult(try await systemProxyOperations.queryStatus()) }
-        catch { return .failure(code: "xpc_unavailable", message: "System proxy status is unavailable.") }
+        proxyResult(await systemProxyStatusRead())
     }
 
     private func proxyAction(_ operation: () async throws -> SystemProxyStatus) async throws -> AutomationResponse {
-        proxyResult(try await operation())
+        proxyResult(SystemProxyStatusRead(status: try await operation(), isAuthoritative: true))
     }
 
-    private func proxyResult(_ status: SystemProxyStatus) -> AutomationResponse {
-        let capability = status.recoveryCapability(
+    private func systemProxyStatusRead() async -> SystemProxyStatusRead {
+        do {
+            return SystemProxyStatusRead(
+                status: try await systemProxyOperations.queryStatus(),
+                isAuthoritative: true
+            )
+        } catch let error as TargetSystemProxyOperationError {
+            return SystemProxyStatusRead(status: error.reconciledStatus, isAuthoritative: false)
+        } catch {
+            return SystemProxyStatusRead(status: nil, isAuthoritative: false)
+        }
+    }
+
+    private func proxyResult(_ read: SystemProxyStatusRead) -> AutomationResponse {
+        let capability = read.status?.recoveryCapability(
             hostNetworkSafetyMode: hostNetworkSafetyMode,
             isOperationInProgress: false
         )
         return .success(.object([
-            "affectedServiceCount": .integer(status.affectedServiceCount),
-            "engineReachable": .boolean(status.engineReachable),
-            "hasRecoverySnapshot": .boolean(status.hasRecoverySnapshot),
-            "recoveryAvailable": .boolean(capability.isAvailable),
-            "recoveryBlocker": capability.blocker.map { .string($0.rawValue) } ?? .null,
-            "recoveryRequired": .boolean(status.state == .recoveryRequired),
-            "systemProxyState": .string(status.state.rawValue)
+            "affectedServiceCount": .integer(read.status?.affectedServiceCount ?? 0),
+            "engineReachable": .boolean(read.status?.engineReachable ?? false),
+            "hasRecoverySnapshot": .boolean(read.status?.hasRecoverySnapshot ?? false),
+            "recoveryAvailable": .boolean(capability?.isAvailable ?? false),
+            "recoveryBlocker": capability.map {
+                $0.blocker.map { .string($0.rawValue) } ?? .null
+            } ?? .string(SystemProxyRecoveryBlocker.statusUnavailable.rawValue),
+            "recoveryRequired": .boolean(read.status?.state == .recoveryRequired),
+            "statusAuthoritative": .boolean(read.isAuthoritative),
+            "systemProxyState": .string(read.status?.state.rawValue ?? "unavailable")
         ]))
     }
 

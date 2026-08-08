@@ -277,6 +277,122 @@ final class SystemProxyRecoveryAvailabilityTests: XCTestCase {
         XCTAssertFalse(json.contains("credential-fixture"))
     }
 
+    func testAutomationProxyStatusPreservesKnownSnapshotWhenAuthorityBecomesUnavailable() async throws {
+        let shared = TargetSystemProxyOperations(client: SequencedSystemProxyClient(queries: [
+            .success(recoveryStatus(error: .localProxyUnavailable)),
+            .failure(.statusUnavailable)
+        ]))
+        _ = try await shared.queryStatus()
+        let operations = TargetAutomationOperations(
+            profileStore: testProfileStore(),
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+
+        let response = await operations.handle(AutomationRequest(protocolVersion: 1, action: "proxy.status"))
+        let fields = objectFields(response)
+        let json = String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self)
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(fields["systemProxyState"], .string("failed"))
+        XCTAssertEqual(fields["engineReachable"], .boolean(false))
+        XCTAssertEqual(fields["affectedServiceCount"], .integer(1))
+        XCTAssertEqual(fields["hasRecoverySnapshot"], .boolean(true))
+        XCTAssertEqual(fields["recoveryAvailable"], .boolean(false))
+        XCTAssertEqual(fields["recoveryBlocker"], .string("status_unavailable"))
+        XCTAssertEqual(fields["statusAuthoritative"], .boolean(false))
+        XCTAssertFalse(json.contains("NSError"))
+        XCTAssertFalse(json.contains("/private/"))
+    }
+
+    func testAutomationConsolidatedStatusPreservesKnownSnapshotWhenAuthorityBecomesUnavailable() async throws {
+        let shared = TargetSystemProxyOperations(client: SequencedSystemProxyClient(queries: [
+            .success(recoveryStatus(error: .localProxyUnavailable)),
+            .failure(.statusUnavailable)
+        ]))
+        _ = try await shared.queryStatus()
+        let operations = TargetAutomationOperations(
+            profileStore: testProfileStore(),
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+
+        let response = await operations.handle(AutomationRequest(protocolVersion: 1, action: "status"))
+        let fields = objectFields(response)
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(fields["systemProxyState"], .string("failed"))
+        XCTAssertEqual(fields["engineReachable"], .boolean(false))
+        XCTAssertEqual(fields["affectedServiceCount"], .integer(1))
+        XCTAssertEqual(fields["hasRecoverySnapshot"], .boolean(true))
+        XCTAssertEqual(fields["recoveryAvailable"], .boolean(false))
+        XCTAssertEqual(fields["recoveryBlocker"], .string("status_unavailable"))
+        XCTAssertEqual(fields["statusAuthoritative"], .boolean(false))
+    }
+
+    func testAutomationStatusDoesNotFabricateSnapshotWithoutAuthoritativeEvidence() async {
+        let shared = TargetSystemProxyOperations(client: SequencedSystemProxyClient(queries: [
+            .failure(.statusUnavailable),
+            .failure(.statusUnavailable)
+        ]))
+        let operations = TargetAutomationOperations(
+            profileStore: testProfileStore(),
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+
+        for action in ["proxy.status", "status"] {
+            let fields = objectFields(await operations.handle(
+                AutomationRequest(protocolVersion: 1, action: action)
+            ))
+            XCTAssertEqual(fields["systemProxyState"], .string("failed"))
+            XCTAssertEqual(fields["engineReachable"], .boolean(false))
+            XCTAssertEqual(fields["affectedServiceCount"], .integer(0))
+            XCTAssertEqual(fields["hasRecoverySnapshot"], .boolean(false))
+            XCTAssertEqual(fields["recoveryAvailable"], .boolean(false))
+            XCTAssertEqual(fields["recoveryBlocker"], .string("status_unavailable"))
+            XCTAssertEqual(fields["statusAuthoritative"], .boolean(false))
+        }
+    }
+
+    func testGUIAndAutomationAgreeAfterSharedAuthoritativeQueryFailure() async throws {
+        let shared = TargetSystemProxyOperations(client: SequencedSystemProxyClient(queries: [
+            .success(recoveryStatus(error: .localProxyUnavailable)),
+            .failure(.statusUnavailable),
+            .failure(.statusUnavailable)
+        ]))
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+        let automation = TargetAutomationOperations(
+            profileStore: testProfileStore(),
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+
+        model.refreshSystemProxyStatus()
+        try await waitUntil { !model.isBusy }
+        model.refreshSystemProxyStatus()
+        try await waitUntil { !model.isBusy }
+        let fields = objectFields(await automation.handle(
+            AutomationRequest(protocolVersion: 1, action: "proxy.status")
+        ))
+
+        XCTAssertEqual(fields["hasRecoverySnapshot"], .boolean(model.systemProxyStatus.hasRecoverySnapshot))
+        XCTAssertEqual(fields["recoveryAvailable"], .boolean(model.canRecoverSystemProxy))
+        XCTAssertEqual(
+            fields["recoveryBlocker"],
+            model.systemProxyRecoveryCapability.blocker.map { .string($0.rawValue) } ?? .null
+        )
+        XCTAssertEqual(fields["statusAuthoritative"], .boolean(false))
+    }
+
     func testGUIAndAutomationInvokeOneInjectedSystemProxyOperation() async throws {
         let shared = StaticSystemProxyOperation(status: recoveryStatus(error: .localProxyUnavailable))
         let model = BackendLifecycleModel(
