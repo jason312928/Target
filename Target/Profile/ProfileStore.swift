@@ -297,10 +297,10 @@ final class ProfileStore {
         var profiles = try loadManifest()
         guard profiles.contains(where: { $0.id == id }) else { throw ProfileStoreError.profileNotFound }
         guard !runtimeUsage.isProfileInUse(id) else { throw ProfileStoreError.profileInUse }
-        try fileManager.removeItem(at: try safeProfileDirectory(id))
         profiles.removeAll { $0.id == id }
-        try saveManifest(profiles)
         if try selectedProfileID() == id { try select(profiles.first?.id) }
+        try fileManager.removeItem(at: try safeProfileDirectory(id))
+        try saveManifest(profiles)
     }
 
     func configurationText(for id: UUID) throws -> String {

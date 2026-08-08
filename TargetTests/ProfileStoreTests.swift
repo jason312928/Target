@@ -569,6 +569,21 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertEqual(try store.listProfiles().map(\.id), [duplicate.id])
     }
 
+    func testDeletingSelectedProfileSelectsRemainingProfileBeforeTreeMutation() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        let first = try store.create(name: "First")
+        let selected = try store.create(name: "Selected")
+        try store.select(selected.id)
+
+        try store.delete(selected.id)
+
+        let reopened = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        XCTAssertEqual(try reopened.listProfiles().map(\.id), [first.id])
+        XCTAssertEqual(try reopened.selectedProfileID(), first.id)
+    }
+
     func testRedactionNeverReturnsSecretsOrPaths() {
         let input = "url=https://alice:secret@example.invalid/sub uuid=123e4567-e89b-12d3-a456-426614174000 \"password\":\"hunter2\" \"private_key\":\"private\" /Users/person/Library/Application Support/Target/config.json"
         let redacted = String(decoding: EngineLogRedactor.redact(Data(input.utf8)), as: UTF8.self)
