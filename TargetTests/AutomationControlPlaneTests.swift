@@ -40,6 +40,13 @@ final class AutomationControlPlaneTests: XCTestCase {
         XCTAssertEqual(Set(catalog.selectors[0].members.map(\.id)).count, catalog.selectors[0].members.count)
     }
 
+    func testPolicyCatalogParserProducesEmptyCatalogWhenPersistedOutboundsHaveNoSelector() {
+        let catalog = PolicyCatalogParser.parse(Data(#"{"outbounds":[{"type":"direct","tag":"direct"},{"type":"vmess","tag":"node"}]}"#.utf8))
+
+        XCTAssertEqual(catalog.formatVersion, 1)
+        XCTAssertTrue(catalog.selectors.isEmpty)
+    }
+
     func testPolicyCatalogMissingOrEmptyMemberTypeIsUnavailable() {
         let catalog = PolicyCatalogParser.parse(Data("""
         {"outbounds":[{"type":"selector","tag":"group","outbounds":["missing-type","empty-type"]},{"tag":"missing-type"},{"type":"","tag":"empty-type"}]}

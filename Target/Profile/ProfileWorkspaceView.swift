@@ -359,25 +359,39 @@ private struct PolicyCatalogSection: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(selector.tag ?? String(localized: "policy.catalog.invalid-tag"))
                             .font(.callout.weight(.semibold))
+                            .accessibilityIdentifier("policy.catalog.selector.\(selector.id).tag")
                         if let configuredDefault = selector.configuredDefault {
-                            Text("policy.catalog.configured-default") + Text(": \(configuredDefault)")
-                                .font(.caption).foregroundStyle(.secondary)
+                            (Text("policy.catalog.configured-default") + Text(": \(configuredDefault)"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).configured-default")
                         }
                         if selector.status != .available {
                             Text("policy.catalog.status.\(selector.status.rawValue)")
                                 .font(.caption).foregroundStyle(.orange)
+                                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).status")
                         }
                         ForEach(selector.members) { member in
                             HStack(spacing: 5) {
                                 Text(member.tag)
-                                if let type = member.type { Text(type).foregroundStyle(.secondary) }
-                                if member.status != .available { Text("policy.catalog.status.\(member.status.rawValue)").foregroundStyle(.orange) }
+                                    .accessibilityIdentifier("policy.catalog.selector.\(selector.id).member.\(member.id).tag")
+                                if let type = member.type {
+                                    Text(type)
+                                        .foregroundStyle(.secondary)
+                                        .accessibilityIdentifier("policy.catalog.selector.\(selector.id).member.\(member.id).type")
+                                }
+                                if member.status != .available {
+                                    Text("policy.catalog.status.\(member.status.rawValue)")
+                                        .foregroundStyle(.orange)
+                                        .accessibilityIdentifier("policy.catalog.selector.\(selector.id).member.\(member.id).status")
+                                }
                             }
                             .font(.caption)
-                            .accessibilityIdentifier("policy.catalog.member")
+                            .accessibilityIdentifier("policy.catalog.selector.\(selector.id).member.\(member.id)")
                         }
                     }
                     .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("policy.catalog.selector.\(selector.id)")
                 }
             }
         }

@@ -21,6 +21,72 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         case dirtyEditor = "dirty-editor"
         case invalidDiagnostic = "invalid-diagnostic"
         case subscriptionBusy = "subscription-busy"
+        case policyCatalogPopulated = "policy-catalog-populated"
+        case policyCatalogEmpty = "policy-catalog-empty"
+        case policyCatalogUnavailable = "policy-catalog-unavailable"
+        case policyCatalogWarnings = "policy-catalog-warnings"
+        case policyCatalogSecrets = "policy-catalog-secrets"
+    }
+
+    func testPolicyCatalogPopulatedPresentationUsesPersistedOrderDefaultAndType() {
+        let app = launch(.policyCatalogPopulated)
+        assertExists(element("policy.catalog", in: app), message: "Missing Policy Catalog")
+        assertCatalogText("group", identifier: "policy.catalog.selector.0.tag", in: app)
+        assertCatalogText("Configured default: second", identifier: "policy.catalog.selector.0.configured-default", in: app)
+        assertCatalogText("first", identifier: "policy.catalog.selector.0.member.0.tag", in: app)
+        assertCatalogText("vmess", identifier: "policy.catalog.selector.0.member.0.type", in: app)
+        assertCatalogText("second", identifier: "policy.catalog.selector.0.member.1.tag", in: app)
+        XCTAssertLessThan(
+            element("policy.catalog.selector.0.member.0", in: app).frame.minY,
+            element("policy.catalog.selector.0.member.1", in: app).frame.minY,
+            "Persisted member order must be rendered"
+        )
+    }
+
+    func testPolicyCatalogEmptyPresentationUsesLocalizedEmptyState() {
+        let app = launch(.policyCatalogEmpty)
+        assertExists(element("policy.catalog.empty", in: app), message: "Missing localized Policy Catalog empty state")
+        assertDoesNotExist(element("policy.catalog.unavailable", in: app), message: "Empty catalog rendered as unavailable")
+    }
+
+    func testPolicyCatalogUnavailablePresentationClearsStaleRows() {
+        let app = launch(.policyCatalogUnavailable)
+        assertExists(element("policy.catalog.unavailable", in: app), message: "Missing Policy Catalog unavailable state")
+        assertDoesNotExist(element("policy.catalog.selector.0", in: app), message: "Unavailable state retained a stale selector row")
+    }
+
+    func testPolicyCatalogWarningsAndDuplicateRowsAreRenderedWithoutCollapse() {
+        let app = launch(.policyCatalogWarnings)
+        assertCatalogText("Missing reference", identifier: "policy.catalog.selector.0.member.0.status", in: app)
+        assertCatalogText("Duplicate tag", identifier: "policy.catalog.selector.0.member.1.status", in: app)
+        assertCatalogText("Duplicate tag", identifier: "policy.catalog.selector.0.member.2.status", in: app)
+        assertCatalogText("Unavailable", identifier: "policy.catalog.selector.0.member.3.status", in: app)
+        assertCatalogText("Invalid selector tag", identifier: "policy.catalog.selector.4.status", in: app)
+        assertCatalogText("Malformed members", identifier: "policy.catalog.selector.5.status", in: app)
+        assertExists(element("policy.catalog.selector.0.member.1", in: app), message: "First duplicate member row collapsed")
+        assertExists(element("policy.catalog.selector.0.member.2", in: app), message: "Second duplicate member row collapsed")
+        assertExists(element("policy.catalog.selector.4", in: app), message: "First malformed selector row collapsed")
+        assertExists(element("policy.catalog.selector.5", in: app), message: "Second malformed selector row collapsed")
+    }
+
+    func testPolicyCatalogPresentationIsReadOnlyAndCredentialSafe() {
+        let app = launch(.policyCatalogSecrets)
+        let catalog = element("policy.catalog", in: app)
+        assertExists(catalog, message: "Missing Policy Catalog")
+        assertCatalogText("safe-group", identifier: "policy.catalog.selector.0.tag", in: app)
+        assertCatalogText("safe-member", identifier: "policy.catalog.selector.0.member.0.tag", in: app)
+        assertCatalogText("vmess", identifier: "policy.catalog.selector.0.member.0.type", in: app)
+        for type in [XCUIElement.ElementType.button, .switch, .popUpButton, .comboBox, .slider] {
+            XCTAssertEqual(catalog.descendants(matching: type).count, 0, "Policy Catalog must not expose mutation controls")
+        }
+        let sentinel = "POLICY-PRESENTATION-SECRET"
+        let catalogElements = catalog.descendants(matching: .any).allElementsBoundByIndex + [catalog]
+        for element in catalogElements {
+            XCTAssertFalse(element.label.contains(sentinel), "Credential sentinel leaked through Policy Catalog label")
+            XCTAssertFalse((element.value as? String ?? "").contains(sentinel), "Credential sentinel leaked through Policy Catalog value")
+            XCTAssertFalse(element.identifier.contains(sentinel), "Credential sentinel leaked through Policy Catalog identifier")
+            XCTAssertFalse(element.debugDescription.contains(sentinel), "Credential sentinel leaked through Policy Catalog accessibility description")
+        }
     }
 
     func testSaveFailureThenRecoveryAndSuccess() {
@@ -591,6 +657,12 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         let element = app.staticTexts[identifier]
         assertExists(element, message: "Missing state probe \(identifier)")
         return element.value as? String ?? ""
+    }
+
+    private func assertCatalogText(_ expected: String, identifier: String, in app: XCUIApplication) {
+        let result = element(identifier, in: app)
+        assertExists(result, message: "Missing Policy Catalog element \(identifier)")
+        XCTAssertEqual(result.label, expected, "Unexpected Policy Catalog text for \(identifier)")
     }
 
     private func integerState(_ identifier: String, in app: XCUIApplication) -> Int {

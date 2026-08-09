@@ -12,6 +12,11 @@ enum PresentationScenario: String, CaseIterable {
     case dirtyEditor = "dirty-editor"
     case invalidDiagnostic = "invalid-diagnostic"
     case subscriptionBusy = "subscription-busy"
+    case policyCatalogPopulated = "policy-catalog-populated"
+    case policyCatalogEmpty = "policy-catalog-empty"
+    case policyCatalogUnavailable = "policy-catalog-unavailable"
+    case policyCatalogWarnings = "policy-catalog-warnings"
+    case policyCatalogSecrets = "policy-catalog-secrets"
 
     static func fromLaunchArguments() -> Self {
         let arguments = ProcessInfo.processInfo.arguments
@@ -66,12 +71,20 @@ final class PresentationFixture {
         first = try store.create(name: "First Profile", subscriptionURL: firstSubscription)
         second = try store.create(name: "Second Profile")
         try store.save(json: Self.persistedConfiguration, for: second.id)
-        if scenario == .localProfile || scenario == .remoteProfile || scenario == .subscriptionBusy {
-            try store.save(json: Self.persistedConfiguration, for: first.id)
+        if [
+            .localProfile, .remoteProfile, .subscriptionBusy,
+            .policyCatalogPopulated, .policyCatalogEmpty, .policyCatalogUnavailable,
+            .policyCatalogWarnings, .policyCatalogSecrets
+        ].contains(scenario) {
+            try store.save(json: Self.configuration(for: scenario), for: first.id)
         }
         checker.replaceResults(Self.checkerResults(for: scenario))
         try store.select(first.id)
-        model = ProfileViewModel(store: store, subscriptionFetcher: fetcher)
+        model = ProfileViewModel(
+            store: store,
+            subscriptionFetcher: fetcher,
+            policyCatalogLoader: scenario == .policyCatalogUnavailable ? { throw PresentationFixtureError.persistedReadFailed } : nil
+        )
 
         switch scenario {
         case .saveFailureThenSuccess, .successfulDiscard:
@@ -85,7 +98,9 @@ final class PresentationFixture {
             model.updateEditor(Self.dirtyConfiguration)
         case .subscriptionCandidateReturn:
             model.updateEditor(Self.dirtyConfiguration)
-        case .localProfile, .remoteProfile, .subscriptionBusy:
+        case .localProfile, .remoteProfile, .subscriptionBusy,
+             .policyCatalogPopulated, .policyCatalogEmpty, .policyCatalogUnavailable,
+             .policyCatalogWarnings, .policyCatalogSecrets:
             break
         case .dirtyEditor:
             model.updateEditor(Self.dirtyConfiguration)
@@ -141,6 +156,21 @@ final class PresentationFixture {
     }
     """ + "\n"
 
+    private static func configuration(for scenario: PresentationScenario) -> String {
+        switch scenario {
+        case .policyCatalogPopulated:
+            #"{"inbounds":[],"outbounds":[{"type":"selector","tag":"group","outbounds":["first","second"],"default":"second"},{"type":"vmess","tag":"first"},{"type":"direct","tag":"second"}],"route":{}}"#
+        case .policyCatalogEmpty:
+            #"{"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}],"route":{}}"#
+        case .policyCatalogWarnings:
+            #"{"inbounds":[],"outbounds":[{"type":"selector","tag":"warnings","outbounds":["missing","duplicate","duplicate","unavailable"]},{"type":"direct","tag":"duplicate"},{"type":"block","tag":"duplicate"},{"tag":"unavailable"},{"type":"selector","tag":"","outbounds":[]},{"type":"selector","tag":"also-invalid","outbounds":"bad"}],"route":{}}"#
+        case .policyCatalogSecrets:
+            #"{"inbounds":[],"outbounds":[{"type":"selector","tag":"safe-group","outbounds":["safe-member"],"default":"safe-member"},{"type":"vmess","tag":"safe-member","server":"POLICY-PRESENTATION-SECRET","address":"POLICY-PRESENTATION-SECRET","username":"POLICY-PRESENTATION-SECRET","password":"POLICY-PRESENTATION-SECRET","uuid":"POLICY-PRESENTATION-SECRET","token":"POLICY-PRESENTATION-SECRET","private_key":"POLICY-PRESENTATION-SECRET","certificate":"POLICY-PRESENTATION-SECRET","tls":{"server_name":"POLICY-PRESENTATION-SECRET"},"transport":{"path":"POLICY-PRESENTATION-SECRET"},"arbitrary":{"nested":"POLICY-PRESENTATION-SECRET"}}],"route":{}}"#
+        default:
+            persistedConfiguration
+        }
+    }
+
     private static func checkerResults(for scenario: PresentationScenario) -> [Result<Void, ConfigurationDiagnostic>] {
         let failed: Result<Void, ConfigurationDiagnostic> = .failure(
             ConfigurationDiagnostic(messageKey: "profile.validation.check-failed", line: nil, column: nil)
@@ -150,11 +180,14 @@ final class PresentationFixture {
         case .importCandidateReturn, .subscriptionCandidateReturn: return [.success(()), failed]
         case .persistedReadDiscardFailure, .successfulDiscard, .emptyWorkspace,
              .localProfile, .remoteProfile, .dirtyEditor, .invalidDiagnostic,
-             .subscriptionBusy:
+             .subscriptionBusy, .policyCatalogPopulated, .policyCatalogEmpty,
+             .policyCatalogUnavailable, .policyCatalogWarnings, .policyCatalogSecrets:
             return [.success(())]
         }
     }
 }
+
+private enum PresentationFixtureError: Error { case persistedReadFailed }
 
 private final class PresentationFixtureChecker: SingBoxConfigurationChecking, @unchecked Sendable {
     private var results: [Result<Void, ConfigurationDiagnostic>]
