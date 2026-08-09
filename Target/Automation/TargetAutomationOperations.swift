@@ -7,6 +7,7 @@ actor TargetAutomationOperations {
     }
 
     private let profileStore: ProfileStore
+    private let policyCatalogOperation: PolicyCatalogOperation
     private let backend: any EngineBackend
     private let serviceClient: any SystemProxyClient
     private let systemProxyOperations: any TargetSystemProxyOperating
@@ -26,6 +27,7 @@ actor TargetAutomationOperations {
         systemProxyStatusObserver: (@Sendable (SystemProxyStatus) async -> Void)? = nil
     ) {
         self.profileStore = profileStore
+        self.policyCatalogOperation = PolicyCatalogOperation(profileStore: profileStore)
         self.backend = backend
         self.serviceClient = serviceClient
         let resolvedSystemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: serviceClient)
@@ -53,6 +55,7 @@ actor TargetAutomationOperations {
             case "status": return await consolidatedStatus()
             case "profile.import": return try profileImport(request.arguments)
             case "profile.list": return try profileList()
+            case "policy.list": return try policyList()
             case "profile.delete": return try profileDelete(request.arguments)
             case "engine.status": return await engineStatus()
             case "engine.start": return try await engineStart()
@@ -154,6 +157,10 @@ actor TargetAutomationOperations {
             ])
         }
         return .success(.object(["profiles": .array(profiles)]))
+    }
+
+    private func policyList() throws -> AutomationResponse {
+        .success(try policyCatalogOperation.read().automationJSON())
     }
 
     private func profileDelete(_ arguments: [String: String]) throws -> AutomationResponse {
@@ -342,7 +349,7 @@ actor TargetAutomationOperations {
     }
 
     private static let commands = [
-        "capabilities", "status", "profile.import", "profile.list", "profile.delete",
+        "capabilities", "status", "profile.import", "profile.list", "profile.delete", "policy.list",
         "engine.status", "engine.start", "engine.stop", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
     ]

@@ -5,6 +5,7 @@ import Observation
 @Observable
 final class ProfileViewModel {
     private let store: ProfileStore
+    private let policyCatalogOperation: PolicyCatalogOperation
     private let configurationLoader: (UUID) throws -> String
     private let subscriptionFetcher: any ProfileSubscriptionFetching
     private var subscriptionTask: Task<Void, Never>?
@@ -32,6 +33,8 @@ final class ProfileViewModel {
     /// this rather than refreshing lifecycle state for cancelled actions or
     /// subscription-cache metadata updates.
     private(set) var readinessChangeGeneration = 0
+    private(set) var policyCatalog: PolicyCatalog?
+    private(set) var isPolicyCatalogUnavailable = false
 
     init(
         store: ProfileStore = ProfileStore(),
@@ -39,6 +42,7 @@ final class ProfileViewModel {
         configurationLoader: ((UUID) throws -> String)? = nil
     ) {
         self.store = store
+        self.policyCatalogOperation = PolicyCatalogOperation(profileStore: store)
         self.subscriptionFetcher = subscriptionFetcher
         self.configurationLoader = configurationLoader ?? { try store.configurationText(for: $0) }
         reloadInitialState()
@@ -115,12 +119,15 @@ final class ProfileViewModel {
             profiles = try store.listProfiles()
             selectedID = try store.selectedProfileID() ?? profiles.first?.id
             loadSelectedText()
+            refreshPolicyCatalog()
         } catch {
             profiles = []
             selectedID = nil
             editorText = ""
             isConfigurationLoaded = false
             messageKey = "profile.message.load-failed"
+            policyCatalog = nil
+            isPolicyCatalogUnavailable = true
         }
     }
 
@@ -201,6 +208,7 @@ final class ProfileViewModel {
         do {
             try store.rename(id, to: name)
             refreshMetadataPreservingEditor()
+            refreshPolicyCatalog()
         } catch { messageKey = "profile.message.operation-failed" }
     }
 
@@ -415,6 +423,8 @@ final class ProfileViewModel {
             diagnostic = nil
             isDirty = false
             isConfigurationLoaded = false
+            policyCatalog = nil
+            isPolicyCatalogUnavailable = false
             return
         }
         do {
@@ -431,10 +441,23 @@ final class ProfileViewModel {
             isConfigurationLoaded = false
             messageKey = "profile.message.configuration-read-failed"
         }
+        refreshPolicyCatalog()
     }
 
     private func markReadinessChanged() {
         readinessChangeGeneration &+= 1
+    }
+
+    /// Catalog state is fail-closed. A storage read error clears prior data rather
+    /// than retaining the previous Profile's catalog in the UI.
+    private func refreshPolicyCatalog() {
+        do {
+            policyCatalog = try policyCatalogOperation.read()
+            isPolicyCatalogUnavailable = false
+        } catch {
+            policyCatalog = nil
+            isPolicyCatalogUnavailable = true
+        }
     }
 
     private func present(_ error: ProfileStoreError) {

@@ -3,6 +3,22 @@ import XCTest
 @testable import Target
 
 final class AutomationControlPlaneTests: XCTestCase {
+    func testPolicyCatalogAllowlistsSelectorMembersAndRedactsSecrets() throws {
+        let secret = "POLICY-CREDENTIAL-SENTINEL"
+        let catalog = PolicyCatalogParser.parse(Data("""
+        {"outbounds":[{"type":"selector","tag":"group","outbounds":["b","a","missing"],"default":"a","token":"\(secret)"},{"type":"vmess","tag":"a","server":"\(secret)","uuid":"\(secret)"},{"type":"trojan","tag":"b","password":"\(secret)","transport":{"path":"\(secret)"}}]}
+        """.utf8))
+        XCTAssertEqual(catalog.selectors.first?.members.map(\.tag), ["b", "a", "missing"])
+        XCTAssertEqual(catalog.selectors.first?.configuredDefault, "a")
+        XCTAssertEqual(catalog.selectors.first?.members.last?.status, .missingReference)
+        let encoded = try JSONEncoder().encode(catalog.automationJSON())
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains(secret))
+    }
+
+    func testPolicyCatalogKeepsDuplicateTagsAmbiguous() {
+        let catalog = PolicyCatalogParser.parse(Data("{\"outbounds\":[{\"type\":\"selector\",\"tag\":\"g\",\"outbounds\":[\"x\"]},{\"type\":\"direct\",\"tag\":\"x\"},{\"type\":\"block\",\"tag\":\"x\"}]}".utf8))
+        XCTAssertEqual(catalog.selectors.first?.members.first?.status, .duplicateTag)
+    }
     func testProtocolDecodesValidRequestStrictly() throws {
         let data = Data(#"{"action":"status","arguments":{},"protocolVersion":1}"#.utf8)
         XCTAssertEqual(

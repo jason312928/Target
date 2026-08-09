@@ -264,6 +264,11 @@ private struct ProfileWorkspaceDetailView: View {
             }
 
             Divider().padding(.top, 12)
+            PolicyCatalogSection(catalog: model.policyCatalog, unavailable: model.isPolicyCatalogUnavailable)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+
+            Divider().padding(.top, 12)
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -333,6 +338,50 @@ private struct ProfileWorkspaceDetailView: View {
                     .accessibilityIdentifier("profile.workspace.busy")
             }
         }
+    }
+}
+
+private struct PolicyCatalogSection: View {
+    let catalog: PolicyCatalog?
+    let unavailable: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            TargetSectionTitle("policy.catalog.section", systemImage: "list.bullet")
+            if unavailable {
+                ContentUnavailableView("policy.catalog.unavailable.title", systemImage: "lock.trianglebadge.exclamationmark", description: Text("policy.catalog.unavailable.description"))
+                    .accessibilityIdentifier("policy.catalog.unavailable")
+            } else if let catalog, catalog.selectors.isEmpty {
+                ContentUnavailableView("policy.catalog.empty.title", systemImage: "list.bullet", description: Text("policy.catalog.empty.description"))
+                    .accessibilityIdentifier("policy.catalog.empty")
+            } else if let catalog {
+                ForEach(catalog.selectors) { selector in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(selector.tag ?? String(localized: "policy.catalog.invalid-tag"))
+                            .font(.callout.weight(.semibold))
+                        if let configuredDefault = selector.configuredDefault {
+                            Text("policy.catalog.configured-default") + Text(": \(configuredDefault)")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if selector.status != .available {
+                            Text("policy.catalog.status.\(selector.status.rawValue)")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
+                        ForEach(selector.members) { member in
+                            HStack(spacing: 5) {
+                                Text(member.tag)
+                                if let type = member.type { Text(type).foregroundStyle(.secondary) }
+                                if member.status != .available { Text("policy.catalog.status.\(member.status.rawValue)").foregroundStyle(.orange) }
+                            }
+                            .font(.caption)
+                            .accessibilityIdentifier("policy.catalog.member")
+                        }
+                    }
+                    .accessibilityElement(children: .contain)
+                }
+            }
+        }
+        .accessibilityIdentifier("policy.catalog")
     }
 }
 

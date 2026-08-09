@@ -1,4 +1,15 @@
 {
+  "policy.catalog.section" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Policy Catalog" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "策略目录" } } } },
+  "policy.catalog.empty.title" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "No selector policies" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "没有选择器策略" } } } },
+  "policy.catalog.empty.description" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "The selected saved Profile has no selector groups." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前已保存 Profile 没有选择器组。" } } } },
+  "policy.catalog.unavailable.title" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Policy catalog unavailable" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "策略目录不可用" } } } },
+  "policy.catalog.unavailable.description" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "The selected persisted Profile could not be read safely." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法安全读取当前已保存 Profile。" } } } },
+  "policy.catalog.configured-default" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Configured default" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配置默认值" } } } },
+  "policy.catalog.invalid-tag" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Invalid selector tag" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无效选择器标签" } } } },
+  "policy.catalog.status.missingReference" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Missing reference" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "缺少引用" } } } },
+  "policy.catalog.status.duplicateTag" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Ambiguous tag" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "标签不明确" } } } },
+  "policy.catalog.status.malformedMembers" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Invalid members" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "成员无效" } } } },
+  "policy.catalog.status.invalidTag" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Invalid tag" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "标签无效" } } } },
   "sourceLanguage" : "en",
   "strings" : {
     "app.title" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Target" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Target" } } } },
