@@ -58,15 +58,16 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     func testPolicyCatalogWarningsAndDuplicateRowsAreRenderedWithoutCollapse() {
         let app = launch(.policyCatalogWarnings)
         assertCatalogText("Missing reference", identifier: "policy.catalog.selector.0.member.0.status", in: app)
-        assertCatalogText("Duplicate tag", identifier: "policy.catalog.selector.0.member.1.status", in: app)
-        assertCatalogText("Duplicate tag", identifier: "policy.catalog.selector.0.member.2.status", in: app)
+        assertCatalogText("Ambiguous tag", identifier: "policy.catalog.selector.0.member.1.status", in: app)
+        assertCatalogText("Ambiguous tag", identifier: "policy.catalog.selector.0.member.2.status", in: app)
         assertCatalogText("Unavailable", identifier: "policy.catalog.selector.0.member.3.status", in: app)
-        assertCatalogText("Invalid selector tag", identifier: "policy.catalog.selector.4.status", in: app)
-        assertCatalogText("Malformed members", identifier: "policy.catalog.selector.5.status", in: app)
+        assertCatalogText("Invalid selector tag", identifier: "policy.catalog.selector.4.tag", in: app)
+        assertCatalogText("Invalid tag", identifier: "policy.catalog.selector.4.status", in: app)
+        assertCatalogText("Invalid members", identifier: "policy.catalog.selector.5.status", in: app)
         assertExists(element("policy.catalog.selector.0.member.1", in: app), message: "First duplicate member row collapsed")
         assertExists(element("policy.catalog.selector.0.member.2", in: app), message: "Second duplicate member row collapsed")
-        assertExists(element("policy.catalog.selector.4", in: app), message: "First malformed selector row collapsed")
-        assertExists(element("policy.catalog.selector.5", in: app), message: "Second malformed selector row collapsed")
+        assertExists(element("policy.catalog.selector.4", in: app), message: "Invalid selector row collapsed")
+        assertExists(element("policy.catalog.selector.5", in: app), message: "Malformed selector row collapsed")
     }
 
     func testPolicyCatalogPresentationIsReadOnlyAndCredentialSafe() {
@@ -660,7 +661,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     }
 
     private func assertCatalogText(_ expected: String, identifier: String, in app: XCUIApplication) {
-        let result = element(identifier, in: app)
+        let result = app.staticTexts[identifier]
         assertExists(result, message: "Missing Policy Catalog element \(identifier)")
         XCTAssertEqual(result.label, expected, "Unexpected Policy Catalog text for \(identifier)")
     }

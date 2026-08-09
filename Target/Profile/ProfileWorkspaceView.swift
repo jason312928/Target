@@ -366,8 +366,8 @@ private struct PolicyCatalogSection: View {
                                 .foregroundStyle(.secondary)
                                 .accessibilityIdentifier("policy.catalog.selector.\(selector.id).configured-default")
                         }
-                        if selector.status != .available {
-                            Text("policy.catalog.status.\(selector.status.rawValue)")
+                        if let warning = selector.status.presentationWarning {
+                            Text(verbatim: warning)
                                 .font(.caption).foregroundStyle(.orange)
                                 .accessibilityIdentifier("policy.catalog.selector.\(selector.id).status")
                         }
@@ -380,8 +380,8 @@ private struct PolicyCatalogSection: View {
                                         .foregroundStyle(.secondary)
                                         .accessibilityIdentifier("policy.catalog.selector.\(selector.id).member.\(member.id).type")
                                 }
-                                if member.status != .available {
-                                    Text("policy.catalog.status.\(member.status.rawValue)")
+                                if let warning = member.status.presentationWarning {
+                                    Text(verbatim: warning)
                                         .foregroundStyle(.orange)
                                         .accessibilityIdentifier("policy.catalog.selector.\(selector.id).member.\(member.id).status")
                                 }
@@ -396,6 +396,19 @@ private struct PolicyCatalogSection: View {
             }
         }
         .accessibilityIdentifier("policy.catalog")
+    }
+}
+
+private extension PolicyCatalogStructuralStatus {
+    var presentationWarning: String? {
+        switch self {
+        case .available: nil
+        case .missingReference: String(localized: "policy.catalog.status.missingReference")
+        case .duplicateTag: String(localized: "policy.catalog.status.duplicateTag")
+        case .malformedMembers: String(localized: "policy.catalog.status.malformedMembers")
+        case .invalidTag: String(localized: "policy.catalog.status.invalidTag")
+        case .unavailable: String(localized: "policy.catalog.status.unavailable")
+        }
     }
 }
 
