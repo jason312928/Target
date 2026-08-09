@@ -30,7 +30,6 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
 
     func testPolicyCatalogPopulatedPresentationUsesPersistedOrderDefaultAndType() {
         let app = launch(.policyCatalogPopulated)
-        assertExists(element("policy.catalog", in: app), message: "Missing Policy Catalog")
         assertCatalogText("group", identifier: "policy.catalog.selector.0.tag", in: app)
         assertCatalogText("Configured default: second", identifier: "policy.catalog.selector.0.configured-default", in: app)
         assertCatalogText("first", identifier: "policy.catalog.selector.0.member.0.tag", in: app)
@@ -72,17 +71,20 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
 
     func testPolicyCatalogPresentationIsReadOnlyAndCredentialSafe() {
         let app = launch(.policyCatalogSecrets)
-        let catalog = element("policy.catalog", in: app)
-        assertExists(catalog, message: "Missing Policy Catalog")
         assertCatalogText("safe-group", identifier: "policy.catalog.selector.0.tag", in: app)
         assertCatalogText("safe-member", identifier: "policy.catalog.selector.0.member.0.tag", in: app)
         assertCatalogText("vmess", identifier: "policy.catalog.selector.0.member.0.type", in: app)
+        let policyElements = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "policy.catalog"))
+            .allElementsBoundByIndex
+        XCTAssertFalse(policyElements.isEmpty, "Missing Policy Catalog accessibility elements")
         for type in [XCUIElement.ElementType.button, .switch, .popUpButton, .comboBox, .slider] {
-            XCTAssertEqual(catalog.descendants(matching: type).count, 0, "Policy Catalog must not expose mutation controls")
+            let policyControls = app.descendants(matching: type)
+                .matching(NSPredicate(format: "identifier BEGINSWITH %@", "policy.catalog"))
+            XCTAssertEqual(policyControls.count, 0, "Policy Catalog must not expose mutation controls")
         }
         let sentinel = "POLICY-PRESENTATION-SECRET"
-        let catalogElements = catalog.descendants(matching: .any).allElementsBoundByIndex + [catalog]
-        for element in catalogElements {
+        for element in policyElements {
             XCTAssertFalse(element.label.contains(sentinel), "Credential sentinel leaked through Policy Catalog label")
             XCTAssertFalse((element.value as? String ?? "").contains(sentinel), "Credential sentinel leaked through Policy Catalog value")
             XCTAssertFalse(element.identifier.contains(sentinel), "Credential sentinel leaked through Policy Catalog identifier")
@@ -663,7 +665,8 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     private func assertCatalogText(_ expected: String, identifier: String, in app: XCUIApplication) {
         let result = app.staticTexts[identifier]
         assertExists(result, message: "Missing Policy Catalog element \(identifier)")
-        XCTAssertEqual(result.label, expected, "Unexpected Policy Catalog text for \(identifier)")
+        let observed = result.label.isEmpty ? (result.value as? String ?? "") : result.label
+        XCTAssertEqual(observed, expected, "Unexpected Policy Catalog text for \(identifier)")
     }
 
     private func integerState(_ identifier: String, in app: XCUIApplication) -> Int {

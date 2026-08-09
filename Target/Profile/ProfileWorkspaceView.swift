@@ -369,6 +369,7 @@ private struct PolicyCatalogSection: View {
                         if let warning = selector.status.presentationWarning {
                             Text(verbatim: warning)
                                 .font(.caption).foregroundStyle(.orange)
+                                .accessibilityLabel(Text(verbatim: warning))
                                 .accessibilityIdentifier("policy.catalog.selector.\(selector.id).status")
                         }
                         ForEach(selector.members) { member in
@@ -383,10 +384,12 @@ private struct PolicyCatalogSection: View {
                                 if let warning = member.status.presentationWarning {
                                     Text(verbatim: warning)
                                         .foregroundStyle(.orange)
+                                        .accessibilityLabel(Text(verbatim: warning))
                                         .accessibilityIdentifier("policy.catalog.selector.\(selector.id).member.\(member.id).status")
                                 }
                             }
                             .font(.caption)
+                            .accessibilityElement(children: .contain)
                             .accessibilityIdentifier("policy.catalog.selector.\(selector.id).member.\(member.id)")
                         }
                     }
@@ -395,6 +398,7 @@ private struct PolicyCatalogSection: View {
                 }
             }
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("policy.catalog")
     }
 }
