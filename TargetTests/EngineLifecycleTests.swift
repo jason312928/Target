@@ -104,7 +104,9 @@ final class EngineLifecycleTests: XCTestCase {
         let fixture = try EngineLifecycleFixture(mode: .exitAfterReady)
         do {
             _ = try await fixture.backend.startEngine()
-            try await waitUntil(timeout: .seconds(2)) {
+            // A cold virtualized runner can spend more than two seconds entering
+            // Xcode's Python runtime before the fixture's intentional exit.
+            try await waitUntil(timeout: .seconds(4)) {
                 let status = try? await fixture.backend.queryStatus()
                 return status?.engineState == .stopped
             }

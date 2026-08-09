@@ -263,10 +263,10 @@ private struct ProfileWorkspaceDetailView: View {
                 .padding(.vertical, 10)
             }
 
-            Divider().padding(.top, 12)
+            Divider().padding(.top, 8)
             PolicyCatalogSection(catalog: model.policyCatalog, unavailable: model.isPolicyCatalogUnavailable)
                 .padding(.horizontal, 20)
-                .padding(.vertical, 10)
+                .padding(.vertical, 4)
 
             Divider().padding(.top, 12)
 
@@ -349,11 +349,23 @@ private struct PolicyCatalogSection: View {
         VStack(alignment: .leading, spacing: 7) {
             TargetSectionTitle("policy.catalog.section", systemImage: "list.bullet")
             if unavailable {
-                ContentUnavailableView("policy.catalog.unavailable.title", systemImage: "lock.trianglebadge.exclamationmark", description: Text("policy.catalog.unavailable.description"))
-                    .accessibilityIdentifier("policy.catalog.unavailable")
+                VStack(alignment: .leading, spacing: 3) {
+                    Label("policy.catalog.unavailable.title", systemImage: "lock.trianglebadge.exclamationmark")
+                        .font(.callout.weight(.semibold))
+                        .accessibilityIdentifier("policy.catalog.unavailable")
+                    Text("policy.catalog.unavailable.description")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             } else if let catalog, catalog.selectors.isEmpty {
-                ContentUnavailableView("policy.catalog.empty.title", systemImage: "list.bullet", description: Text("policy.catalog.empty.description"))
-                    .accessibilityIdentifier("policy.catalog.empty")
+                VStack(alignment: .leading, spacing: 3) {
+                    Label("policy.catalog.empty.title", systemImage: "list.bullet")
+                        .font(.callout.weight(.semibold))
+                        .accessibilityIdentifier("policy.catalog.empty")
+                    Text("policy.catalog.empty.description")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             } else if let catalog {
                 ForEach(catalog.selectors) { selector in
                     VStack(alignment: .leading, spacing: 3) {

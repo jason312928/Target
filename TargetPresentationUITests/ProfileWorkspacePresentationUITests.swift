@@ -505,9 +505,13 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
 
     private func assertSelectedShellWorkspace(in app: XCUIApplication, expectsOuterSidebar: Bool = true) {
         if expectsOuterSidebar {
-            assertVisibleInsideWindow(element("app-shell.sidebar", in: app), in: app, message: "Outer sidebar is unavailable")
+            assertVisibleInsideWindow(
+                element("app-shell.destination.profiles", in: app),
+                in: app,
+                message: "Outer sidebar is unavailable"
+            )
         }
-        assertVisibleInsideWindow(element("profile.list", in: app), in: app, message: "Inner Profile list is unavailable")
+        assertUsableProfileList(in: app)
         assertVisibleInsideWindow(app.staticTexts["profile.summary.name"], in: app, message: "Profile name is unavailable")
         XCTAssertGreaterThan(app.staticTexts["profile.summary.name"].frame.width, 60, "Profile name is constrained to a character column")
         assertVisibleInsideWindow(element("profile.summary.source", in: app), in: app, message: "Profile source summary is unavailable")
@@ -517,6 +521,22 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         assertVisibleInsideWindow(app.buttons["Format"], in: app, message: "Format is unavailable")
         assertVisibleInsideWindow(app.menuButtons["More Actions"], in: app, message: "More Actions is unavailable")
         assertDetailUsesAvailableWidth(element("profile.workspace.detail", in: app), in: app)
+    }
+
+    private func assertUsableProfileList(in app: XCUIApplication) {
+        // AppKit can report the native List container's accessibility frame beyond
+        // the window even when its rows are fully visible. Assert a contained row,
+        // which is the actual selectable UI, instead of that incidental container.
+        let list = element("profile.list", in: app)
+        assertExists(list, message: "Inner Profile list is unavailable")
+        let rows = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "profile.row."))
+            .allElementsBoundByIndex
+        guard let visibleRow = rows.first(where: { isVisibleInsideWindow($0, in: app) }) else {
+            return XCTFail("Inner Profile list has no visible Profile row")
+        }
+        assertVisibleInsideWindow(visibleRow, in: app, message: "Profile row is unavailable")
+        XCTAssertTrue(visibleRow.isHittable || waitUntilHittable(visibleRow), "Profile row is not reachable")
     }
 
     private func assertOuterProfilesTitle(in app: XCUIApplication) {
