@@ -161,18 +161,23 @@ struct PolicyCatalog: Equatable, Sendable {
 }
 
 struct PolicyCatalogSelector: Equatable, Sendable, Identifiable {
+    /// The persisted array position is deliberately part of identity: malformed
+    /// input is represented verbatim, including duplicate or absent tags.
+    let identity: Int
     let tag: String?
     let status: PolicyCatalogStructuralStatus
     let configuredDefault: String?
     let members: [PolicyCatalogMember]
-    var id: String { tag ?? "invalid-selector-\(members.count)" }
+    var id: Int { identity }
 }
 
 struct PolicyCatalogMember: Equatable, Sendable, Identifiable {
+    /// The persisted member position preserves duplicate references for SwiftUI.
+    let identity: Int
     let tag: String
     let type: String?
     let status: PolicyCatalogStructuralStatus
-    var id: String { tag }
+    var id: Int { identity }
 }
 
 enum PolicyCatalogStructuralStatus: String, Equatable, Sendable {
@@ -186,22 +191,25 @@ enum PolicyCatalogParser {
         let objects = outbounds.compactMap { $0 as? [String: Any] }
         var tagged: [String: [[String: Any]]] = [:]
         for object in objects { if let tag = nonemptyString(object["tag"]) { tagged[tag, default: []].append(object) } }
-        return PolicyCatalog(formatVersion: 1, selectors: objects.compactMap { selector in
+        return PolicyCatalog(formatVersion: 1, selectors: objects.enumerated().compactMap { selectorIndex, selector in
             guard nonemptyString(selector["type"]) == "selector" else { return nil }
             let tag = nonemptyString(selector["tag"])
             let status: PolicyCatalogStructuralStatus = tag == nil ? .invalidTag : .available
             guard let rawMembers = selector["outbounds"] as? [Any], rawMembers.allSatisfy({ nonemptyString($0) != nil }) else {
-                return PolicyCatalogSelector(tag: tag, status: status == .invalidTag ? status : .malformedMembers, configuredDefault: nil, members: [])
+                return PolicyCatalogSelector(identity: selectorIndex, tag: tag, status: status == .invalidTag ? status : .malformedMembers, configuredDefault: nil, members: [])
             }
-            let members = rawMembers.compactMap(nonemptyString).map { name -> PolicyCatalogMember in
-                guard let matches = tagged[name] else { return PolicyCatalogMember(tag: name, type: nil, status: .missingReference) }
-                guard matches.count == 1 else { return PolicyCatalogMember(tag: name, type: nil, status: .duplicateTag) }
-                return PolicyCatalogMember(tag: name, type: nonemptyString(matches[0]["type"]), status: .available)
+            let members = rawMembers.compactMap(nonemptyString).enumerated().map { memberIndex, name -> PolicyCatalogMember in
+                guard let matches = tagged[name] else { return PolicyCatalogMember(identity: memberIndex, tag: name, type: nil, status: .missingReference) }
+                guard matches.count == 1 else { return PolicyCatalogMember(identity: memberIndex, tag: name, type: nil, status: .duplicateTag) }
+                guard let type = nonemptyString(matches[0]["type"]) else {
+                    return PolicyCatalogMember(identity: memberIndex, tag: name, type: nil, status: .unavailable)
+                }
+                return PolicyCatalogMember(identity: memberIndex, tag: name, type: type, status: .available)
             }
             let configuredDefault = nonemptyString(selector["default"]).flatMap { candidate in
                 members.first(where: { $0.tag == candidate && $0.status == .available })?.tag
             }
-            return PolicyCatalogSelector(tag: tag, status: status, configuredDefault: configuredDefault, members: members)
+            return PolicyCatalogSelector(identity: selectorIndex, tag: tag, status: status, configuredDefault: configuredDefault, members: members)
         })
     }
 

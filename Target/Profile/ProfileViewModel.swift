@@ -5,7 +5,7 @@ import Observation
 @Observable
 final class ProfileViewModel {
     private let store: ProfileStore
-    private let policyCatalogOperation: PolicyCatalogOperation
+    private let policyCatalogLoader: () throws -> PolicyCatalog
     private let configurationLoader: (UUID) throws -> String
     private let subscriptionFetcher: any ProfileSubscriptionFetching
     private var subscriptionTask: Task<Void, Never>?
@@ -39,10 +39,11 @@ final class ProfileViewModel {
     init(
         store: ProfileStore = ProfileStore(),
         subscriptionFetcher: any ProfileSubscriptionFetching = SecureSubscriptionFetcher(),
-        configurationLoader: ((UUID) throws -> String)? = nil
+        configurationLoader: ((UUID) throws -> String)? = nil,
+        policyCatalogLoader: (() throws -> PolicyCatalog)? = nil
     ) {
         self.store = store
-        self.policyCatalogOperation = PolicyCatalogOperation(profileStore: store)
+        self.policyCatalogLoader = policyCatalogLoader ?? { try PolicyCatalogOperation(profileStore: store).read() }
         self.subscriptionFetcher = subscriptionFetcher
         self.configurationLoader = configurationLoader ?? { try store.configurationText(for: $0) }
         reloadInitialState()
@@ -253,6 +254,9 @@ final class ProfileViewModel {
             isDirty = false
             messageKey = "profile.message.saved"
             refreshMetadataPreservingEditor()
+            // Read only the newly persisted valid revision.  Do not reload the
+            // editor: formatting and cursor/editor semantics remain unchanged.
+            refreshPolicyCatalog()
             markReadinessChanged()
             return true
         } catch let error as ProfileStoreError {
@@ -452,7 +456,7 @@ final class ProfileViewModel {
     /// than retaining the previous Profile's catalog in the UI.
     private func refreshPolicyCatalog() {
         do {
-            policyCatalog = try policyCatalogOperation.read()
+            policyCatalog = try policyCatalogLoader()
             isPolicyCatalogUnavailable = false
         } catch {
             policyCatalog = nil

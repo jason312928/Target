@@ -138,6 +138,69 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(try store.availableValidVersions(for: second.id).map(\.revision), [1])
     }
 
+    func testPolicyCatalogUsesPersistedRevisionAndRefreshesOnlyAfterSave() throws {
+        let fixture = try makeFixture()
+        let catalogA = #"{"outbounds":[{"type":"selector","tag":"A","outbounds":["a"]},{"type":"direct","tag":"a"}]}"#
+        let catalogB = #"{"outbounds":[{"type":"selector","tag":"B","outbounds":["b"]},{"type":"block","tag":"b"}]}"#
+        try fixture.store.save(json: catalogA, for: fixture.first.id)
+        let model = ProfileViewModel(store: fixture.store, subscriptionFetcher: ControlledSubscriptionFetcher())
+        XCTAssertEqual(model.policyCatalog?.selectors.first?.tag, "A")
+
+        model.updateEditor(catalogB)
+        XCTAssertEqual(model.policyCatalog?.selectors.first?.tag, "A")
+        model.save()
+        XCTAssertEqual(model.policyCatalog?.selectors.first?.tag, "B")
+
+        model.updateEditor("{")
+        model.save()
+        XCTAssertEqual(model.policyCatalog?.selectors.first?.tag, "B")
+    }
+
+    func testPolicyCatalogClearsStaleDataWhenPostSaveReadFailsWithoutReplacingEditor() throws {
+        let fixture = try makeFixture()
+        let catalogA = #"{"outbounds":[{"type":"selector","tag":"A","outbounds":[]}]}"#
+        let catalogB = #"{"outbounds":[{"type":"selector","tag":"B","outbounds":[]}]}"#
+        try fixture.store.save(json: catalogA, for: fixture.first.id)
+        var shouldFailCatalogRead = false
+        let model = ProfileViewModel(
+            store: fixture.store,
+            subscriptionFetcher: ControlledSubscriptionFetcher(),
+            policyCatalogLoader: {
+                if shouldFailCatalogRead { throw ProfileStoreError.invalidStoredMetadata }
+                return try PolicyCatalogOperation(profileStore: fixture.store).read()
+            }
+        )
+        XCTAssertEqual(model.policyCatalog?.selectors.first?.tag, "A")
+        model.updateEditor(catalogB)
+        shouldFailCatalogRead = true
+        model.save()
+        XCTAssertFalse(model.isDirty)
+        XCTAssertEqual(model.editorText, catalogB)
+        XCTAssertNil(model.policyCatalog)
+        XCTAssertTrue(model.isPolicyCatalogUnavailable)
+    }
+
+    func testPolicyCatalogSaveAndContinuePersistsBeforeSelection() throws {
+        let fixture = try makeFixture()
+        let catalogB = #"{"outbounds":[{"type":"selector","tag":"B","outbounds":[]}]}"#
+        fixture.model.updateEditor(catalogB)
+        fixture.model.requestSelection(fixture.second.id)
+        XCTAssertEqual(fixture.model.resolveUnsavedChanges(.saveAndContinue), .resolved)
+        XCTAssertEqual(fixture.model.selectedID, fixture.second.id)
+        fixture.model.requestSelection(fixture.first.id)
+        XCTAssertEqual(fixture.model.policyCatalog?.selectors.first?.tag, "B")
+    }
+
+    func testPolicyCatalogRefreshesOnCleanProfileSelection() throws {
+        let fixture = try makeFixture()
+        try fixture.store.save(json: #"{"outbounds":[{"type":"selector","tag":"A","outbounds":[]}]}"#, for: fixture.first.id)
+        try fixture.store.save(json: #"{"outbounds":[{"type":"selector","tag":"B","outbounds":[]}]}"#, for: fixture.second.id)
+        let model = ProfileViewModel(store: fixture.store, subscriptionFetcher: ControlledSubscriptionFetcher())
+        XCTAssertEqual(model.policyCatalog?.selectors.first?.tag, "A")
+        model.requestSelection(fixture.second.id)
+        XCTAssertEqual(model.policyCatalog?.selectors.first?.tag, "B")
+    }
+
     func testDirtySelectionRequestRecordsOperationWithoutChangingCommittedEditorState() throws {
         let fixture = try makeFixture()
         fixture.model.updateEditor("{\"edited\":true}")

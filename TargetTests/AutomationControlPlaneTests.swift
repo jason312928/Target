@@ -19,6 +19,78 @@ final class AutomationControlPlaneTests: XCTestCase {
         let catalog = PolicyCatalogParser.parse(Data("{\"outbounds\":[{\"type\":\"selector\",\"tag\":\"g\",\"outbounds\":[\"x\"]},{\"type\":\"direct\",\"tag\":\"x\"},{\"type\":\"block\",\"tag\":\"x\"}]}".utf8))
         XCTAssertEqual(catalog.selectors.first?.members.first?.status, .duplicateTag)
     }
+
+    func testPolicyCatalogParserPreservesOrderDefaultAndStructuralStates() {
+        let catalog = PolicyCatalogParser.parse(Data("""
+        {"outbounds":[
+          {"type":"selector","tag":"group","outbounds":["first","missing","first"],"default":"first"},
+          {"type":"future-protocol","tag":"first"},
+          {"type":"selector","tag":"","outbounds":[]},
+          {"type":"selector","tag":"malformed","outbounds":"not-an-array"}
+        ]}
+        """.utf8))
+        XCTAssertEqual(catalog.selectors.map(\.tag), ["group", nil, "malformed"])
+        XCTAssertEqual(catalog.selectors[0].members.map(\.tag), ["first", "missing", "first"])
+        XCTAssertEqual(catalog.selectors[0].configuredDefault, "first")
+        XCTAssertEqual(catalog.selectors[0].members[0].type, "future-protocol")
+        XCTAssertEqual(catalog.selectors[0].members[1].status, .missingReference)
+        XCTAssertEqual(catalog.selectors[1].status, .invalidTag)
+        XCTAssertEqual(catalog.selectors[2].status, .malformedMembers)
+        XCTAssertEqual(Set(catalog.selectors.map(\.id)).count, catalog.selectors.count)
+        XCTAssertEqual(Set(catalog.selectors[0].members.map(\.id)).count, catalog.selectors[0].members.count)
+    }
+
+    func testPolicyCatalogMissingOrEmptyMemberTypeIsUnavailable() {
+        let catalog = PolicyCatalogParser.parse(Data("""
+        {"outbounds":[{"type":"selector","tag":"group","outbounds":["missing-type","empty-type"]},{"tag":"missing-type"},{"type":"","tag":"empty-type"}]}
+        """.utf8))
+        XCTAssertEqual(catalog.selectors[0].members.map(\.status), [.unavailable, .unavailable])
+        XCTAssertEqual(catalog.selectors[0].members.map(\.type), [nil, nil])
+    }
+
+    func testTargetCtlPolicyListParserUsesProductionGrammar() throws {
+        let parsed = try TargetCtlCommandParser.parse(["policy", "list", "--json"])
+        XCTAssertEqual(parsed.action, "policy.list")
+        XCTAssertEqual(parsed.arguments, [:])
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse(["policy", "list"]))
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse(["policy", "list", "extra", "--json"]))
+    }
+
+    func testPolicyCatalogRedactsExpandedCredentialSentinels() throws {
+        let secret = "POLICY-SECRET-SENTINEL"
+        let catalog = PolicyCatalogParser.parse(Data("""
+        {"outbounds":[{"type":"selector","tag":"group","outbounds":["member"]},{"type":"vmess","tag":"member","server":"\(secret)","server_port":"\(secret)","username":"\(secret)","password":"\(secret)","uuid":"\(secret)","token":"\(secret)","private_key":"\(secret)","certificate":"\(secret)","subscription":"\(secret)","tls":{"server_name":"\(secret)","reality":{"public_key":"\(secret)","short_id":"\(secret)"}},"wireguard":{"private_key":"\(secret)"},"transport":{"path":"\(secret)արվում"},"unknown":{"nested":"\(secret)"}}]}
+        """.utf8))
+        let encoded = String(decoding: try JSONEncoder().encode(catalog.automationJSON()), as: UTF8.self)
+        XCTAssertFalse(encoded.contains(secret))
+        XCTAssertEqual(catalog.selectors[0].members[0].type, "vmess")
+    }
+
+    func testPolicyListUsesSharedPersistedCatalogAndStableErrors() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDirectory: root, checker: AutomationPassingChecker(), keyProvider: TestProfileKeyProvider())
+        let operations = TargetAutomationOperations(profileStore: store, backend: MockBackend())
+        let none = await operations.handle(AutomationRequest(protocolVersion: 1, action: "policy.list"))
+        XCTAssertEqual(none.error?.code, "profile_not_selected")
+
+        let profile = try store.create(name: "Policy")
+        try store.save(json: #"{"outbounds":[{"type":"selector","tag":"group","outbounds":["node"]},{"type":"direct","tag":"node","password":"AUTOMATION-SECRET"}]}"#, for: profile.id)
+        let response = await operations.handle(AutomationRequest(protocolVersion: 1, action: "policy.list"))
+        XCTAssertTrue(response.ok)
+        let encoded = String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self)
+        XCTAssertTrue(encoded.contains("\"formatVersion\":1"))
+        XCTAssertFalse(encoded.contains("AUTOMATION-SECRET"))
+        let unexpectedArguments = await operations.handle(AutomationRequest(protocolVersion: 1, action: "policy.list", arguments: ["extra": "x"]))
+        XCTAssertFalse(unexpectedArguments.ok)
+        let capabilities = await operations.handle(AutomationRequest(protocolVersion: 1, action: "capabilities"))
+        XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(capabilities), as: UTF8.self).contains("policy.list"))
+    }
+
+    func testPolicyListNoValidRevisionKeepsStableProfileErrorMapping() async {
+        let response = await makeOperations(root: temporaryRoot()).profileStoreFailure(.noValidVersion)
+        XCTAssertEqual(response.error?.code, "profile_no_valid_version")
+    }
     func testProtocolDecodesValidRequestStrictly() throws {
         let data = Data(#"{"action":"status","arguments":{},"protocolVersion":1}"#.utf8)
         XCTAssertEqual(
