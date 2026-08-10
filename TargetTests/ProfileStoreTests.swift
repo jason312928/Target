@@ -6,6 +6,46 @@ import XCTest
 @testable import Target
 
 final class ProfileStoreTests: XCTestCase {
+    func testConcurrentInitialStoreReadWaitsForAuthenticatedManifestAndSelection() throws {
+        let root = try temporaryDirectory()
+        let faults = BlockingInitialManifestWriteFault()
+        let store = ProfileStore(
+            rootDirectory: root,
+            checker: TestChecker(result: .success(())),
+            keyProvider: TestProfileKeyProvider(),
+            storageFaults: faults
+        )
+        let results = ConcurrentProfileReadResults()
+        let firstFinished = DispatchSemaphore(value: 0)
+        let secondFinished = DispatchSemaphore(value: 0)
+        addTeardownBlock { faults.release() }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            results.recordFirst(Result { try store.listProfiles() })
+            firstFinished.signal()
+        }
+        XCTAssertEqual(faults.waitUntilManifestWrite(), .success)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            results.recordSecond(Result { try store.listProfiles() })
+            secondFinished.signal()
+        }
+        faults.release()
+
+        XCTAssertEqual(firstFinished.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(secondFinished.wait(timeout: .now() + 2), .success)
+        let firstResult = try XCTUnwrap(results.firstResult)
+        let secondResult = try XCTUnwrap(results.secondResult)
+        XCTAssertNoThrow(try firstResult.get())
+        XCTAssertNoThrow(try secondResult.get())
+
+        let profile = try store.create(name: "Recovered")
+        let reopened = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
+        XCTAssertEqual(try reopened.selectedProfileID(), profile.id)
+        XCTAssertEqual(try reopened.selectedValidVersion().profile.id, profile.id)
+        XCTAssertNoThrow(try reopened.configurationText(for: profile.id))
+    }
+
     func testPrePolicyProfileMetadataDecodesWithoutOverrides() throws {
         let data = Data(#"{"id":"00000000-0000-0000-0000-000000000001","name":"Legacy","createdAt":0,"updatedAt":0,"validation":{"status":"notChecked"},"validRevision":1}"#.utf8)
         let decoder = JSONDecoder()
@@ -1922,6 +1962,62 @@ private final class MutableProfileStorageFaults: ProfileStorageFaultInjecting {
     var failing: ProfileStorageFaultPoint?
     func check(_ point: ProfileStorageFaultPoint) throws {
         if point == failing { throw NSError(domain: "MutableProfileStorageFaults", code: 1) }
+    }
+}
+
+private final class BlockingInitialManifestWriteFault: ProfileStorageFaultInjecting, @unchecked Sendable {
+    private let manifestWriteEntered = DispatchSemaphore(value: 0)
+    private let continueManifestWrite = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var hasBlocked = false
+
+    func check(_ point: ProfileStorageFaultPoint) throws {
+        guard point == .manifestWrite else { return }
+        lock.lock()
+        let shouldBlock = !hasBlocked
+        hasBlocked = true
+        lock.unlock()
+        guard shouldBlock else { return }
+        manifestWriteEntered.signal()
+        _ = continueManifestWrite.wait(timeout: .now() + 5)
+    }
+
+    func waitUntilManifestWrite() -> DispatchTimeoutResult {
+        manifestWriteEntered.wait(timeout: .now() + 2)
+    }
+
+    func release() {
+        continueManifestWrite.signal()
+    }
+}
+
+private final class ConcurrentProfileReadResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var first: Result<[Profile], Error>?
+    private var second: Result<[Profile], Error>?
+
+    var firstResult: Result<[Profile], Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return first
+    }
+
+    var secondResult: Result<[Profile], Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return second
+    }
+
+    func recordFirst(_ result: Result<[Profile], Error>) {
+        lock.lock()
+        first = result
+        lock.unlock()
+    }
+
+    func recordSecond(_ result: Result<[Profile], Error>) {
+        lock.lock()
+        second = result
+        lock.unlock()
     }
 }
 
