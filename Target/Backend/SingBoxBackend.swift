@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-actor SingBoxBackend: EngineInstalling {
+actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding {
     static let applicationSupportDirectoryName = "Target"
     static let engineDirectoryName = "sing-box"
 
@@ -73,7 +73,31 @@ actor SingBoxBackend: EngineInstalling {
             verifiedRecord = nil
         }
         let selected = try? profileStore.selectedValidVersion()
-        let restartRequired = verifiedRecord.map { EngineRuntimeProfileState.requiresRestart(record: $0, selected: selected) } ?? false
+        let restartRequired = verifiedRecord.map { record in
+            let profileRequiresRestart = EngineRuntimeProfileState.requiresRestart(record: record, selected: selected)
+            guard !profileRequiresRestart, let selected else { return profileRequiresRestart }
+            let desired = PolicyCatalogParser.parse(
+                selected.data,
+                profileID: selected.profile.id,
+                profileRevision: selected.revision,
+                overrides: selected.profile.policyOverrides
+            )
+            guard desired.selectors.contains(where: \.isMutable) else { return false }
+            guard let runtimeData = runtimeConfigurations.readVerified(
+                id: record.runtimeConfigurationID,
+                fingerprint: record.configurationFingerprint
+            ) else { return true }
+            let reconciled = PolicyCatalogReconciler.reconcile(
+                desired,
+                evidence: .running(
+                    profileID: record.profileID,
+                    profileRevision: record.profileRevision,
+                    sourceFingerprint: record.sourceConfigurationFingerprint,
+                    configuration: runtimeData
+                )
+            )
+            return reconciled.selectors.contains(where: \.restartRequired)
+        } ?? false
         return BackendStatus(
             serviceInstallation: .notRegistered,
             engineState: verifiedRecord == nil ? .stopped : .running,
@@ -85,6 +109,34 @@ actor SingBoxBackend: EngineInstalling {
             runningProfileRevision: verifiedRecord?.profileRevision,
             restartRequired: restartRequired
         )
+    }
+
+    func currentPolicyRuntimeEvidence() async -> PolicyRuntimeEvidence {
+        let disposition: EngineRuntimeRecordDisposition
+        do { disposition = try await runtimeOwnership.recordDisposition() }
+        catch { return .unavailable }
+        switch disposition {
+        case .noRecord, .processExited:
+            return .stopped
+        case .liveUnproven:
+            return .unavailable
+        case .ownedRunning(let record):
+            guard let version = try? profileStore.validVersion(
+                for: record.profileID,
+                revision: record.profileRevision
+            ),
+            TargetConfigurationFingerprint.sha256(version.data) == record.sourceConfigurationFingerprint,
+            let data = runtimeConfigurations.readVerified(
+                id: record.runtimeConfigurationID,
+                fingerprint: record.configurationFingerprint
+            ) else { return .unavailable }
+            return .running(
+                profileID: record.profileID,
+                profileRevision: record.profileRevision,
+                sourceFingerprint: record.sourceConfigurationFingerprint,
+                configuration: data
+            )
+        }
     }
 
     func installEngine() async throws -> BackendStatus {

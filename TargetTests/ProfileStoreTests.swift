@@ -6,6 +6,120 @@ import XCTest
 @testable import Target
 
 final class ProfileStoreTests: XCTestCase {
+    func testPrePolicyProfileMetadataDecodesWithoutOverrides() throws {
+        let data = Data(#"{"id":"00000000-0000-0000-0000-000000000001","name":"Legacy","createdAt":0,"updatedAt":0,"validation":{"status":"notChecked"},"validRevision":1}"#.utf8)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let profile = try decoder.decode(Profile.self, from: data)
+        XCTAssertEqual(profile.policyOverrides, [:])
+    }
+
+    func testPolicySelectionPersistsEncryptedMetadataWithoutChangingSourceOrRevision() async throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        let profile = try store.create(name: "Policy")
+        let source = policyConfiguration(configuredDefault: "first", members: ["first", "second"])
+        try store.save(json: source, for: profile.id)
+        let before = try store.selectedValidVersion()
+
+        _ = try await TargetPolicyOperations(profileStore: store).select(
+            selectorTag: "group",
+            outboundTag: "second"
+        )
+
+        let after = try store.selectedValidVersion()
+        XCTAssertEqual(after.data, before.data)
+        XCTAssertEqual(after.revision, before.revision)
+        XCTAssertEqual(try store.configurationText(for: profile.id), source)
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: root.path)), Set([
+            ProfileEncryptedStorage.markerName, "profiles.json", "selected-profile.json", profile.id.uuidString
+        ]))
+        let disk = try recursiveData(in: root)
+        XCTAssertFalse(disk.contains(Data("group".utf8)))
+        XCTAssertFalse(disk.contains(Data("second".utf8)))
+
+        let reopened = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        XCTAssertEqual(try reopened.selectedValidVersion().profile.policyOverrides, ["group": "second"])
+        XCTAssertEqual(try TargetPolicyOperations(profileStore: reopened).readPersisted().selectors[0].effectiveDesired, "second")
+    }
+
+    func testFailedPolicyPersistenceRetainsPreviousCommittedSelection() async throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let faults = MutableProfileStorageFaults()
+        let store = ProfileStore(
+            rootDirectory: root,
+            checker: TestChecker(result: .success(())),
+            keyProvider: keys,
+            storageFaults: faults
+        )
+        let profile = try store.create(name: "Policy")
+        try store.save(json: policyConfiguration(configuredDefault: "first", members: ["first", "second"]), for: profile.id)
+        let operations = TargetPolicyOperations(profileStore: store)
+        _ = try await operations.select(selectorTag: "group", outboundTag: "first")
+        faults.failing = .manifestWrite
+
+        do {
+            _ = try await operations.select(selectorTag: "group", outboundTag: "second")
+            XCTFail("Expected persistence failure")
+        } catch let error as TargetPolicyOperationError {
+            XCTAssertEqual(error, .persistenceFailed)
+        }
+        faults.failing = nil
+
+        let reopened = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        XCTAssertEqual(try reopened.selectedValidVersion().profile.policyOverrides, ["group": "first"])
+    }
+
+    func testPolicyOverrideReconcilesAcrossSaveAndRestoreWithoutApplyingStaleChoice() async throws {
+        let store = try makeStore()
+        let profile = try store.create(name: "Policy History")
+        let first = policyConfiguration(configuredDefault: "first", members: ["first", "second"])
+        try store.save(json: first, for: profile.id)
+        let operations = TargetPolicyOperations(profileStore: store)
+        _ = try await operations.select(selectorTag: "group", outboundTag: "second")
+
+        let stillValid = policyConfiguration(configuredDefault: "first", members: ["second", "first"])
+        try store.save(json: stillValid, for: profile.id)
+        var catalog = try operations.readPersisted()
+        XCTAssertTrue(catalog.selectors[0].overrideValid)
+        XCTAssertEqual(catalog.selectors[0].effectiveDesired, "second")
+
+        let removed = policyConfiguration(configuredDefault: "first", members: ["first"])
+        try store.save(json: removed, for: profile.id)
+        catalog = try operations.readPersisted()
+        XCTAssertEqual(catalog.selectors[0].targetOverride, "second")
+        XCTAssertFalse(catalog.selectors[0].overrideValid)
+        XCTAssertEqual(catalog.selectors[0].effectiveDesired, "first")
+        let prepared = try ProfileRuntimeConfigurationPreparer(portSelector: FixedPortSelector(port: 51_234))
+            .prepare(store.selectedValidVersion())
+        let runtime = try XCTUnwrap(try JSONSerialization.jsonObject(with: prepared.data) as? [String: Any])
+        let selector = try XCTUnwrap((runtime["outbounds"] as? [[String: Any]])?.first)
+        XCTAssertEqual(selector["default"] as? String, "first")
+
+        try store.restorePreviousValidVersion(for: profile.id)
+        catalog = try operations.readPersisted()
+        XCTAssertTrue(catalog.selectors[0].overrideValid)
+        XCTAssertEqual(catalog.selectors[0].effectiveDesired, "second")
+    }
+
+    func testSubscriptionApplicationReconcilesStalePolicyOverride() async throws {
+        let store = try makeStore()
+        let profile = try store.create(name: "Remote", subscriptionURL: URL(string: "https://example.invalid/sub")!)
+        try store.save(json: policyConfiguration(configuredDefault: "first", members: ["first", "second"]), for: profile.id)
+        let operations = TargetPolicyOperations(profileStore: store)
+        _ = try await operations.select(selectorTag: "group", outboundTag: "second")
+        let replacement = policyConfiguration(configuredDefault: "first", members: ["first"])
+        let response = SubscriptionResponse(data: Data(replacement.utf8), cacheStatus: .updated, etag: "v2", lastModified: nil)
+        let pending = try XCTUnwrap(store.previewSubscriptionUpdate(response, for: profile.id))
+        try store.applySubscriptionUpdate(pending)
+        let catalog = try operations.readPersisted()
+        XCTAssertEqual(catalog.selectors[0].targetOverride, "second")
+        XCTAssertFalse(catalog.selectors[0].overrideValid)
+        XCTAssertEqual(catalog.selectors[0].effectiveDesired, "first")
+    }
+
     func testNewStoreEncryptsEveryPersistentRecordAndPreservesMetadataAfterRestart() throws {
         let root = try temporaryDirectory()
         let keys = TestProfileKeyProvider(key: nil)
@@ -642,6 +756,25 @@ final class ProfileStoreTests: XCTestCase {
         let inbound = try XCTUnwrap((runtime["inbounds"] as? [[String: Any]])?.first)
         XCTAssertEqual(inbound["listen_port"] as? Int, 51_234)
         XCTAssertEqual(prepared.primaryPort, 51_234)
+    }
+
+    func testRuntimeCopyAppliesOnlyValidPolicyOverrideToEphemeralJSON() async throws {
+        let store = try makeStore()
+        let profile = try store.create(name: "Runtime Policy")
+        let source = policyConfiguration(configuredDefault: "first", members: ["first", "second"])
+        try store.save(json: source, for: profile.id)
+        let revision = try store.selectedValidVersion().revision
+        _ = try await TargetPolicyOperations(profileStore: store).select(selectorTag: "group", outboundTag: "second")
+
+        let prepared = try ProfileRuntimeConfigurationPreparer(portSelector: FixedPortSelector(port: 51_234))
+            .prepare(store.selectedValidVersion())
+        XCTAssertEqual(try store.configurationText(for: profile.id), source)
+        XCTAssertEqual(try store.selectedValidVersion().revision, revision)
+        let runtime = try XCTUnwrap(try JSONSerialization.jsonObject(with: prepared.data) as? [String: Any])
+        let selector = try XCTUnwrap((runtime["outbounds"] as? [[String: Any]])?.first)
+        let inbound = try XCTUnwrap((runtime["inbounds"] as? [[String: Any]])?.first)
+        XCTAssertEqual(selector["default"] as? String, "second")
+        XCTAssertEqual(inbound["listen_port"] as? Int, 51_234)
     }
 
     func testUnsafeOrInvalidProfileCannotPrepareRuntimeCopy() throws {
@@ -1717,6 +1850,14 @@ final class ProfileStoreTests: XCTestCase {
             .appending(path: "Target/sing-box/bin/sing-box")
     }
 
+    private func policyConfiguration(configuredDefault defaultMember: String, members: [String]) -> String {
+        let memberJSON = members.map { "\"\($0)\"" }.joined(separator: ",")
+        let outboundJSON = Array(Set(members)).sorted().map { member in
+            "{\"type\":\"direct\",\"tag\":\"\(member)\"}"
+        }.joined(separator: ",")
+        return "{\"inbounds\":[{\"type\":\"mixed\",\"tag\":\"local\",\"listen\":\"127.0.0.1\",\"listen_port\":0}],\"outbounds\":[{\"type\":\"selector\",\"tag\":\"group\",\"outbounds\":[\(memberJSON)],\"default\":\"\(defaultMember)\"},\(outboundJSON)],\"route\":{\"final\":\"group\"}}"
+    }
+
     private func recursiveData(in root: URL) throws -> Data {
         let urls = try FileManager.default.subpathsOfDirectory(atPath: root.path)
         return try urls.reduce(into: Data()) { result, relative in
@@ -1775,6 +1916,13 @@ private final class TestStorageFaults: ProfileStorageFaultInjecting {
     let failing: ProfileStorageFaultPoint
     init(failing: ProfileStorageFaultPoint) { self.failing = failing }
     func check(_ point: ProfileStorageFaultPoint) throws { if point == failing { throw NSError(domain: "TestStorageFaults", code: 1) } }
+}
+
+private final class MutableProfileStorageFaults: ProfileStorageFaultInjecting {
+    var failing: ProfileStorageFaultPoint?
+    func check(_ point: ProfileStorageFaultPoint) throws {
+        if point == failing { throw NSError(domain: "MutableProfileStorageFaults", code: 1) }
+    }
 }
 
 private final class TestTransferFaults: ProfileTransferFaultInjecting {

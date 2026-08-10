@@ -6,6 +6,75 @@ import XCTest
 
 @MainActor
 final class EngineLifecycleTests: XCTestCase {
+    func testUnreadableRuntimePolicyEvidenceDoesNotAddRestartForProfileWithoutSelectors() async throws {
+        let fixture = try EngineLifecycleFixture(mode: .listening)
+        do {
+            _ = try await fixture.backend.startEngine()
+            let record = try XCTUnwrap(fixture.ownership.currentRecord())
+            let runtimeURL = fixture.runtimeDirectory.appending(
+                path: "\(record.runtimeConfigurationID.uuidString).json"
+            )
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: runtimeURL.path
+            )
+
+            let status = try await fixture.backend.queryStatus()
+            XCTAssertEqual(status.engineState, .running)
+            XCTAssertFalse(status.restartRequired)
+
+            _ = try await fixture.backend.stopEngine()
+            try await fixture.assertStoppedAndClean()
+            await fixture.removeRoot()
+        } catch {
+            await fixture.cleanup()
+            throw error
+        }
+    }
+
+    func testPolicySelectionWhileRunningWaitsForExplicitRestartAndThenConverges() async throws {
+        let fixture = try EngineLifecycleFixture(mode: .listening)
+        do {
+            let source = #"{"inbounds":[{"type":"mixed","tag":"local","listen":"127.0.0.1","listen_port":0}],"outbounds":[{"type":"selector","tag":"group","outbounds":["first","second"],"default":"first"},{"type":"direct","tag":"first"},{"type":"block","tag":"second"}],"route":{"final":"group"}}"#
+            try fixture.store.save(json: source, for: fixture.profile.id)
+            let policy = TargetPolicyOperations(
+                profileStore: fixture.store,
+                runtimeEvidenceProvider: fixture.backend
+            )
+            let started = try await fixture.backend.startEngine()
+            XCTAssertEqual(started.engineState, .running)
+            var catalog = try await policy.read()
+            XCTAssertEqual(catalog.selectors[0].runningSelection, "first")
+            XCTAssertEqual(catalog.selectors[0].runtimeConvergence, .converged)
+            let originalRecord = try XCTUnwrap(fixture.ownership.currentRecord())
+
+            catalog = try await policy.select(selectorTag: "group", outboundTag: "second")
+            XCTAssertEqual(fixture.ownership.currentRecord(), originalRecord)
+            XCTAssertEqual(catalog.selectors[0].effectiveDesired, "second")
+            XCTAssertEqual(catalog.selectors[0].runningSelection, "first")
+            XCTAssertTrue(catalog.selectors[0].restartRequired)
+            let mismatchStatus = try await fixture.backend.queryStatus()
+            XCTAssertTrue(mismatchStatus.restartRequired)
+
+            _ = try await fixture.backend.stopEngine()
+            _ = try await fixture.backend.startEngine()
+            catalog = try await policy.read()
+            XCTAssertEqual(catalog.selectors[0].effectiveDesired, "second")
+            XCTAssertEqual(catalog.selectors[0].runningSelection, "second")
+            XCTAssertEqual(catalog.selectors[0].runtimeConvergence, .converged)
+            XCTAssertFalse(catalog.selectors[0].restartRequired)
+            let convergedStatus = try await fixture.backend.queryStatus()
+            XCTAssertFalse(convergedStatus.restartRequired)
+
+            _ = try await fixture.backend.stopEngine()
+            try await fixture.assertStoppedAndClean()
+            await fixture.removeRoot()
+        } catch {
+            await fixture.cleanup()
+            throw error
+        }
+    }
+
     func testRefreshStartRevisionRestartStopAndCleanup() async throws {
         let fixture = try EngineLifecycleFixture(mode: .listening)
         do {

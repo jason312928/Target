@@ -315,6 +315,40 @@ final class ProfileStore {
         return try validVersion(for: profile, revision: profile.validRevision)
     }
 
+    /// Commits only Target-owned selector metadata. The expected Profile and
+    /// revision are rechecked immediately before the encrypted manifest write so
+    /// a concurrent Profile replacement cannot receive a stale override.
+    func persistPolicyOverride(
+        profileID: UUID,
+        expectedRevision: Int,
+        selectorTag: String,
+        outboundTag: String
+    ) throws {
+        guard try selectedProfileID() == profileID else { throw ProfileStoreError.noSelectedProfile }
+        var profiles = try loadManifest()
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
+            throw ProfileStoreError.profileNotFound
+        }
+        guard profiles[index].validRevision == expectedRevision else {
+            throw ProfileStoreError.noValidVersion
+        }
+        let source = try versionData(for: profileID, revision: expectedRevision)
+        let catalog = PolicyCatalogParser.parse(
+            source,
+            profileID: profileID,
+            profileRevision: expectedRevision,
+            overrides: profiles[index].policyOverrides
+        )
+        try PolicySelectionValidator.validate(
+            selectorTag: selectorTag,
+            outboundTag: outboundTag,
+            in: catalog
+        )
+        profiles[index].policyOverrides[selectorTag] = outboundTag
+        profiles[index].updatedAt = now()
+        try saveManifest(profiles)
+    }
+
     func selectedProfile() -> Profile? {
         do {
             guard let id = try selectedProfileID() else { return nil }

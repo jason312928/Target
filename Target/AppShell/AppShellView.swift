@@ -13,8 +13,8 @@ struct AppShellView: View {
     private let refreshOnTask: Bool
     private let restoredDestination: AppDestination?
 
-    /// The injected model is an internal test seam. The production initializer
-    /// keeps the existing single shell-owned Profile model and lifecycle refresh.
+    /// The injected model is also the production dependency-injection seam: the
+    /// App owns one Profile model so GUI and automation can share domain operations.
     init(
         lifecycle: BackendLifecycleModel,
         profileModel: ProfileViewModel? = nil,

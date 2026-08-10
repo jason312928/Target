@@ -7,7 +7,7 @@ actor TargetAutomationOperations {
     }
 
     private let profileStore: ProfileStore
-    private let policyCatalogOperation: PolicyCatalogOperation
+    private let policyOperations: any TargetPolicyOperating
     private let backend: any EngineBackend
     private let serviceClient: any SystemProxyClient
     private let systemProxyOperations: any TargetSystemProxyOperating
@@ -18,6 +18,7 @@ actor TargetAutomationOperations {
 
     init(
         profileStore: ProfileStore = ProfileStore(),
+        policyOperations: (any TargetPolicyOperating)? = nil,
         backend: any EngineBackend = SingBoxBackend(),
         serviceClient: any SystemProxyClient = TargetServiceXPCClient(),
         systemProxyOperations: (any TargetSystemProxyOperating)? = nil,
@@ -27,7 +28,7 @@ actor TargetAutomationOperations {
         systemProxyStatusObserver: (@Sendable (SystemProxyStatus) async -> Void)? = nil
     ) {
         self.profileStore = profileStore
-        self.policyCatalogOperation = PolicyCatalogOperation(profileStore: profileStore)
+        self.policyOperations = policyOperations ?? TargetPolicyOperations(profileStore: profileStore)
         self.backend = backend
         self.serviceClient = serviceClient
         let resolvedSystemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: serviceClient)
@@ -55,7 +56,8 @@ actor TargetAutomationOperations {
             case "status": return await consolidatedStatus()
             case "profile.import": return try profileImport(request.arguments)
             case "profile.list": return try profileList()
-            case "policy.list": return try policyList()
+            case "policy.list": return try await policyList()
+            case "policy.select": return try await policySelect(request.arguments)
             case "profile.delete": return try profileDelete(request.arguments)
             case "engine.status": return await engineStatus()
             case "engine.start": return try await engineStart()
@@ -72,6 +74,8 @@ actor TargetAutomationOperations {
             }
         } catch let error as ProfileTransferError {
             return profileTransferFailure(error)
+        } catch let error as TargetPolicyOperationError {
+            return policyFailure(error)
         } catch let error as ProfileStoreError {
             return profileStoreFailure(error)
         } catch let error as BackendError {
@@ -159,8 +163,36 @@ actor TargetAutomationOperations {
         return .success(.object(["profiles": .array(profiles)]))
     }
 
-    private func policyList() throws -> AutomationResponse {
-        .success(try policyCatalogOperation.read().automationJSON())
+    private func policyList() async throws -> AutomationResponse {
+        .success(try await policyOperations.read().automationJSON())
+    }
+
+    private func policySelect(_ arguments: [String: String]) async throws -> AutomationResponse {
+        guard Set(arguments.keys) == ["selector", "outbound"],
+              let selectorTag = arguments["selector"], !selectorTag.isEmpty,
+              let outboundTag = arguments["outbound"], !outboundTag.isEmpty else {
+            return .failure(
+                code: "invalid_arguments",
+                message: "Policy selection requires selector and outbound arguments."
+            )
+        }
+        let catalog = try await policyOperations.select(
+            selectorTag: selectorTag,
+            outboundTag: outboundTag
+        )
+        guard let selector = catalog.selectors.first(where: { $0.tag == selectorTag }) else {
+            return .failure(code: "operation_failed", message: "The operation could not be completed.")
+        }
+        return .success(.object([
+            "desiredSelection": selector.effectiveDesired.map(JSONValue.string) ?? .null,
+            "formatVersion": .integer(1),
+            "profileID": catalog.profileID.map { .string($0.uuidString.lowercased()) } ?? .null,
+            "profileRevision": catalog.profileRevision.map(JSONValue.integer) ?? .null,
+            "restartRequired": .boolean(selector.restartRequired),
+            "runningSelection": selector.runningSelection.map(JSONValue.string) ?? .null,
+            "runtimeConvergence": .string(selector.runtimeConvergence.rawValue),
+            "selector": .string(selectorTag)
+        ]))
     }
 
     private func profileDelete(_ arguments: [String: String]) throws -> AutomationResponse {
@@ -309,6 +341,23 @@ actor TargetAutomationOperations {
         }
     }
 
+    private func policyFailure(_ error: TargetPolicyOperationError) -> AutomationResponse {
+        switch error {
+        case .selectorNotFound:
+            .failure(code: "policy_selector_not_found", message: "The Policy selector was not found.")
+        case .selectorAmbiguous:
+            .failure(code: "policy_selector_ambiguous", message: "The Policy selector tag is ambiguous.")
+        case .selectorUnavailable:
+            .failure(code: "policy_selector_unavailable", message: "The Policy selector is structurally unavailable.")
+        case .outboundNotFound:
+            .failure(code: "policy_outbound_not_found", message: "The Policy outbound was not found.")
+        case .outboundUnavailable:
+            .failure(code: "policy_outbound_unavailable", message: "The Policy outbound is unavailable.")
+        case .persistenceFailed:
+            .failure(code: "policy_persistence_failed", message: "The Policy selection could not be persisted.")
+        }
+    }
+
     func profileStoreFailure(_ error: ProfileStoreError) -> AutomationResponse {
         switch error {
         case .profileNotFound: .failure(code: "profile_not_found", message: "The Profile was not found.")
@@ -349,9 +398,11 @@ actor TargetAutomationOperations {
     }
 
     private static let commands = [
-        "capabilities", "status", "profile.import", "profile.list", "profile.delete", "policy.list",
+        "capabilities", "status", "profile.import", "profile.list", "profile.delete", "policy.list", "policy.select",
         "engine.status", "engine.start", "engine.stop", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
     ]
-    private static let argumentFreeActions = Set(commands.filter { !$0.hasPrefix("profile.") })
+    private static let argumentFreeActions = Set(commands).subtracting([
+        "profile.import", "profile.delete", "policy.select"
+    ])
 }

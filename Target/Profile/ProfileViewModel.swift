@@ -5,11 +5,15 @@ import Observation
 @Observable
 final class ProfileViewModel {
     private let store: ProfileStore
+    private let policyOperations: any TargetPolicyOperating
     private let policyCatalogLoader: () throws -> PolicyCatalog
+    private let usesCustomPolicyCatalogLoader: Bool
     private let configurationLoader: (UUID) throws -> String
     private let subscriptionFetcher: any ProfileSubscriptionFetching
     private var subscriptionTask: Task<Void, Never>?
     private var importTask: Task<Void, Never>?
+    private var policyTask: Task<Void, Never>?
+    private var policyRefreshGeneration = 0
 
     private(set) var profiles: [Profile] = []
     private(set) var selectedID: UUID?
@@ -35,15 +39,20 @@ final class ProfileViewModel {
     private(set) var readinessChangeGeneration = 0
     private(set) var policyCatalog: PolicyCatalog?
     private(set) var isPolicyCatalogUnavailable = false
+    private(set) var isSelectingPolicy = false
 
     init(
         store: ProfileStore = ProfileStore(),
         subscriptionFetcher: any ProfileSubscriptionFetching = SecureSubscriptionFetcher(),
         configurationLoader: ((UUID) throws -> String)? = nil,
+        policyOperations: (any TargetPolicyOperating)? = nil,
         policyCatalogLoader: (() throws -> PolicyCatalog)? = nil
     ) {
         self.store = store
-        self.policyCatalogLoader = policyCatalogLoader ?? { try PolicyCatalogOperation(profileStore: store).read() }
+        let resolvedPolicyOperations = policyOperations ?? TargetPolicyOperations(profileStore: store)
+        self.policyOperations = resolvedPolicyOperations
+        self.policyCatalogLoader = policyCatalogLoader ?? resolvedPolicyOperations.readPersisted
+        self.usesCustomPolicyCatalogLoader = policyCatalogLoader != nil
         self.subscriptionFetcher = subscriptionFetcher
         self.configurationLoader = configurationLoader ?? { try store.configurationText(for: $0) }
         reloadInitialState()
@@ -211,6 +220,39 @@ final class ProfileViewModel {
             refreshMetadataPreservingEditor()
             refreshPolicyCatalog()
         } catch { messageKey = "profile.message.operation-failed" }
+    }
+
+    func selectPolicy(selectorTag: String, outboundTag: String) {
+        guard !isSelectingPolicy else { return }
+        isSelectingPolicy = true
+        messageKey = nil
+        policyTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.policyTask = nil
+                self.isSelectingPolicy = false
+            }
+            do {
+                self.policyCatalog = try await self.policyOperations.select(
+                    selectorTag: selectorTag,
+                    outboundTag: outboundTag
+                )
+                self.isPolicyCatalogUnavailable = false
+                self.messageKey = "policy.catalog.selection.saved"
+                self.refreshMetadataPreservingEditor()
+                self.markReadinessChanged()
+            } catch let error as TargetPolicyOperationError {
+                self.messageKey = self.policyMessageKey(for: error)
+                self.refreshPolicyCatalog()
+            } catch {
+                self.messageKey = "policy.catalog.selection.failed"
+                self.refreshPolicyCatalog()
+            }
+        }
+    }
+
+    func refreshPolicyState() {
+        refreshPolicyCatalog()
     }
 
     func updateEditor(_ text: String) {
@@ -455,12 +497,38 @@ final class ProfileViewModel {
     /// Catalog state is fail-closed. A storage read error clears prior data rather
     /// than retaining the previous Profile's catalog in the UI.
     private func refreshPolicyCatalog() {
+        policyRefreshGeneration &+= 1
+        let generation = policyRefreshGeneration
         do {
             policyCatalog = try policyCatalogLoader()
             isPolicyCatalogUnavailable = false
         } catch {
             policyCatalog = nil
             isPolicyCatalogUnavailable = true
+        }
+        guard !usesCustomPolicyCatalogLoader else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let reconciled = try await self.policyOperations.read()
+                guard generation == self.policyRefreshGeneration else { return }
+                self.policyCatalog = reconciled
+                self.isPolicyCatalogUnavailable = false
+            } catch {
+                guard generation == self.policyRefreshGeneration else { return }
+                self.policyCatalog = nil
+                self.isPolicyCatalogUnavailable = true
+            }
+        }
+    }
+
+    private func policyMessageKey(for error: TargetPolicyOperationError) -> String {
+        switch error {
+        case .selectorNotFound, .selectorAmbiguous, .selectorUnavailable,
+             .outboundNotFound, .outboundUnavailable:
+            "policy.catalog.selection.unavailable"
+        case .persistenceFailed:
+            "policy.catalog.selection.failed"
         }
     }
 

@@ -33,6 +33,10 @@ enum TargetCtlCommandParser {
         if values.count == 5, values[0...1] == ["profile", "delete"], values[3] == "--confirm" {
             return ("profile.delete", ["id": values[2], "confirm": values[4]])
         }
+        if values.count == 6, values[0...1] == ["policy", "select"],
+           values[2] == "--selector", values[4] == "--outbound" {
+            return ("policy.select", ["selector": values[3], "outbound": values[5]])
+        }
         throw AutomationSocketError.unavailable
     }
 }

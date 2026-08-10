@@ -91,8 +91,49 @@ struct Profile: Identifiable, Codable, Equatable, Sendable {
     var updatedAt: Date
     var validation: ProfileValidation
     var validRevision: Int
+    /// Target-owned selector choices. These values are encrypted with the
+    /// enclosing manifest and never rewrite the user's configuration JSON.
+    var policyOverrides: [String: String]
 
     var hasRemoteSubscription: Bool { subscription != nil }
+
+    init(
+        id: UUID,
+        name: String,
+        subscription: RemoteSubscription?,
+        createdAt: Date,
+        updatedAt: Date,
+        validation: ProfileValidation,
+        validRevision: Int,
+        policyOverrides: [String: String] = [:]
+    ) {
+        self.id = id
+        self.name = name
+        self.subscription = subscription
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.validation = validation
+        self.validRevision = validRevision
+        self.policyOverrides = policyOverrides
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, subscription, createdAt, updatedAt, validation, validRevision, policyOverrides
+    }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try values.decode(UUID.self, forKey: .id),
+            name: try values.decode(String.self, forKey: .name),
+            subscription: try values.decodeIfPresent(RemoteSubscription.self, forKey: .subscription),
+            createdAt: try values.decode(Date.self, forKey: .createdAt),
+            updatedAt: try values.decode(Date.self, forKey: .updatedAt),
+            validation: try values.decode(ProfileValidation.self, forKey: .validation),
+            validRevision: try values.decode(Int.self, forKey: .validRevision),
+            policyOverrides: try values.decodeIfPresent([String: String].self, forKey: .policyOverrides) ?? [:]
+        )
+    }
 }
 
 enum ProfileStoreError: LocalizedError, Equatable {
@@ -157,6 +198,9 @@ struct ProfileConfigurationVersion: Sendable {
 /// configuration dictionaries never cross this domain boundary.
 struct PolicyCatalog: Equatable, Sendable {
     let formatVersion: Int
+    let profileID: UUID?
+    let profileRevision: Int?
+    let sourceFingerprint: String?
     let selectors: [PolicyCatalogSelector]
 }
 
@@ -167,8 +211,19 @@ struct PolicyCatalogSelector: Equatable, Sendable, Identifiable {
     let tag: String?
     let status: PolicyCatalogStructuralStatus
     let configuredDefault: String?
+    let targetOverride: String?
+    let overrideValid: Bool
+    let effectiveDesired: String?
+    let runningSelection: String?
+    let runtimeConvergence: PolicyRuntimeConvergenceState
+    let restartRequired: Bool
     let members: [PolicyCatalogMember]
     var id: Int { identity }
+
+    var isMutable: Bool {
+        status == .available && tag != nil && !members.isEmpty
+            && members.allSatisfy { $0.status == .available }
+    }
 }
 
 struct PolicyCatalogMember: Equatable, Sendable, Identifiable {
@@ -184,21 +239,107 @@ enum PolicyCatalogStructuralStatus: String, Equatable, Sendable {
     case available, missingReference, duplicateTag, malformedMembers, invalidTag, unavailable
 }
 
+enum PolicyRuntimeConvergenceState: String, Equatable, Sendable {
+    case notRunning, converged, restartRequired, unavailable
+}
+
+enum PolicyRuntimeEvidence: Equatable, Sendable {
+    case stopped
+    case running(
+        profileID: UUID,
+        profileRevision: Int,
+        sourceFingerprint: String,
+        configuration: Data
+    )
+    case unavailable
+}
+
+protocol PolicyRuntimeEvidenceProviding: Sendable {
+    func currentPolicyRuntimeEvidence() async -> PolicyRuntimeEvidence
+}
+
+struct StoppedPolicyRuntimeEvidenceProvider: PolicyRuntimeEvidenceProviding {
+    func currentPolicyRuntimeEvidence() async -> PolicyRuntimeEvidence { .stopped }
+}
+
+enum TargetPolicyOperationError: Error, Equatable {
+    case selectorNotFound
+    case selectorAmbiguous
+    case selectorUnavailable
+    case outboundNotFound
+    case outboundUnavailable
+    case persistenceFailed
+}
+
+enum PolicySelectionValidator {
+    static func validate(
+        selectorTag: String,
+        outboundTag: String,
+        in catalog: PolicyCatalog
+    ) throws {
+        let matches = catalog.selectors.filter { $0.tag == selectorTag }
+        guard !matches.isEmpty else { throw TargetPolicyOperationError.selectorNotFound }
+        guard matches.count == 1 else { throw TargetPolicyOperationError.selectorAmbiguous }
+        let selector = matches[0]
+        guard selector.status != .duplicateTag else { throw TargetPolicyOperationError.selectorAmbiguous }
+        guard selector.status == .available else { throw TargetPolicyOperationError.selectorUnavailable }
+        let outboundMatches = selector.members.filter { $0.tag == outboundTag }
+        guard !outboundMatches.isEmpty else { throw TargetPolicyOperationError.outboundNotFound }
+        guard outboundMatches.count == 1, outboundMatches[0].status == .available else {
+            throw TargetPolicyOperationError.outboundUnavailable
+        }
+        guard selector.isMutable else { throw TargetPolicyOperationError.selectorUnavailable }
+    }
+}
+
 enum PolicyCatalogParser {
-    static func parse(_ data: Data) -> PolicyCatalog {
+    static func parse(
+        _ data: Data,
+        profileID: UUID? = nil,
+        profileRevision: Int? = nil,
+        overrides: [String: String] = [:]
+    ) -> PolicyCatalog {
         guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let outbounds = root["outbounds"] as? [Any] else { return PolicyCatalog(formatVersion: 1, selectors: []) }
+              let outbounds = root["outbounds"] as? [Any] else {
+            return PolicyCatalog(
+                formatVersion: 2,
+                profileID: profileID,
+                profileRevision: profileRevision,
+                sourceFingerprint: TargetConfigurationFingerprint.sha256(data),
+                selectors: []
+            )
+        }
         let objects = outbounds.compactMap { $0 as? [String: Any] }
         var tagged: [String: [[String: Any]]] = [:]
         for object in objects { if let tag = nonemptyString(object["tag"]) { tagged[tag, default: []].append(object) } }
-        return PolicyCatalog(formatVersion: 1, selectors: objects.enumerated().compactMap { selectorIndex, selector in
+        return PolicyCatalog(
+            formatVersion: 2,
+            profileID: profileID,
+            profileRevision: profileRevision,
+            sourceFingerprint: TargetConfigurationFingerprint.sha256(data),
+            selectors: outbounds.enumerated().compactMap { selectorIndex, value in
+            guard let selector = value as? [String: Any] else { return nil }
             guard nonemptyString(selector["type"]) == "selector" else { return nil }
             let tag = nonemptyString(selector["tag"])
-            let status: PolicyCatalogStructuralStatus = tag == nil ? .invalidTag : .available
+            let status: PolicyCatalogStructuralStatus
+            if tag == nil { status = .invalidTag }
+            else if tagged[tag!]?.count != 1 { status = .duplicateTag }
+            else { status = .available }
             guard let rawMembers = selector["outbounds"] as? [Any], rawMembers.allSatisfy({ nonemptyString($0) != nil }) else {
-                return PolicyCatalogSelector(identity: selectorIndex, tag: tag, status: status == .invalidTag ? status : .malformedMembers, configuredDefault: nil, members: [])
+                return PolicyCatalogSelector(
+                    identity: selectorIndex, tag: tag,
+                    status: status == .available ? .malformedMembers : status,
+                    configuredDefault: nil, targetOverride: tag.flatMap { overrides[$0] },
+                    overrideValid: false, effectiveDesired: nil, runningSelection: nil,
+                    runtimeConvergence: .notRunning, restartRequired: false, members: []
+                )
             }
+            let memberNames = rawMembers.compactMap(nonemptyString)
+            let memberCounts = Dictionary(grouping: memberNames, by: { $0 }).mapValues(\.count)
             let members = rawMembers.compactMap(nonemptyString).enumerated().map { memberIndex, name -> PolicyCatalogMember in
+                guard memberCounts[name] == 1 else {
+                    return PolicyCatalogMember(identity: memberIndex, tag: name, type: nil, status: .duplicateTag)
+                }
                 guard let matches = tagged[name] else { return PolicyCatalogMember(identity: memberIndex, tag: name, type: nil, status: .missingReference) }
                 guard matches.count == 1 else { return PolicyCatalogMember(identity: memberIndex, tag: name, type: nil, status: .duplicateTag) }
                 guard let type = nonemptyString(matches[0]["type"]) else {
@@ -209,8 +350,21 @@ enum PolicyCatalogParser {
             let configuredDefault = nonemptyString(selector["default"]).flatMap { candidate in
                 members.first(where: { $0.tag == candidate && $0.status == .available })?.tag
             }
-            return PolicyCatalogSelector(identity: selectorIndex, tag: tag, status: status, configuredDefault: configuredDefault, members: members)
-        })
+            let isMutable = status == .available && !members.isEmpty && members.allSatisfy { $0.status == .available }
+            let targetOverride = tag.flatMap { overrides[$0] }
+            let validOverride = isMutable && targetOverride.map { candidate in
+                members.contains { $0.tag == candidate && $0.status == .available }
+            } == true
+            let desired = isMutable ? (validOverride ? targetOverride : configuredDefault ?? members.first?.tag) : nil
+            return PolicyCatalogSelector(
+                identity: selectorIndex, tag: tag, status: status,
+                configuredDefault: configuredDefault, targetOverride: targetOverride,
+                overrideValid: validOverride, effectiveDesired: desired,
+                runningSelection: nil, runtimeConvergence: .notRunning,
+                restartRequired: false, members: members
+            )
+            }
+        )
     }
 
     private static func nonemptyString(_ value: Any?) -> String? {
@@ -218,18 +372,175 @@ enum PolicyCatalogParser {
     }
 }
 
-struct PolicyCatalogOperation: Sendable {
+struct PolicyCatalogOperation: @unchecked Sendable {
     private let profileStore: ProfileStore
     init(profileStore: ProfileStore) { self.profileStore = profileStore }
-    func read() throws -> PolicyCatalog { PolicyCatalogParser.parse(try profileStore.selectedValidVersion().data) }
+    func read() throws -> PolicyCatalog {
+        let version = try profileStore.selectedValidVersion()
+        return PolicyCatalogParser.parse(
+            version.data,
+            profileID: version.profile.id,
+            profileRevision: version.revision,
+            overrides: version.profile.policyOverrides
+        )
+    }
+}
+
+enum PolicyCatalogReconciler {
+    static func reconcile(_ desired: PolicyCatalog, evidence: PolicyRuntimeEvidence) -> PolicyCatalog {
+        let runningCatalog: PolicyCatalog?
+        let evidenceMatchesSelected: Bool
+        switch evidence {
+        case .stopped:
+            runningCatalog = nil
+            evidenceMatchesSelected = false
+        case .unavailable:
+            runningCatalog = nil
+            evidenceMatchesSelected = false
+        case .running(let profileID, let revision, let sourceFingerprint, let configuration):
+            evidenceMatchesSelected = desired.profileID == profileID
+                && desired.profileRevision == revision
+                && desired.sourceFingerprint == sourceFingerprint
+            runningCatalog = PolicyCatalogParser.parse(
+                configuration,
+                profileID: profileID,
+                profileRevision: revision
+            )
+        }
+
+        return PolicyCatalog(
+            formatVersion: desired.formatVersion,
+            profileID: desired.profileID,
+            profileRevision: desired.profileRevision,
+            sourceFingerprint: desired.sourceFingerprint,
+            selectors: desired.selectors.map { selector in
+                let running: String?
+                let convergence: PolicyRuntimeConvergenceState
+                let restartRequired: Bool
+                switch evidence {
+                case .stopped:
+                    running = nil
+                    convergence = .notRunning
+                    restartRequired = false
+                case .unavailable:
+                    running = nil
+                    convergence = .unavailable
+                    restartRequired = selector.isMutable
+                case .running:
+                    if evidenceMatchesSelected,
+                       let tag = selector.tag,
+                       let runningSelector = runningCatalog?.selectors.first(where: { $0.tag == tag && $0.isMutable }) {
+                        running = runningSelector.effectiveDesired
+                        restartRequired = running != selector.effectiveDesired
+                        convergence = restartRequired ? .restartRequired : .converged
+                    } else {
+                        running = nil
+                        convergence = .unavailable
+                        restartRequired = selector.isMutable
+                    }
+                }
+                return PolicyCatalogSelector(
+                    identity: selector.identity, tag: selector.tag, status: selector.status,
+                    configuredDefault: selector.configuredDefault,
+                    targetOverride: selector.targetOverride,
+                    overrideValid: selector.overrideValid,
+                    effectiveDesired: selector.effectiveDesired,
+                    runningSelection: running,
+                    runtimeConvergence: convergence,
+                    restartRequired: restartRequired,
+                    members: selector.members
+                )
+            }
+        )
+    }
+}
+
+protocol TargetPolicyOperating: Sendable {
+    func readPersisted() throws -> PolicyCatalog
+    func read() async throws -> PolicyCatalog
+    func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog
+}
+
+final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
+    private let profileStore: ProfileStore
+    private let runtimeEvidenceProvider: any PolicyRuntimeEvidenceProviding
+    private let mutationLock = NSLock()
+
+    init(
+        profileStore: ProfileStore,
+        runtimeEvidenceProvider: any PolicyRuntimeEvidenceProviding = StoppedPolicyRuntimeEvidenceProvider()
+    ) {
+        self.profileStore = profileStore
+        self.runtimeEvidenceProvider = runtimeEvidenceProvider
+    }
+
+    func readPersisted() throws -> PolicyCatalog {
+        try PolicyCatalogOperation(profileStore: profileStore).read()
+    }
+
+    func read() async throws -> PolicyCatalog {
+        let desired = try readPersisted()
+        return PolicyCatalogReconciler.reconcile(
+            desired,
+            evidence: await runtimeEvidenceProvider.currentPolicyRuntimeEvidence()
+        )
+    }
+
+    func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog {
+        let committed = try commitSelection(selectorTag: selectorTag, outboundTag: outboundTag)
+        return PolicyCatalogReconciler.reconcile(
+            committed,
+            evidence: await runtimeEvidenceProvider.currentPolicyRuntimeEvidence()
+        )
+    }
+
+    private func commitSelection(selectorTag: String, outboundTag: String) throws -> PolicyCatalog {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        do {
+            let desired = try readPersisted()
+            try PolicySelectionValidator.validate(
+                selectorTag: selectorTag,
+                outboundTag: outboundTag,
+                in: desired
+            )
+            guard let profileID = desired.profileID, let revision = desired.profileRevision else {
+                throw ProfileStoreError.noValidVersion
+            }
+            do {
+                try profileStore.persistPolicyOverride(
+                    profileID: profileID,
+                    expectedRevision: revision,
+                    selectorTag: selectorTag,
+                    outboundTag: outboundTag
+                )
+            } catch {
+                throw TargetPolicyOperationError.persistenceFailed
+            }
+            return try readPersisted()
+        } catch {
+            throw error
+        }
+    }
 }
 
 extension PolicyCatalog {
     func automationJSON() -> JSONValue {
-        .object(["formatVersion": .integer(formatVersion), "selectors": .array(selectors.map { selector in
+        .object(["formatVersion": .integer(formatVersion),
+                 "profileID": profileID.map { .string($0.uuidString.lowercased()) } ?? .null,
+                 "profileRevision": profileRevision.map(JSONValue.integer) ?? .null,
+                 "restartRequired": .boolean(selectors.contains(where: \.restartRequired)),
+                 "selectors": .array(selectors.map { selector in
             .object(["configuredDefault": selector.configuredDefault.map(JSONValue.string) ?? .null,
+                     "desiredSelection": selector.effectiveDesired.map(JSONValue.string) ?? .null,
                      "members": .array(selector.members.map { member in .object(["status": .string(member.status.rawValue), "tag": .string(member.tag), "type": member.type.map(JSONValue.string) ?? .null]) }),
-                     "status": .string(selector.status.rawValue), "tag": selector.tag.map(JSONValue.string) ?? .null])
+                     "overrideValid": .boolean(selector.overrideValid),
+                     "runningSelection": selector.runningSelection.map(JSONValue.string) ?? .null,
+                     "runtimeConvergence": .string(selector.runtimeConvergence.rawValue),
+                     "restartRequired": .boolean(selector.restartRequired),
+                     "status": .string(selector.status.rawValue),
+                     "tag": selector.tag.map(JSONValue.string) ?? .null,
+                     "targetOverride": selector.targetOverride.map(JSONValue.string) ?? .null])
         })])
     }
 }

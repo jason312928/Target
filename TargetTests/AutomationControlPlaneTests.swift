@@ -31,8 +31,8 @@ final class AutomationControlPlaneTests: XCTestCase {
         """.utf8))
         XCTAssertEqual(catalog.selectors.map(\.tag), ["group", nil, "malformed"])
         XCTAssertEqual(catalog.selectors[0].members.map(\.tag), ["first", "missing", "first"])
-        XCTAssertEqual(catalog.selectors[0].configuredDefault, "first")
-        XCTAssertEqual(catalog.selectors[0].members[0].type, "future-protocol")
+        XCTAssertNil(catalog.selectors[0].configuredDefault)
+        XCTAssertEqual(catalog.selectors[0].members[0].status, .duplicateTag)
         XCTAssertEqual(catalog.selectors[0].members[1].status, .missingReference)
         XCTAssertEqual(catalog.selectors[1].status, .invalidTag)
         XCTAssertEqual(catalog.selectors[2].status, .malformedMembers)
@@ -43,8 +43,21 @@ final class AutomationControlPlaneTests: XCTestCase {
     func testPolicyCatalogParserProducesEmptyCatalogWhenPersistedOutboundsHaveNoSelector() {
         let catalog = PolicyCatalogParser.parse(Data(#"{"outbounds":[{"type":"direct","tag":"direct"},{"type":"vmess","tag":"node"}]}"#.utf8))
 
-        XCTAssertEqual(catalog.formatVersion, 1)
+        XCTAssertEqual(catalog.formatVersion, 2)
         XCTAssertTrue(catalog.selectors.isEmpty)
+    }
+
+    func testPolicyCatalogUsesDocumentedFirstMemberFallbackAndRejectsAmbiguousSelectors() throws {
+        let catalog = PolicyCatalogParser.parse(Data(#"{"outbounds":[{"type":"selector","tag":"fallback","outbounds":["first","second"]},{"type":"direct","tag":"first"},{"type":"block","tag":"second"},{"type":"selector","tag":"duplicate","outbounds":["first"]},{"type":"selector","tag":"duplicate","outbounds":["second"]}]}"#.utf8))
+        XCTAssertEqual(catalog.selectors[0].configuredDefault, nil)
+        XCTAssertEqual(catalog.selectors[0].effectiveDesired, "first")
+        XCTAssertTrue(catalog.selectors[0].isMutable)
+        XCTAssertEqual(catalog.selectors[1].status, .duplicateTag)
+        XCTAssertEqual(catalog.selectors[2].status, .duplicateTag)
+        XCTAssertFalse(catalog.selectors[1].isMutable)
+        XCTAssertThrowsError(try PolicySelectionValidator.validate(selectorTag: "duplicate", outboundTag: "first", in: catalog)) {
+            XCTAssertEqual($0 as? TargetPolicyOperationError, .selectorAmbiguous)
+        }
     }
 
     func testPolicyCatalogMissingOrEmptyMemberTypeIsUnavailable() {
@@ -61,6 +74,24 @@ final class AutomationControlPlaneTests: XCTestCase {
         XCTAssertEqual(parsed.arguments, [:])
         XCTAssertThrowsError(try TargetCtlCommandParser.parse(["policy", "list"]))
         XCTAssertThrowsError(try TargetCtlCommandParser.parse(["policy", "list", "extra", "--json"]))
+    }
+
+
+    func testTargetCtlPolicySelectParserRequiresExactArguments() throws {
+        let parsed = try TargetCtlCommandParser.parse([
+            "policy", "select", "--selector", "group", "--outbound", "second", "--json"
+        ])
+        XCTAssertEqual(parsed.action, "policy.select")
+        XCTAssertEqual(parsed.arguments, ["selector": "group", "outbound": "second"])
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse([
+            "policy", "select", "--outbound", "second", "--json"
+        ]))
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse([
+            "policy", "select", "--selector", "group", "--json"
+        ]))
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse([
+            "policy", "select", "--selector", "group", "--outbound", "second", "extra", "--json"
+        ]))
     }
 
     func testPolicyCatalogRedactsExpandedCredentialSentinels() throws {
@@ -86,12 +117,155 @@ final class AutomationControlPlaneTests: XCTestCase {
         let response = await operations.handle(AutomationRequest(protocolVersion: 1, action: "policy.list"))
         XCTAssertTrue(response.ok)
         let encoded = String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self)
-        XCTAssertTrue(encoded.contains("\"formatVersion\":1"))
+        XCTAssertTrue(encoded.contains("\"formatVersion\":2"))
         XCTAssertFalse(encoded.contains("AUTOMATION-SECRET"))
         let unexpectedArguments = await operations.handle(AutomationRequest(protocolVersion: 1, action: "policy.list", arguments: ["extra": "x"]))
         XCTAssertFalse(unexpectedArguments.ok)
         let capabilities = await operations.handle(AutomationRequest(protocolVersion: 1, action: "capabilities"))
         XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(capabilities), as: UTF8.self).contains("policy.list"))
+        XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(capabilities), as: UTF8.self).contains("policy.select"))
+    }
+
+
+    func testPolicySelectionPersistsAndReconcilesAuthoritativeRuntimeWithoutMutation() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDirectory: root, checker: AutomationPassingChecker(), keyProvider: TestProfileKeyProvider())
+        let profile = try store.create(name: "Policy")
+        let source = Self.runtimePolicyConfiguration
+        try store.save(json: source, for: profile.id)
+        let evidence = MutablePolicyRuntimeEvidence()
+        let policy = TargetPolicyOperations(profileStore: store, runtimeEvidenceProvider: evidence)
+
+        let selectedA = try await policy.select(selectorTag: "group", outboundTag: "first")
+        XCTAssertEqual(selectedA.selectors[0].effectiveDesired, "first")
+        let versionA = try store.selectedValidVersion()
+        let runtimeA = try ProfileRuntimeConfigurationPreparer(portSelector: AutomationFixedPortSelector(port: 51_234)).prepare(versionA)
+        await evidence.set(.running(
+            profileID: versionA.profile.id,
+            profileRevision: versionA.revision,
+            sourceFingerprint: runtimeA.sourceFingerprint,
+            configuration: runtimeA.data
+        ))
+        let runtimeBeforeMutation = runtimeA.data
+
+        let selectedB = try await policy.select(selectorTag: "group", outboundTag: "second")
+        XCTAssertEqual(selectedB.selectors[0].effectiveDesired, "second")
+        XCTAssertEqual(selectedB.selectors[0].runningSelection, "first")
+        XCTAssertEqual(selectedB.selectors[0].runtimeConvergence, .restartRequired)
+        XCTAssertTrue(selectedB.selectors[0].restartRequired)
+        let runtimeAfterMutation = await evidence.configuration
+        XCTAssertEqual(runtimeAfterMutation, runtimeBeforeMutation)
+
+        let versionB = try store.selectedValidVersion()
+        let runtimeB = try ProfileRuntimeConfigurationPreparer(portSelector: AutomationFixedPortSelector(port: 51_235)).prepare(versionB)
+        await evidence.set(.running(
+            profileID: versionB.profile.id,
+            profileRevision: versionB.revision,
+            sourceFingerprint: runtimeB.sourceFingerprint,
+            configuration: runtimeB.data
+        ))
+        let converged = try await policy.read()
+        XCTAssertEqual(converged.selectors[0].runningSelection, "second")
+        XCTAssertEqual(converged.selectors[0].runtimeConvergence, .converged)
+        XCTAssertFalse(converged.selectors[0].restartRequired)
+    }
+
+    func testUnknownRuntimeEvidenceNeverClaimsConvergence() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDirectory: root, checker: AutomationPassingChecker(), keyProvider: TestProfileKeyProvider())
+        let profile = try store.create(name: "Policy")
+        try store.save(json: Self.runtimePolicyConfiguration, for: profile.id)
+        let policy = TargetPolicyOperations(
+            profileStore: store,
+            runtimeEvidenceProvider: FixedPolicyRuntimeEvidence(value: .unavailable)
+        )
+        let catalog = try await policy.read()
+        XCTAssertNil(catalog.selectors[0].runningSelection)
+        XCTAssertEqual(catalog.selectors[0].runtimeConvergence, .unavailable)
+        XCTAssertTrue(catalog.selectors[0].restartRequired)
+    }
+
+    func testConcurrentPolicySelectionsReturnTheirOwnCommittedState() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDirectory: root, checker: AutomationPassingChecker(), keyProvider: TestProfileKeyProvider())
+        let profile = try store.create(name: "Policy")
+        try store.save(json: Self.runtimePolicyConfiguration, for: profile.id)
+        let evidence = GatedFirstPolicyRuntimeEvidence()
+        let policy = TargetPolicyOperations(profileStore: store, runtimeEvidenceProvider: evidence)
+
+        let firstTask = Task {
+            try await policy.select(selectorTag: "group", outboundTag: "first")
+        }
+        await evidence.waitUntilFirstRead()
+        let second = try await policy.select(selectorTag: "group", outboundTag: "second")
+        await evidence.releaseFirstRead()
+        let first = try await firstTask.value
+
+        XCTAssertEqual(first.selectors[0].effectiveDesired, "first")
+        XCTAssertEqual(second.selectors[0].effectiveDesired, "second")
+        XCTAssertEqual(try policy.readPersisted().selectors[0].effectiveDesired, "second")
+    }
+
+    func testPolicySelectAutomationReturnsStableAllowlistedFactsAndErrors() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDirectory: root, checker: AutomationPassingChecker(), keyProvider: TestProfileKeyProvider())
+        let profile = try store.create(name: "Policy")
+        try store.save(json: Self.runtimePolicyConfiguration, for: profile.id)
+        let shared = TargetPolicyOperations(profileStore: store)
+        let operations = TargetAutomationOperations(
+            profileStore: store,
+            policyOperations: shared,
+            backend: MockBackend()
+        )
+        let response = await operations.handle(AutomationRequest(
+            protocolVersion: 1,
+            action: "policy.select",
+            arguments: ["selector": "group", "outbound": "second"]
+        ))
+        XCTAssertTrue(response.ok)
+        let encoded = String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self)
+        XCTAssertTrue(encoded.contains(#""desiredSelection":"second""#))
+        XCTAssertTrue(encoded.contains(#""runtimeConvergence":"notRunning""#))
+        XCTAssertFalse(encoded.contains("AUTOMATION-SECRET"))
+
+        let missing = await operations.handle(AutomationRequest(
+            protocolVersion: 1,
+            action: "policy.select",
+            arguments: ["selector": "missing", "outbound": "second"]
+        ))
+        XCTAssertEqual(missing.error?.code, "policy_selector_not_found")
+        let outbound = await operations.handle(AutomationRequest(
+            protocolVersion: 1,
+            action: "policy.select",
+            arguments: ["selector": "group", "outbound": "missing"]
+        ))
+        XCTAssertEqual(outbound.error?.code, "policy_outbound_not_found")
+
+        try store.save(
+            json: #"{"inbounds":[],"outbounds":[{"type":"selector","tag":"group","outbounds":["duplicate","duplicate"]},{"type":"direct","tag":"duplicate"}]}"#,
+            for: profile.id
+        )
+        let unavailableOutbound = await operations.handle(AutomationRequest(
+            protocolVersion: 1,
+            action: "policy.select",
+            arguments: ["selector": "group", "outbound": "duplicate"]
+        ))
+        XCTAssertEqual(unavailableOutbound.error?.code, "policy_outbound_unavailable")
+
+        try store.save(
+            json: #"{"inbounds":[],"outbounds":[{"type":"selector","tag":"duplicate","outbounds":["first"]},{"type":"selector","tag":"duplicate","outbounds":["first"]},{"type":"direct","tag":"first"}]}"#,
+            for: profile.id
+        )
+        let ambiguousSelector = await operations.handle(AutomationRequest(
+            protocolVersion: 1,
+            action: "policy.select",
+            arguments: ["selector": "duplicate", "outbound": "first"]
+        ))
+        XCTAssertEqual(ambiguousSelector.error?.code, "policy_selector_ambiguous")
     }
 
     func testPolicyListNoValidRevisionKeepsStableProfileErrorMapping() async {
@@ -313,6 +487,8 @@ final class AutomationControlPlaneTests: XCTestCase {
     private func temporaryRoot() -> URL {
         URL(fileURLWithPath: "/tmp/ta-\(getpid())-\(UUID().uuidString.prefix(8))", isDirectory: true)
     }
+
+    private static let runtimePolicyConfiguration = #"{"inbounds":[{"type":"mixed","tag":"local","listen":"127.0.0.1","listen_port":0}],"outbounds":[{"type":"selector","tag":"group","outbounds":["first","second"],"default":"first"},{"type":"direct","tag":"first"},{"type":"block","tag":"second"}],"route":{"final":"group"}}"#
 }
 
 private struct AutomationPassingChecker: SingBoxConfigurationChecking {
@@ -324,4 +500,48 @@ private actor AutomationConcurrencyTracker {
     private(set) var maximum = 0
     func enter() { active += 1; maximum = max(maximum, active) }
     func leave() { active -= 1 }
+}
+
+private actor MutablePolicyRuntimeEvidence: PolicyRuntimeEvidenceProviding {
+    private var value: PolicyRuntimeEvidence = .stopped
+    func set(_ value: PolicyRuntimeEvidence) { self.value = value }
+    func currentPolicyRuntimeEvidence() async -> PolicyRuntimeEvidence { value }
+    var configuration: Data? {
+        guard case .running(_, _, _, let configuration) = value else { return nil }
+        return configuration
+    }
+}
+
+private struct FixedPolicyRuntimeEvidence: PolicyRuntimeEvidenceProviding {
+    let value: PolicyRuntimeEvidence
+    func currentPolicyRuntimeEvidence() async -> PolicyRuntimeEvidence { value }
+}
+
+private actor GatedFirstPolicyRuntimeEvidence: PolicyRuntimeEvidenceProviding {
+    private var readCount = 0
+    private var firstReadContinuation: CheckedContinuation<Void, Never>?
+
+    func currentPolicyRuntimeEvidence() async -> PolicyRuntimeEvidence {
+        readCount += 1
+        if readCount == 1 {
+            await withCheckedContinuation { continuation in
+                firstReadContinuation = continuation
+            }
+        }
+        return .stopped
+    }
+
+    func waitUntilFirstRead() async {
+        while readCount == 0 { await Task.yield() }
+    }
+
+    func releaseFirstRead() {
+        firstReadContinuation?.resume()
+        firstReadContinuation = nil
+    }
+}
+
+private struct AutomationFixedPortSelector: LocalEnginePortSelecting {
+    let port: UInt16
+    func selectAvailablePort() throws -> UInt16 { port }
 }

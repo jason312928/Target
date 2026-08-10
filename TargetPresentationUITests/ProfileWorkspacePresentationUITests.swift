@@ -26,6 +26,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         case policyCatalogUnavailable = "policy-catalog-unavailable"
         case policyCatalogWarnings = "policy-catalog-warnings"
         case policyCatalogSecrets = "policy-catalog-secrets"
+        case policyCatalogMismatch = "policy-catalog-mismatch"
     }
 
     func testPolicyCatalogPopulatedPresentationUsesPersistedOrderDefaultAndType() {
@@ -39,6 +40,15 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
             element("policy.catalog.selector.0.member.0", in: app).frame.minY,
             element("policy.catalog.selector.0.member.1", in: app).frame.minY,
             "Persisted member order must be rendered"
+        )
+        let selection = element("policy.catalog.selector.0.selection", in: app)
+        assertExists(selection, message: "Valid selector did not expose a semantic selection control")
+        XCTAssertTrue(selection.isEnabled)
+        XCTAssertEqual(
+            app.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier == %@", "policy.catalog.selector.0.selection"))
+                .count,
+            1
         )
     }
 
@@ -67,9 +77,16 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         assertExists(element("policy.catalog.selector.0.member.2", in: app), message: "Second duplicate member row collapsed")
         assertExists(element("policy.catalog.selector.4", in: app), message: "Invalid selector row collapsed")
         assertExists(element("policy.catalog.selector.5", in: app), message: "Malformed selector row collapsed")
+        XCTAssertEqual(
+            app.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier CONTAINS %@", ".selection"))
+                .count,
+            0,
+            "Malformed or ambiguous Policy rows exposed mutation"
+        )
     }
 
-    func testPolicyCatalogPresentationIsReadOnlyAndCredentialSafe() {
+    func testPolicyCatalogPresentationMutationRemainsCredentialSafe() {
         let app = launch(.policyCatalogSecrets)
         assertCatalogText("safe-group", identifier: "policy.catalog.selector.0.tag", in: app)
         assertCatalogText("safe-member", identifier: "policy.catalog.selector.0.member.0.tag", in: app)
@@ -78,11 +95,10 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "policy.catalog"))
             .allElementsBoundByIndex
         XCTAssertFalse(policyElements.isEmpty, "Missing Policy Catalog accessibility elements")
-        for type in [XCUIElement.ElementType.button, .switch, .popUpButton, .comboBox, .slider] {
-            let policyControls = app.descendants(matching: type)
-                .matching(NSPredicate(format: "identifier BEGINSWITH %@", "policy.catalog"))
-            XCTAssertEqual(policyControls.count, 0, "Policy Catalog must not expose mutation controls")
-        }
+        assertExists(
+            element("policy.catalog.selector.0.selection", in: app),
+            message: "Valid credential-safe selector is missing its selection control"
+        )
         let sentinel = "POLICY-PRESENTATION-SECRET"
         for element in policyElements {
             XCTAssertFalse(element.label.contains(sentinel), "Credential sentinel leaked through Policy Catalog label")
@@ -90,6 +106,23 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
             XCTAssertFalse(element.identifier.contains(sentinel), "Credential sentinel leaked through Policy Catalog identifier")
             XCTAssertFalse(element.debugDescription.contains(sentinel), "Credential sentinel leaked through Policy Catalog accessibility description")
         }
+    }
+
+    func testPolicyCatalogMismatchShowsRunningChoiceAndLocalizedRestartNotice() {
+        let app = launch(.policyCatalogMismatch)
+        assertCatalogText(
+            "Currently running: first",
+            identifier: "policy.catalog.selector.0.running-selection",
+            in: app
+        )
+        assertCatalogText(
+            "Restart required to apply",
+            identifier: "policy.catalog.selector.0.restart-required",
+            in: app
+        )
+        let selection = element("policy.catalog.selector.0.selection", in: app)
+        assertExists(selection, message: "Desired Policy selection control is unavailable")
+        XCTAssertTrue(selection.isEnabled)
     }
 
     func testSaveFailureThenRecoveryAndSuccess() {

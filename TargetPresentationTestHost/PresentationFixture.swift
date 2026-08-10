@@ -17,6 +17,7 @@ enum PresentationScenario: String, CaseIterable {
     case policyCatalogUnavailable = "policy-catalog-unavailable"
     case policyCatalogWarnings = "policy-catalog-warnings"
     case policyCatalogSecrets = "policy-catalog-secrets"
+    case policyCatalogMismatch = "policy-catalog-mismatch"
 
     static func fromLaunchArguments() -> Self {
         let arguments = ProcessInfo.processInfo.arguments
@@ -74,15 +75,39 @@ final class PresentationFixture {
         if [
             .localProfile, .remoteProfile, .subscriptionBusy,
             .policyCatalogPopulated, .policyCatalogEmpty, .policyCatalogUnavailable,
-            .policyCatalogWarnings, .policyCatalogSecrets
+            .policyCatalogWarnings, .policyCatalogSecrets, .policyCatalogMismatch
         ].contains(scenario) {
             try store.save(json: Self.configuration(for: scenario), for: first.id)
         }
         checker.replaceResults(Self.checkerResults(for: scenario))
         try store.select(first.id)
+        let policyOperations: TargetPolicyOperations
+        if scenario == .policyCatalogMismatch {
+            let version = try store.selectedValidVersion()
+            try store.persistPolicyOverride(
+                profileID: first.id,
+                expectedRevision: version.revision,
+                selectorTag: "group",
+                outboundTag: "second"
+            )
+            policyOperations = TargetPolicyOperations(
+                profileStore: store,
+                runtimeEvidenceProvider: PresentationPolicyRuntimeEvidence(
+                    value: .running(
+                        profileID: first.id,
+                        profileRevision: version.revision,
+                        sourceFingerprint: TargetConfigurationFingerprint.sha256(version.data),
+                        configuration: version.data
+                    )
+                )
+            )
+        } else {
+            policyOperations = TargetPolicyOperations(profileStore: store)
+        }
         model = ProfileViewModel(
             store: store,
             subscriptionFetcher: fetcher,
+            policyOperations: policyOperations,
             policyCatalogLoader: scenario == .policyCatalogUnavailable ? { throw PresentationFixtureError.persistedReadFailed } : nil
         )
 
@@ -100,7 +125,7 @@ final class PresentationFixture {
             model.updateEditor(Self.dirtyConfiguration)
         case .localProfile, .remoteProfile, .subscriptionBusy,
              .policyCatalogPopulated, .policyCatalogEmpty, .policyCatalogUnavailable,
-             .policyCatalogWarnings, .policyCatalogSecrets:
+             .policyCatalogWarnings, .policyCatalogSecrets, .policyCatalogMismatch:
             break
         case .dirtyEditor:
             model.updateEditor(Self.dirtyConfiguration)
@@ -166,6 +191,8 @@ final class PresentationFixture {
             #"{"inbounds":[],"outbounds":[{"type":"selector","tag":"warnings","outbounds":["missing","duplicate","duplicate","unavailable"]},{"type":"direct","tag":"duplicate"},{"type":"block","tag":"duplicate"},{"tag":"unavailable"},{"type":"selector","tag":"","outbounds":[]},{"type":"selector","tag":"also-invalid","outbounds":"bad"}],"route":{}}"#
         case .policyCatalogSecrets:
             #"{"inbounds":[],"outbounds":[{"type":"selector","tag":"safe-group","outbounds":["safe-member"],"default":"safe-member"},{"type":"vmess","tag":"safe-member","server":"POLICY-PRESENTATION-SECRET","address":"POLICY-PRESENTATION-SECRET","username":"POLICY-PRESENTATION-SECRET","password":"POLICY-PRESENTATION-SECRET","uuid":"POLICY-PRESENTATION-SECRET","token":"POLICY-PRESENTATION-SECRET","private_key":"POLICY-PRESENTATION-SECRET","certificate":"POLICY-PRESENTATION-SECRET","tls":{"server_name":"POLICY-PRESENTATION-SECRET"},"transport":{"path":"POLICY-PRESENTATION-SECRET"},"arbitrary":{"nested":"POLICY-PRESENTATION-SECRET"}}],"route":{}}"#
+        case .policyCatalogMismatch:
+            #"{"inbounds":[],"outbounds":[{"type":"selector","tag":"group","outbounds":["first","second"],"default":"first"},{"type":"direct","tag":"first"},{"type":"block","tag":"second"}],"route":{}}"#
         default:
             persistedConfiguration
         }
@@ -181,10 +208,16 @@ final class PresentationFixture {
         case .persistedReadDiscardFailure, .successfulDiscard, .emptyWorkspace,
              .localProfile, .remoteProfile, .dirtyEditor, .invalidDiagnostic,
              .subscriptionBusy, .policyCatalogPopulated, .policyCatalogEmpty,
-             .policyCatalogUnavailable, .policyCatalogWarnings, .policyCatalogSecrets:
+             .policyCatalogUnavailable, .policyCatalogWarnings, .policyCatalogSecrets,
+             .policyCatalogMismatch:
             return [.success(())]
         }
     }
+}
+
+private struct PresentationPolicyRuntimeEvidence: PolicyRuntimeEvidenceProviding {
+    let value: PolicyRuntimeEvidence
+    func currentPolicyRuntimeEvidence() async -> PolicyRuntimeEvidence { value }
 }
 
 private enum PresentationFixtureError: Error { case persistedReadFailed }

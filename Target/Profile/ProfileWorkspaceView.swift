@@ -67,6 +67,7 @@ struct ProfileWorkspaceView: View {
                 }
             }
         }
+        .task { model.refreshPolicyState() }
         .onChange(of: model.readinessChangeGeneration) { _, _ in lifecycle?.refresh() }
         .alert("profile.delete.title", isPresented: Binding(
             get: { deleteTarget != nil },
@@ -264,9 +265,14 @@ private struct ProfileWorkspaceDetailView: View {
             }
 
             Divider().padding(.top, 8)
-            PolicyCatalogSection(catalog: model.policyCatalog, unavailable: model.isPolicyCatalogUnavailable)
+            PolicyCatalogSection(
+                catalog: model.policyCatalog,
+                unavailable: model.isPolicyCatalogUnavailable,
+                isSelecting: model.isSelectingPolicy,
+                select: model.selectPolicy
+            )
                 .padding(.horizontal, 20)
-                .padding(.vertical, 4)
+                .padding(.vertical, model.policyCatalog?.selectors.isEmpty == true || model.isPolicyCatalogUnavailable ? 0 : 4)
 
             Divider().padding(.top, 12)
 
@@ -344,6 +350,8 @@ private struct ProfileWorkspaceDetailView: View {
 private struct PolicyCatalogSection: View {
     let catalog: PolicyCatalog?
     let unavailable: Bool
+    let isSelecting: Bool
+    let select: (String, String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -383,6 +391,44 @@ private struct PolicyCatalogSection: View {
                                 .font(.caption).foregroundStyle(.orange)
                                 .accessibilityLabel(Text(verbatim: warning))
                                 .accessibilityIdentifier("policy.catalog.selector.\(selector.id).status")
+                        }
+                        if selector.isMutable,
+                           let selectorTag = selector.tag,
+                           let desired = selector.effectiveDesired {
+                            Picker(
+                                "policy.catalog.desired-selection",
+                                selection: Binding(
+                                    get: { desired },
+                                    set: { select(selectorTag, $0) }
+                                )
+                            ) {
+                                ForEach(selector.members.filter { $0.status == .available }) { member in
+                                    Text(member.tag).tag(member.tag)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .controlSize(.small)
+                            .disabled(isSelecting)
+                            .accessibilityIdentifier("policy.catalog.selector.\(selector.id).selection")
+                        }
+                        if let running = selector.runningSelection,
+                           running != selector.effectiveDesired {
+                            (Text("policy.catalog.running-selection") + Text(": \(running)"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).running-selection")
+                        }
+                        if selector.runtimeConvergence == .unavailable {
+                            Text("policy.catalog.running-unavailable")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).running-unavailable")
+                        }
+                        if selector.restartRequired {
+                            Label("policy.catalog.restart-required", systemImage: "arrow.clockwise")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.orange)
+                                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).restart-required")
                         }
                         ForEach(selector.members) { member in
                             HStack(spacing: 5) {

@@ -4,10 +4,15 @@ import SwiftUI
 @main
 struct TargetApp: App {
     @State private var lifecycle: BackendLifecycleModel
+    @State private var profileModel: ProfileViewModel
 
     init() {
         let profileStore = ProfileStore()
         let backend = SingBoxBackend(profileStore: profileStore)
+        let policyOperations = TargetPolicyOperations(
+            profileStore: profileStore,
+            runtimeEvidenceProvider: backend
+        )
         let systemProxyClient = TargetServiceXPCClient()
         let systemProxyOperations = TargetSystemProxyOperations(client: systemProxyClient)
         let runtimeOperations = TargetRuntimeOperations(
@@ -22,8 +27,13 @@ struct TargetApp: App {
             runtimeOperations: runtimeOperations
         )
         _lifecycle = State(initialValue: lifecycle)
+        _profileModel = State(initialValue: ProfileViewModel(
+            store: profileStore,
+            policyOperations: policyOperations
+        ))
         let operations = TargetAutomationOperations(
             profileStore: profileStore,
+            policyOperations: policyOperations,
             backend: backend,
             serviceClient: systemProxyClient,
             systemProxyOperations: systemProxyOperations,
@@ -42,7 +52,7 @@ struct TargetApp: App {
 
     var body: some Scene {
         WindowGroup {
-            AppShellView(lifecycle: lifecycle)
+            AppShellView(lifecycle: lifecycle, profileModel: profileModel)
                 .onAppear { TargetApplicationDelegate.shared.lifecycle = lifecycle }
         }
     }

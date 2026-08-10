@@ -69,6 +69,7 @@ enum ProfileStorageFaultPoint: Sendable {
     case beforeCommit
     case afterBackupRename
     case afterLiveSwap
+    case manifestWrite
 }
 
 protocol ProfileStorageFaultInjecting {
@@ -146,6 +147,7 @@ final class ProfileEncryptedStorage {
         try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
         try setDirectoryPermissions(parent)
         let encrypted = try encrypt(plaintext, kind: kind, logicalPath: logicalPath)
+        if kind == .manifest { try checkFault(.manifestWrite, as: .encryptionFailed) }
         try encrypted.write(to: url, options: .atomic)
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }

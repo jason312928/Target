@@ -5,6 +5,31 @@ import XCTest
 
 @MainActor
 final class ProfileWorkspaceInteractionTests: XCTestCase {
+    func testGUIAndAutomationInvokeTheSamePolicyOperationExactlyOncePerSelection() async throws {
+        let fixture = try makeFixture()
+        let catalog = PolicyCatalogParser.parse(Data(#"{"outbounds":[{"type":"selector","tag":"group","outbounds":["first","second"]},{"type":"direct","tag":"first"},{"type":"block","tag":"second"}]}"#.utf8))
+        let shared = SharedPolicyOperationSpy(catalog: catalog)
+        let model = ProfileViewModel(store: fixture.store, policyOperations: shared)
+        model.selectPolicy(selectorTag: "group", outboundTag: "second")
+        for _ in 0..<50 where shared.selectCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(shared.selectCount, 1)
+
+        let automation = TargetAutomationOperations(
+            profileStore: fixture.store,
+            policyOperations: shared,
+            backend: MockBackend()
+        )
+        let response = await automation.handle(AutomationRequest(
+            protocolVersion: 1,
+            action: "policy.select",
+            arguments: ["selector": "group", "outbound": "second"]
+        ))
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(shared.selectCount, 2)
+    }
+
     func testImportPanelResultSelectsOnlyAcceptedURL() {
         let url = URL(fileURLWithPath: "/tmp/Profile.json")
 
@@ -555,6 +580,34 @@ private struct Fixture {
 private enum PendingKind { case create, duplicate, delete, restore }
 
 private enum SubscriptionRaceOutcome: CaseIterable { case updated, notModified, transportFailure, userCancelled }
+
+private final class SharedPolicyOperationSpy: TargetPolicyOperating, @unchecked Sendable {
+    private let lock = NSLock()
+    private let catalog: PolicyCatalog
+    private var selections = 0
+
+    init(catalog: PolicyCatalog) { self.catalog = catalog }
+
+    var selectCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return selections
+    }
+
+    func readPersisted() throws -> PolicyCatalog { catalog }
+    func read() async throws -> PolicyCatalog { catalog }
+
+    func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog {
+        recordSelection()
+        return catalog
+    }
+
+    private func recordSelection() {
+        lock.lock()
+        selections += 1
+        lock.unlock()
+    }
+}
 
 private actor ControlledSubscriptionFetcher: ProfileSubscriptionFetching {
     enum Completion {
