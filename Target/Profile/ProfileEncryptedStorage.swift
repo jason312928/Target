@@ -97,6 +97,7 @@ final class ProfileEncryptedStorage {
     private let fileManager: FileManager
     private let keyProvider: any ProfileEncryptionKeyProviding
     private let faults: any ProfileStorageFaultInjecting
+    private let storageLock = NSRecursiveLock()
     private var key: SymmetricKey?
 
     init(root: URL, fileManager: FileManager = .default, keyProvider: any ProfileEncryptionKeyProviding, faults: any ProfileStorageFaultInjecting = NoProfileStorageFaults()) {
@@ -107,6 +108,8 @@ final class ProfileEncryptedStorage {
     }
 
     func prepare() throws {
+        storageLock.lock()
+        defer { storageLock.unlock() }
         try recoverInterruptedMigration()
         if !fileManager.fileExists(atPath: root.path) {
             try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
@@ -137,12 +140,16 @@ final class ProfileEncryptedStorage {
     }
 
     func read(kind: ProfilePersistentRecordKind, logicalPath: String, url: URL) throws -> Data {
+        storageLock.lock()
+        defer { storageLock.unlock() }
         try prepare()
         guard fileManager.fileExists(atPath: url.path) else { throw ProfileStoreError.missingEncryptedRecord }
         return try authenticatedRecord(at: url, kind: kind, logicalPath: logicalPath)
     }
 
     func write(_ plaintext: Data, kind: ProfilePersistentRecordKind, logicalPath: String, url: URL) throws {
+        storageLock.lock()
+        defer { storageLock.unlock() }
         let parent = url.deletingLastPathComponent()
         try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
         try setDirectoryPermissions(parent)
@@ -153,6 +160,8 @@ final class ProfileEncryptedStorage {
     }
 
     func createProfileDirectory(_ directory: URL) throws {
+        storageLock.lock()
+        defer { storageLock.unlock() }
         try fileManager.createDirectory(at: directory.appending(path: "versions"), withIntermediateDirectories: true)
         try setDirectoryPermissions(directory)
         try setDirectoryPermissions(directory.appending(path: "versions"))
@@ -162,6 +171,8 @@ final class ProfileEncryptedStorage {
     /// runs before `prepare()` so an incomplete live tree is never authenticated
     /// as authoritative state.
     func authenticateExistingTree() throws {
+        storageLock.lock()
+        defer { storageLock.unlock() }
         _ = try validateEncryptedTree()
     }
 
