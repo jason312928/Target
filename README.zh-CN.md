@@ -20,7 +20,7 @@ Profile 仅存放在 Target 的 Application Support 容器中。Profile 可保�
 
 新建 Profile 使用安全示例配置：动态 `127.0.0.1` mixed 监听和 `direct` outbound；不会启用系统代理、TUN、DNS 接管、路由或防火墙修改。
 
-对于结构有效的 sing-box selector，Target 可将期望成员保存为加密的 Profile 元数据，不会改写源 Profile JSON，也不会仅因策略选择而创建新配置版本。如果引擎正在运行，更改期望成员不会热切换或自动重启；Target 会继续显示经验证的当前运行选择，并仅在用户明确重启引擎后应用已保存的选择。
+对于结构有效的 sing-box selector，Target 可将期望成员保存为加密的 Profile 元数据，不会改写源 Profile JSON，也不会仅因策略选择而创建新配置版本。可使用“恢复 Profile 默认策略”移除全部由 Target 保存的选择并恢复 Profile 自己的默认值。两种操作都不会热切换或自动重启正在运行的引擎；Target 会继续显示经验证的当前运行选择，并仅在用户明确重启引擎后应用期望选择。
 
 ## 使用 Profile 运行引擎
 

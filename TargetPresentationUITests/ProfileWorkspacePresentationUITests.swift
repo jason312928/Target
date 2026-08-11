@@ -50,6 +50,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
                 .count,
             1
         )
+        XCTAssertFalse(element("policy.catalog.reset", in: app).exists, "Empty override state exposed a reset mutation")
     }
 
     func testPolicyCatalogEmptyPresentationUsesLocalizedEmptyState() {
@@ -123,6 +124,19 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         let selection = element("policy.catalog.selector.0.selection", in: app)
         assertExists(selection, message: "Desired Policy selection control is unavailable")
         XCTAssertTrue(selection.isEnabled)
+        let reset = element("policy.catalog.reset", in: app)
+        assertExists(reset, message: "Persisted override did not expose Profile defaults reset")
+        XCTAssertTrue(reset.isEnabled)
+    }
+
+    func testPolicyCatalogResetReturnsToSourceDefaultPresentation() {
+        let app = launch(.policyCatalogMismatch)
+        clickButton("policy.catalog.reset", in: app)
+        assertDoesNotExist(element("policy.catalog.reset", in: app), message: "Reset control remained after all overrides were cleared")
+        assertDoesNotExist(
+            element("policy.catalog.selector.0.restart-required", in: app),
+            message: "Source-default running state still required a restart"
+        )
     }
 
     func testSaveFailureThenRecoveryAndSuccess() {

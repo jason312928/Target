@@ -26,7 +26,7 @@ The editor provides JSON syntax highlighting, line numbers, formatting, validati
 
 New Profiles begin with a safe example: a dynamic `127.0.0.1` mixed listener and a `direct` outbound. It does not enable a system proxy, TUN, DNS takeover, route changes, or firewall changes.
 
-For a valid sing-box selector, Target can save the desired member as encrypted Profile metadata without rewriting the source Profile JSON or creating a new configuration revision. If the engine is already running, changing the desired member does not hot-switch or restart it; Target continues to show the authoritative running choice and applies the saved choice only after an explicit engine restart.
+For a valid sing-box selector, Target can save the desired member as encrypted Profile metadata without rewriting the source Profile JSON or creating a new configuration revision. You can use Profile Defaults to remove all Target-owned selector choices and return to the Profile's own defaults. Neither action hot-switches or restarts a running engine; Target continues to show the authoritative running choice and applies the desired choice only after an explicit engine restart.
 
 ## Build requirements
 

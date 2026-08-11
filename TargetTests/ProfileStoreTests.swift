@@ -112,6 +112,89 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertEqual(try reopened.selectedValidVersion().profile.policyOverrides, ["group": "first"])
     }
 
+    func testPolicyResetClearsAllOverridesWithoutChangingSourceRevisionOrHistory() async throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        let profile = try store.create(name: "Policy")
+        let source = #"{"outbounds":[{"type":"selector","tag":"one","outbounds":["a","b"],"default":"a"},{"type":"selector","tag":"two","outbounds":["c","d"],"default":"c"},{"type":"direct","tag":"a"},{"type":"block","tag":"b"},{"type":"direct","tag":"c"},{"type":"block","tag":"d"}]}"#
+        try store.save(json: source, for: profile.id)
+        let policy = TargetPolicyOperations(profileStore: store)
+        _ = try await policy.select(selectorTag: "one", outboundTag: "b")
+        _ = try await policy.select(selectorTag: "two", outboundTag: "d")
+        let before = try store.selectedValidVersion()
+
+        let reset = try await policy.reset()
+        XCTAssertEqual(reset.clearedOverrideCount, 2)
+        XCTAssertEqual(reset.catalog.storedOverrideCount, 0)
+        XCTAssertEqual(reset.catalog.selectors.map(\.effectiveDesired), ["a", "c"])
+        let after = try store.selectedValidVersion()
+        XCTAssertEqual(after.data, before.data)
+        XCTAssertEqual(after.revision, before.revision)
+        XCTAssertEqual(try store.availableValidVersions(for: profile.id).map(\.revision), [2, 1])
+
+        let reopened = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        XCTAssertEqual(try reopened.selectedValidVersion().profile.policyOverrides, [:])
+    }
+
+    func testPolicyResetClearsOrphanedOverrideAndNoOpDoesNotWriteManifest() async throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let faults = MutableProfileStorageFaults()
+        let store = ProfileStore(
+            rootDirectory: root,
+            checker: TestChecker(result: .success(())),
+            keyProvider: keys,
+            storageFaults: faults
+        )
+        let profile = try store.create(name: "Policy")
+        try store.save(json: policyConfiguration(configuredDefault: "first", members: ["first", "second"]), for: profile.id)
+        _ = try await TargetPolicyOperations(profileStore: store).select(selectorTag: "group", outboundTag: "second")
+        try store.save(json: #"{"outbounds":[{"type":"direct","tag":"direct"}]}"#, for: profile.id)
+        XCTAssertEqual(try store.selectedValidVersion().profile.policyOverrides, ["group": "second"])
+
+        let reset = try await TargetPolicyOperations(profileStore: store).reset()
+        XCTAssertEqual(reset.clearedOverrideCount, 1)
+        XCTAssertEqual(reset.catalog.storedOverrideCount, 0)
+        XCTAssertTrue(reset.catalog.selectors.isEmpty)
+        let beforeNoOp = try store.selectedValidVersion().profile
+        faults.failing = .manifestWrite
+        let noOp = try await TargetPolicyOperations(profileStore: store).reset()
+        XCTAssertEqual(noOp.clearedOverrideCount, 0)
+        XCTAssertEqual(try store.selectedValidVersion().profile.updatedAt, beforeNoOp.updatedAt)
+        faults.failing = nil
+    }
+
+    func testPolicyResetRejectsWrongSelectionStaleRevisionAndRetainsCommittedOverridesOnFault() async throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let faults = MutableProfileStorageFaults()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys, storageFaults: faults)
+        let first = try store.create(name: "First")
+        let second = try store.create(name: "Second")
+        try store.save(json: policyConfiguration(configuredDefault: "first", members: ["first", "second"]), for: first.id)
+        try store.select(first.id)
+        _ = try await TargetPolicyOperations(profileStore: store).select(selectorTag: "group", outboundTag: "second")
+        let revision = try store.selectedValidVersion().revision
+        XCTAssertThrowsError(try store.clearPolicyOverrides(profileID: second.id, expectedRevision: 1)) {
+            XCTAssertEqual($0 as? ProfileStoreError, .noSelectedProfile)
+        }
+        try store.save(json: policyConfiguration(configuredDefault: "first", members: ["first", "second"]), for: first.id)
+        XCTAssertThrowsError(try store.clearPolicyOverrides(profileID: first.id, expectedRevision: revision)) {
+            XCTAssertEqual($0 as? ProfileStoreError, .noValidVersion)
+        }
+        faults.failing = .manifestWrite
+        do {
+            _ = try await TargetPolicyOperations(profileStore: store).reset()
+            XCTFail("Expected persistence failure")
+        } catch let error as TargetPolicyOperationError {
+            XCTAssertEqual(error, .persistenceFailed)
+        }
+        faults.failing = nil
+        let reopened = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        XCTAssertEqual(try reopened.selectedValidVersion().profile.policyOverrides, ["group": "second"])
+    }
+
     func testPolicyOverrideReconcilesAcrossSaveAndRestoreWithoutApplyingStaleChoice() async throws {
         let store = try makeStore()
         let profile = try store.create(name: "Policy History")

@@ -58,6 +58,7 @@ actor TargetAutomationOperations {
             case "profile.list": return try profileList()
             case "policy.list": return try await policyList()
             case "policy.select": return try await policySelect(request.arguments)
+            case "policy.reset": return try await policyReset()
             case "profile.delete": return try profileDelete(request.arguments)
             case "engine.status": return await engineStatus()
             case "engine.start": return try await engineStart()
@@ -192,6 +193,19 @@ actor TargetAutomationOperations {
             "runningSelection": selector.runningSelection.map(JSONValue.string) ?? .null,
             "runtimeConvergence": .string(selector.runtimeConvergence.rawValue),
             "selector": .string(selectorTag)
+        ]))
+    }
+
+    private func policyReset() async throws -> AutomationResponse {
+        let result = try await policyOperations.reset()
+        let catalog = result.catalog
+        return .success(.object([
+            "catalog": catalog.automationJSON(),
+            "clearedOverrideCount": .integer(result.clearedOverrideCount),
+            "formatVersion": .integer(1),
+            "profileID": catalog.profileID.map { .string($0.uuidString.lowercased()) } ?? .null,
+            "profileRevision": catalog.profileRevision.map(JSONValue.integer) ?? .null,
+            "restartRequired": .boolean(catalog.selectors.contains(where: \.restartRequired))
         ]))
     }
 
@@ -354,7 +368,7 @@ actor TargetAutomationOperations {
         case .outboundUnavailable:
             .failure(code: "policy_outbound_unavailable", message: "The Policy outbound is unavailable.")
         case .persistenceFailed:
-            .failure(code: "policy_persistence_failed", message: "The Policy selection could not be persisted.")
+            .failure(code: "policy_persistence_failed", message: "The Policy change could not be persisted.")
         }
     }
 
@@ -398,7 +412,7 @@ actor TargetAutomationOperations {
     }
 
     private static let commands = [
-        "capabilities", "status", "profile.import", "profile.list", "profile.delete", "policy.list", "policy.select",
+        "capabilities", "status", "profile.import", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.reset",
         "engine.status", "engine.start", "engine.stop", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
     ]

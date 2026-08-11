@@ -201,7 +201,15 @@ struct PolicyCatalog: Equatable, Sendable {
     let profileID: UUID?
     let profileRevision: Int?
     let sourceFingerprint: String?
+    /// Count of all encrypted Target-owned overrides, including entries that no
+    /// longer correspond to a selector in the current source Profile.
+    let storedOverrideCount: Int
     let selectors: [PolicyCatalogSelector]
+}
+
+struct PolicyResetResult: Equatable, Sendable {
+    let clearedOverrideCount: Int
+    let catalog: PolicyCatalog
 }
 
 struct PolicyCatalogSelector: Equatable, Sendable, Identifiable {
@@ -306,6 +314,7 @@ enum PolicyCatalogParser {
                 profileID: profileID,
                 profileRevision: profileRevision,
                 sourceFingerprint: TargetConfigurationFingerprint.sha256(data),
+                storedOverrideCount: overrides.count,
                 selectors: []
             )
         }
@@ -317,6 +326,7 @@ enum PolicyCatalogParser {
             profileID: profileID,
             profileRevision: profileRevision,
             sourceFingerprint: TargetConfigurationFingerprint.sha256(data),
+            storedOverrideCount: overrides.count,
             selectors: outbounds.enumerated().compactMap { selectorIndex, value in
             guard let selector = value as? [String: Any] else { return nil }
             guard nonemptyString(selector["type"]) == "selector" else { return nil }
@@ -413,6 +423,7 @@ enum PolicyCatalogReconciler {
             profileID: desired.profileID,
             profileRevision: desired.profileRevision,
             sourceFingerprint: desired.sourceFingerprint,
+            storedOverrideCount: desired.storedOverrideCount,
             selectors: desired.selectors.map { selector in
                 let running: String?
                 let convergence: PolicyRuntimeConvergenceState
@@ -459,6 +470,7 @@ protocol TargetPolicyOperating: Sendable {
     func readPersisted() throws -> PolicyCatalog
     func read() async throws -> PolicyCatalog
     func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog
+    func reset() async throws -> PolicyResetResult
 }
 
 final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
@@ -494,6 +506,18 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
         )
     }
 
+    func reset() async throws -> PolicyResetResult {
+        let committed = try commitReset()
+        let reconciled = PolicyCatalogReconciler.reconcile(
+            committed.catalog,
+            evidence: await runtimeEvidenceProvider.currentPolicyRuntimeEvidence()
+        )
+        return PolicyResetResult(
+            clearedOverrideCount: committed.clearedOverrideCount,
+            catalog: reconciled
+        )
+    }
+
     private func commitSelection(selectorTag: String, outboundTag: String) throws -> PolicyCatalog {
         mutationLock.lock()
         defer { mutationLock.unlock() }
@@ -522,6 +546,26 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
             throw error
         }
     }
+
+    private func commitReset() throws -> PolicyResetResult {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        let desired = try readPersisted()
+        guard let profileID = desired.profileID, let revision = desired.profileRevision else {
+            throw ProfileStoreError.noValidVersion
+        }
+        do {
+            let cleared = try profileStore.clearPolicyOverrides(
+                profileID: profileID,
+                expectedRevision: revision
+            )
+            return PolicyResetResult(clearedOverrideCount: cleared, catalog: try readPersisted())
+        } catch let error as ProfileStoreError where error == .noSelectedProfile || error == .noValidVersion {
+            throw error
+        } catch {
+            throw TargetPolicyOperationError.persistenceFailed
+        }
+    }
 }
 
 extension PolicyCatalog {
@@ -530,6 +574,7 @@ extension PolicyCatalog {
                  "profileID": profileID.map { .string($0.uuidString.lowercased()) } ?? .null,
                  "profileRevision": profileRevision.map(JSONValue.integer) ?? .null,
                  "restartRequired": .boolean(selectors.contains(where: \.restartRequired)),
+                 "storedOverrideCount": .integer(storedOverrideCount),
                  "selectors": .array(selectors.map { selector in
             .object(["configuredDefault": selector.configuredDefault.map(JSONValue.string) ?? .null,
                      "desiredSelection": selector.effectiveDesired.map(JSONValue.string) ?? .null,

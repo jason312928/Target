@@ -269,7 +269,8 @@ private struct ProfileWorkspaceDetailView: View {
                 catalog: model.policyCatalog,
                 unavailable: model.isPolicyCatalogUnavailable,
                 isSelecting: model.isSelectingPolicy,
-                select: model.selectPolicy
+                select: model.selectPolicy,
+                reset: model.resetPolicy
             )
                 .padding(.horizontal, 20)
                 .padding(.vertical, model.policyCatalog?.selectors.isEmpty == true || model.isPolicyCatalogUnavailable ? 0 : 4)
@@ -352,6 +353,7 @@ private struct PolicyCatalogSection: View {
     let unavailable: Bool
     let isSelecting: Bool
     let select: (String, String) -> Void
+    let reset: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -365,7 +367,7 @@ private struct PolicyCatalogSection: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-            } else if let catalog, catalog.selectors.isEmpty {
+            } else if let catalog, catalog.selectors.isEmpty, catalog.storedOverrideCount == 0 {
                 VStack(alignment: .leading, spacing: 3) {
                     Label("policy.catalog.empty.title", systemImage: "list.bullet")
                         .font(.callout.weight(.semibold))
@@ -375,6 +377,12 @@ private struct PolicyCatalogSection: View {
                         .foregroundStyle(.secondary)
                 }
             } else if let catalog {
+                if catalog.storedOverrideCount > 0 {
+                    Button("policy.catalog.reset", action: reset)
+                        .controlSize(.small)
+                        .disabled(isSelecting)
+                        .accessibilityIdentifier("policy.catalog.reset")
+                }
                 ForEach(catalog.selectors) { selector in
                     VStack(alignment: .leading, spacing: 3) {
                         Text(selector.tag ?? String(localized: "policy.catalog.invalid-tag"))

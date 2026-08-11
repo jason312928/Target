@@ -349,6 +349,27 @@ final class ProfileStore {
         try saveManifest(profiles)
     }
 
+    /// Removes every Target-owned selector choice from the selected Profile. This
+    /// deliberately does not validate the individual entries: an explicit reset is
+    /// the recovery path for stale and orphaned metadata after a source change.
+    @discardableResult
+    func clearPolicyOverrides(profileID: UUID, expectedRevision: Int) throws -> Int {
+        guard try selectedProfileID() == profileID else { throw ProfileStoreError.noSelectedProfile }
+        var profiles = try loadManifest()
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
+            throw ProfileStoreError.profileNotFound
+        }
+        guard profiles[index].validRevision == expectedRevision else {
+            throw ProfileStoreError.noValidVersion
+        }
+        let cleared = profiles[index].policyOverrides.count
+        guard cleared > 0 else { return 0 }
+        profiles[index].policyOverrides.removeAll()
+        profiles[index].updatedAt = now()
+        try saveManifest(profiles)
+        return cleared
+    }
+
     func selectedProfile() -> Profile? {
         do {
             guard let id = try selectedProfileID() else { return nil }

@@ -251,6 +251,32 @@ final class ProfileViewModel {
         }
     }
 
+    func resetPolicy() {
+        guard !isSelectingPolicy else { return }
+        isSelectingPolicy = true
+        messageKey = nil
+        policyTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.policyTask = nil
+                self.isSelectingPolicy = false
+            }
+            do {
+                self.policyCatalog = try await self.policyOperations.reset().catalog
+                self.isPolicyCatalogUnavailable = false
+                self.messageKey = "policy.catalog.reset.saved"
+                self.refreshMetadataPreservingEditor()
+                self.markReadinessChanged()
+            } catch let error as TargetPolicyOperationError {
+                self.messageKey = self.policyMessageKey(for: error)
+                self.refreshPolicyCatalog()
+            } catch {
+                self.messageKey = "policy.catalog.reset.failed"
+                self.refreshPolicyCatalog()
+            }
+        }
+    }
+
     func refreshPolicyState() {
         refreshPolicyCatalog()
     }

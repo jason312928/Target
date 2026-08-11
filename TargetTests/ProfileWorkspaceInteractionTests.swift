@@ -30,6 +30,26 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(shared.selectCount, 2)
     }
 
+    func testGUIAndAutomationInvokeTheSamePolicyOperationExactlyOncePerReset() async throws {
+        let fixture = try makeFixture()
+        let catalog = PolicyCatalogParser.parse(
+            Data(#"{"outbounds":[{"type":"selector","tag":"group","outbounds":["first"]},{"type":"direct","tag":"first"}]}"#.utf8),
+            overrides: ["orphaned": "old"]
+        )
+        let shared = SharedPolicyOperationSpy(catalog: catalog)
+        let model = ProfileViewModel(store: fixture.store, policyOperations: shared)
+        model.resetPolicy()
+        for _ in 0..<50 where shared.resetCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(shared.resetCount, 1)
+
+        let automation = TargetAutomationOperations(profileStore: fixture.store, policyOperations: shared, backend: MockBackend())
+        let response = await automation.handle(AutomationRequest(protocolVersion: 1, action: "policy.reset"))
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(shared.resetCount, 2)
+    }
+
     func testImportPanelResultSelectsOnlyAcceptedURL() {
         let url = URL(fileURLWithPath: "/tmp/Profile.json")
 
@@ -585,6 +605,7 @@ private final class SharedPolicyOperationSpy: TargetPolicyOperating, @unchecked 
     private let lock = NSLock()
     private let catalog: PolicyCatalog
     private var selections = 0
+    private var resets = 0
 
     init(catalog: PolicyCatalog) { self.catalog = catalog }
 
@@ -594,12 +615,25 @@ private final class SharedPolicyOperationSpy: TargetPolicyOperating, @unchecked 
         return selections
     }
 
+    var resetCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return resets
+    }
+
     func readPersisted() throws -> PolicyCatalog { catalog }
     func read() async throws -> PolicyCatalog { catalog }
 
     func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog {
         recordSelection()
         return catalog
+    }
+
+    func reset() async throws -> PolicyResetResult {
+        lock.lock()
+        resets += 1
+        lock.unlock()
+        return PolicyResetResult(clearedOverrideCount: catalog.storedOverrideCount, catalog: catalog)
     }
 
     private func recordSelection() {

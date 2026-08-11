@@ -76,6 +76,14 @@ final class AutomationControlPlaneTests: XCTestCase {
         XCTAssertThrowsError(try TargetCtlCommandParser.parse(["policy", "list", "extra", "--json"]))
     }
 
+    func testTargetCtlPolicyResetParserRequiresExactArgumentFreeGrammar() throws {
+        let parsed = try TargetCtlCommandParser.parse(["policy", "reset", "--json"])
+        XCTAssertEqual(parsed.action, "policy.reset")
+        XCTAssertEqual(parsed.arguments, [:])
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse(["policy", "reset"]))
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse(["policy", "reset", "extra", "--json"]))
+    }
+
 
     func testTargetCtlPolicySelectParserRequiresExactArguments() throws {
         let parsed = try TargetCtlCommandParser.parse([
@@ -124,6 +132,41 @@ final class AutomationControlPlaneTests: XCTestCase {
         let capabilities = await operations.handle(AutomationRequest(protocolVersion: 1, action: "capabilities"))
         XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(capabilities), as: UTF8.self).contains("policy.list"))
         XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(capabilities), as: UTF8.self).contains("policy.select"))
+        XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(capabilities), as: UTF8.self).contains("policy.reset"))
+    }
+
+    func testPolicyResetAutomationReturnsVersionedReconciledSecretSafeResultAndStableErrors() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let keys = TestProfileKeyProvider()
+        let store = ProfileStore(rootDirectory: root, checker: AutomationPassingChecker(), keyProvider: keys)
+        let none = await TargetAutomationOperations(profileStore: store, backend: MockBackend()).handle(
+            AutomationRequest(protocolVersion: 1, action: "policy.reset")
+        )
+        XCTAssertEqual(none.error?.code, "profile_not_selected")
+
+        let profile = try store.create(name: "Policy")
+        let source = #"{"inbounds":[{"type":"mixed","tag":"local-mixed","listen":"127.0.0.1","listen_port":0}],"outbounds":[{"type":"selector","tag":"group","outbounds":["first","second"],"default":"first"},{"type":"direct","tag":"first"},{"type":"block","tag":"second","password":"RESET-SECRET"}]}"#
+        try store.save(json: source, for: profile.id)
+        let evidence = MutablePolicyRuntimeEvidence()
+        let shared = TargetPolicyOperations(profileStore: store, runtimeEvidenceProvider: evidence)
+        _ = try await shared.select(selectorTag: "group", outboundTag: "second")
+        let version = try store.selectedValidVersion()
+        let runtime = try ProfileRuntimeConfigurationPreparer(portSelector: AutomationFixedPortSelector(port: 51_237)).prepare(version)
+        await evidence.set(.running(profileID: profile.id, profileRevision: version.revision, sourceFingerprint: runtime.sourceFingerprint, configuration: runtime.data))
+        let operations = TargetAutomationOperations(profileStore: store, policyOperations: shared, backend: MockBackend())
+        let response = await operations.handle(AutomationRequest(protocolVersion: 1, action: "policy.reset"))
+        XCTAssertTrue(response.ok)
+        let encoded = String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self)
+        XCTAssertEqual(encoded, String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self))
+        XCTAssertTrue(encoded.contains("\"clearedOverrideCount\":1"))
+        XCTAssertTrue(encoded.contains("\"restartRequired\":true"))
+        XCTAssertFalse(encoded.contains("RESET-SECRET"))
+        let second = await operations.handle(AutomationRequest(protocolVersion: 1, action: "policy.reset"))
+        XCTAssertTrue(second.ok)
+        XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(second), as: UTF8.self).contains("\"clearedOverrideCount\":0"))
+        let invalid = await operations.handle(AutomationRequest(protocolVersion: 1, action: "policy.reset", arguments: ["extra": "x"]))
+        XCTAssertEqual(invalid.error?.code, "invalid_arguments")
     }
 
 
