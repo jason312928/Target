@@ -1,5 +1,6 @@
 import XCTest
 @testable import Target
+@testable import TargetCore
 
 @MainActor
 final class SystemProxyRecoveryAvailabilityTests: XCTestCase {

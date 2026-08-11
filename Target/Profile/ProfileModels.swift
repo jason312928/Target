@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import TargetCore
 
 enum ProfileValidationStatus: String, Codable, Equatable, Sendable {
     case notChecked

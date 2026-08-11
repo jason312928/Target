@@ -3,8 +3,8 @@ import Foundation
 /// Shared production parser for the deliberately narrow `targetctl` command line.
 /// Keeping it with the protocol makes the real executable parser directly testable
 /// without adding a second test-only grammar.
-enum TargetCtlCommandParser {
-    static func parse(_ arguments: [String]) throws -> (action: String, arguments: [String: String]) {
+public enum TargetCtlCommandParser {
+    public static func parse(_ arguments: [String]) throws -> (action: String, arguments: [String: String]) {
         var values = arguments
         guard values.last == "--json" else { throw AutomationSocketError.unavailable }
         values.removeLast()
@@ -42,11 +42,11 @@ enum TargetCtlCommandParser {
     }
 }
 
-enum AutomationProtocol {
-    static let version = 1
-    static let maximumMessageBytes = 64 * 1024
+public enum AutomationProtocol {
+    public static let version = 1
+    public static let maximumMessageBytes = 64 * 1024
 
-    static func decodeRequest(_ data: Data) throws -> AutomationRequest {
+    public static func decodeRequest(_ data: Data) throws -> AutomationRequest {
         guard !data.isEmpty, data.count <= maximumMessageBytes else {
             throw AutomationProtocolError.oversizedRequest
         }
@@ -74,49 +74,60 @@ enum AutomationProtocol {
         }
     }
 
-    static func encodeResponse(_ response: AutomationResponse) -> Data {
+    public static func encodeResponse(_ response: AutomationResponse) -> Data {
         (try? JSONEncoder.stable.encode(response)) ?? Data(
             #"{"error":{"code":"internal_error","message":"Unable to encode response."},"ok":false,"protocolVersion":1}"#.utf8
         )
     }
 }
 
-enum AutomationProtocolError: Error, Equatable {
+public enum AutomationProtocolError: Error, Equatable {
     case malformedRequest
     case oversizedRequest
     case unsupportedVersion
     case unknownAction
 }
 
-struct AutomationRequest: Codable, Equatable, Sendable {
-    let protocolVersion: Int
-    let action: String
-    var arguments: [String: String] = [:]
+public struct AutomationRequest: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let action: String
+    public var arguments: [String: String] = [:]
+
+    public init(protocolVersion: Int, action: String, arguments: [String: String] = [:]) {
+        self.protocolVersion = protocolVersion
+        self.action = action
+        self.arguments = arguments
+    }
 }
 
-struct AutomationErrorPayload: Codable, Equatable, Sendable {
-    let code: String
-    let message: String
+public struct AutomationErrorPayload: Codable, Equatable, Sendable {
+    public let code: String
+    public let message: String
+
+    public init(code: String, message: String) {
+        self.code = code
+        self.message = message
+    }
 }
 
-struct AutomationResponse: Codable, Equatable, Sendable {
-    let protocolVersion: Int
-    let ok: Bool
-    let result: JSONValue?
-    let error: AutomationErrorPayload?
+public struct AutomationResponse: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let ok: Bool
+    public let result: JSONValue?
+    public let error: AutomationErrorPayload?
 
-    init(protocolVersion: Int, ok: Bool, result: JSONValue?, error: AutomationErrorPayload?) {
+    public init(protocolVersion: Int, ok: Bool, result: JSONValue?, error: AutomationErrorPayload?) {
         self.protocolVersion = protocolVersion
         self.ok = ok
         self.result = result
         self.error = error
     }
 
-    static func success(_ result: JSONValue = .object([:])) -> AutomationResponse {
+    public static func success(_ result: JSONValue = .object([:])) -> AutomationResponse {
         AutomationResponse(protocolVersion: AutomationProtocol.version, ok: true, result: result, error: nil)
     }
 
-    static func failure(code: String, message: String) -> AutomationResponse {
+    public static func failure(code: String, message: String) -> AutomationResponse {
         AutomationResponse(
             protocolVersion: AutomationProtocol.version,
             ok: false,
@@ -129,7 +140,7 @@ struct AutomationResponse: Codable, Equatable, Sendable {
         case protocolVersion, ok, result, error
     }
 
-    init(from decoder: any Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
         ok = try container.decode(Bool.self, forKey: .ok)
@@ -137,7 +148,7 @@ struct AutomationResponse: Codable, Equatable, Sendable {
         error = try container.decodeIfPresent(AutomationErrorPayload.self, forKey: .error)
     }
 
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(protocolVersion, forKey: .protocolVersion)
         try container.encode(ok, forKey: .ok)
@@ -148,7 +159,7 @@ struct AutomationResponse: Codable, Equatable, Sendable {
     }
 }
 
-enum JSONValue: Codable, Equatable, Sendable {
+public enum JSONValue: Codable, Equatable, Sendable {
     case object([String: JSONValue])
     case array([JSONValue])
     case string(String)
@@ -156,7 +167,7 @@ enum JSONValue: Codable, Equatable, Sendable {
     case boolean(Bool)
     case null
 
-    init(from decoder: any Decoder) throws {
+    public init(from decoder: any Decoder) throws {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() { self = .null }
         else if let value = try? container.decode([String: JSONValue].self) { self = .object(value) }
@@ -167,7 +178,7 @@ enum JSONValue: Codable, Equatable, Sendable {
         else { throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported JSON value") }
     }
 
-    func encode(to encoder: any Encoder) throws {
+    public func encode(to encoder: any Encoder) throws {
         var container = encoder.singleValueContainer()
         switch self {
         case .object(let value): try container.encode(value)

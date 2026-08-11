@@ -1,6 +1,7 @@
 import Darwin
 import XCTest
 @testable import Target
+@testable import TargetCore
 
 final class AutomationControlPlaneTests: XCTestCase {
     func testPolicyCatalogAllowlistsSelectorMembersAndRedactsSecrets() throws {

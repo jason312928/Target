@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-enum AutomationSocketError: Error, Equatable {
+public enum AutomationSocketError: Error, Equatable {
     case unsafePath
     case pathTooLong
     case unavailable
@@ -9,18 +9,18 @@ enum AutomationSocketError: Error, Equatable {
     case requestTooLarge
 }
 
-enum AutomationSocketPath {
-    static let directoryName = "Automation"
-    static let socketName = "control.sock"
+public enum AutomationSocketPath {
+    public static let directoryName = "Automation"
+    public static let socketName = "control.sock"
 
-    static func defaultURL(fileManager: FileManager = .default) -> URL {
+    public static func defaultURL(fileManager: FileManager = .default) -> URL {
         fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "Target", directoryHint: .isDirectory)
             .appending(path: directoryName, directoryHint: .isDirectory)
             .appending(path: socketName)
     }
 
-    static func prepareServerURL(_ socketURL: URL, fileManager: FileManager = .default) throws {
+    public static func prepareServerURL(_ socketURL: URL, fileManager: FileManager = .default) throws {
         let directory = socketURL.deletingLastPathComponent().standardizedFileURL
         guard socketURL.standardizedFileURL.deletingLastPathComponent() == directory else {
             throw AutomationSocketError.unsafePath
@@ -41,7 +41,7 @@ enum AutomationSocketPath {
         }
     }
 
-    static func validateClientURL(_ socketURL: URL) throws {
+    public static func validateClientURL(_ socketURL: URL) throws {
         let directory = socketURL.deletingLastPathComponent()
         var directoryMetadata = stat()
         guard lstat(directory.path, &directoryMetadata) == 0,
@@ -98,8 +98,8 @@ enum AutomationSocketPath {
     }
 }
 
-final class LocalAutomationServer: @unchecked Sendable {
-    typealias Handler = @Sendable (AutomationRequest) async -> AutomationResponse
+public final class LocalAutomationServer: @unchecked Sendable {
+    public typealias Handler = @Sendable (AutomationRequest) async -> AutomationResponse
 
     private let socketURL: URL
     private let expectedUID: uid_t
@@ -107,13 +107,13 @@ final class LocalAutomationServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.jason312928.Target.automation")
     private var listeningDescriptor: Int32 = -1
 
-    init(socketURL: URL = AutomationSocketPath.defaultURL(), expectedUID: uid_t = geteuid(), handler: @escaping Handler) {
+    public init(socketURL: URL = AutomationSocketPath.defaultURL(), expectedUID: uid_t = geteuid(), handler: @escaping Handler) {
         self.socketURL = socketURL
         self.expectedUID = expectedUID
         self.handler = handler
     }
 
-    func start() throws {
+    public func start() throws {
         guard listeningDescriptor < 0 else { return }
         try AutomationSocketPath.prepareServerURL(socketURL)
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -137,7 +137,7 @@ final class LocalAutomationServer: @unchecked Sendable {
         queue.async { [weak self] in self?.acceptLoop(descriptor) }
     }
 
-    func stop() {
+    public func stop() {
         let descriptor = listeningDescriptor
         listeningDescriptor = -1
         if descriptor >= 0 {
@@ -228,8 +228,8 @@ final class LocalAutomationServer: @unchecked Sendable {
     }
 }
 
-enum LocalAutomationClient {
-    static func send(_ request: AutomationRequest, socketURL: URL = AutomationSocketPath.defaultURL()) throws -> Data {
+public enum LocalAutomationClient {
+    public static func send(_ request: AutomationRequest, socketURL: URL = AutomationSocketPath.defaultURL()) throws -> Data {
         try AutomationSocketPath.validateClientURL(socketURL)
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw AutomationSocketError.unavailable }

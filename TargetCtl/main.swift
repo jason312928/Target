@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TargetCore
 
 enum TargetCtl {
     static func run(arguments: [String]) -> Int32 {

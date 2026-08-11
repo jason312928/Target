@@ -1,4 +1,5 @@
 import Foundation
+import TargetCore
 
 actor TargetAutomationOperations {
     private struct SystemProxyStatusRead {
