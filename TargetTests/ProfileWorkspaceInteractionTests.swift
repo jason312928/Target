@@ -50,6 +50,48 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(shared.resetCount, 2)
     }
 
+    func testPolicyMutationBusyGateRejectsDuplicatesAcrossSelectionAndReset() async throws {
+        let fixture = try makeFixture()
+        let catalog = PolicyCatalogParser.parse(
+            Data(#"{"outbounds":[{"type":"selector","tag":"group","outbounds":["first","second"]},{"type":"direct","tag":"first"},{"type":"block","tag":"second"}]}"#.utf8),
+            overrides: ["group": "second"]
+        )
+
+        let selectionGate = PolicyMutationGate(blocking: .select)
+        let selectionSpy = GatedPolicyOperationSpy(catalog: catalog, gate: selectionGate)
+        let selectingModel = ProfileViewModel(store: fixture.store, policyOperations: selectionSpy)
+        selectingModel.selectPolicy(selectorTag: "group", outboundTag: "second")
+        await selectionGate.waitUntilBlockedOperationStarts()
+        selectingModel.selectPolicy(selectorTag: "group", outboundTag: "first")
+        selectingModel.resetPolicy()
+        XCTAssertEqual(selectionSpy.selectCount, 1)
+        XCTAssertEqual(selectionSpy.resetCount, 0)
+        XCTAssertTrue(selectingModel.isSelectingPolicy)
+        await selectionGate.release()
+        await waitForPolicyMutationToFinish(selectingModel)
+        XCTAssertFalse(selectingModel.isSelectingPolicy)
+        selectingModel.resetPolicy()
+        await waitForPolicyMutationToFinish(selectingModel)
+        XCTAssertEqual(selectionSpy.resetCount, 1)
+
+        let resetGate = PolicyMutationGate(blocking: .reset)
+        let resetSpy = GatedPolicyOperationSpy(catalog: catalog, gate: resetGate)
+        let resettingModel = ProfileViewModel(store: fixture.store, policyOperations: resetSpy)
+        resettingModel.resetPolicy()
+        await resetGate.waitUntilBlockedOperationStarts()
+        resettingModel.resetPolicy()
+        resettingModel.selectPolicy(selectorTag: "group", outboundTag: "first")
+        XCTAssertEqual(resetSpy.resetCount, 1)
+        XCTAssertEqual(resetSpy.selectCount, 0)
+        XCTAssertTrue(resettingModel.isSelectingPolicy)
+        await resetGate.release()
+        await waitForPolicyMutationToFinish(resettingModel)
+        XCTAssertFalse(resettingModel.isSelectingPolicy)
+        resettingModel.selectPolicy(selectorTag: "group", outboundTag: "first")
+        await waitForPolicyMutationToFinish(resettingModel)
+        XCTAssertEqual(resetSpy.selectCount, 1)
+    }
+
     func testImportPanelResultSelectsOnlyAcceptedURL() {
         let url = URL(fileURLWithPath: "/tmp/Profile.json")
 
@@ -564,6 +606,12 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertFalse(model.isUpdatingSubscription)
     }
 
+    private func waitForPolicyMutationToFinish(_ model: ProfileViewModel) async {
+        while model.isSelectingPolicy {
+            await Task.yield()
+        }
+    }
+
     private func makeFixture(
         checker: any SingBoxConfigurationChecking = InteractionChecker(result: .success(())),
         subscriptionFetcher: any ProfileSubscriptionFetching = ControlledSubscriptionFetcher(),
@@ -630,15 +678,106 @@ private final class SharedPolicyOperationSpy: TargetPolicyOperating, @unchecked 
     }
 
     func reset() async throws -> PolicyResetResult {
-        lock.lock()
-        resets += 1
-        lock.unlock()
+        recordReset()
         return PolicyResetResult(clearedOverrideCount: catalog.storedOverrideCount, catalog: catalog)
     }
 
     private func recordSelection() {
         lock.lock()
         selections += 1
+        lock.unlock()
+    }
+
+    private func recordReset() {
+        lock.lock()
+        resets += 1
+        lock.unlock()
+    }
+}
+
+private enum PolicyMutationKind {
+    case select
+    case reset
+}
+
+private actor PolicyMutationGate {
+    private var blockedOperation: PolicyMutationKind?
+    private var startedWaiter: CheckedContinuation<Void, Never>?
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    init(blocking operation: PolicyMutationKind) {
+        blockedOperation = operation
+    }
+
+    func enter(_ operation: PolicyMutationKind) async {
+        guard blockedOperation == operation else { return }
+        blockedOperation = nil
+        startedWaiter?.resume()
+        startedWaiter = nil
+        await withCheckedContinuation { releaseWaiter = $0 }
+    }
+
+    func waitUntilBlockedOperationStarts() async {
+        guard blockedOperation == nil, releaseWaiter != nil else {
+            await withCheckedContinuation { startedWaiter = $0 }
+            return
+        }
+    }
+
+    func release() {
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+}
+
+private final class GatedPolicyOperationSpy: TargetPolicyOperating, @unchecked Sendable {
+    private let lock = NSLock()
+    private let catalog: PolicyCatalog
+    private let gate: PolicyMutationGate
+    private var selections = 0
+    private var resets = 0
+
+    init(catalog: PolicyCatalog, gate: PolicyMutationGate) {
+        self.catalog = catalog
+        self.gate = gate
+    }
+
+    var selectCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return selections
+    }
+
+    var resetCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return resets
+    }
+
+    func readPersisted() throws -> PolicyCatalog { catalog }
+    func read() async throws -> PolicyCatalog { catalog }
+
+    func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog {
+        recordSelection()
+        await gate.enter(.select)
+        return catalog
+    }
+
+    func reset() async throws -> PolicyResetResult {
+        recordReset()
+        await gate.enter(.reset)
+        return PolicyResetResult(clearedOverrideCount: catalog.storedOverrideCount, catalog: catalog)
+    }
+
+    private func recordSelection() {
+        lock.lock()
+        selections += 1
+        lock.unlock()
+    }
+
+    private func recordReset() {
+        lock.lock()
+        resets += 1
         lock.unlock()
     }
 }

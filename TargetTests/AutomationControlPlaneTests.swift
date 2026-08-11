@@ -169,6 +169,42 @@ final class AutomationControlPlaneTests: XCTestCase {
         XCTAssertEqual(invalid.error?.code, "invalid_arguments")
     }
 
+    func testPolicyResetSemanticRequestMapsNoValidVersionAndPersistenceFailure() async throws {
+        let noVersion = await TargetAutomationOperations(
+            profileStore: ProfileStore(
+                rootDirectory: temporaryRoot(),
+                checker: AutomationPassingChecker(),
+                keyProvider: TestProfileKeyProvider()
+            ),
+            policyOperations: ResetErrorPolicyOperation(),
+            backend: MockBackend()
+        ).handle(
+            AutomationRequest(protocolVersion: 1, action: "policy.reset")
+        )
+        XCTAssertEqual(noVersion.error?.code, "profile_no_valid_version")
+
+        let persistenceRoot = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: persistenceRoot) }
+        let faults = ResetManifestWriteFault()
+        let persistenceStore = ProfileStore(
+            rootDirectory: persistenceRoot,
+            checker: AutomationPassingChecker(),
+            keyProvider: TestProfileKeyProvider(),
+            storageFaults: faults
+        )
+        let profile = try persistenceStore.create(name: "Persistence failure")
+        try persistenceStore.save(json: Self.runtimePolicyConfiguration, for: profile.id)
+        let policy = TargetPolicyOperations(profileStore: persistenceStore)
+        _ = try await policy.select(selectorTag: "group", outboundTag: "second")
+        faults.failManifestWrites = true
+        let persistenceFailure = await TargetAutomationOperations(
+            profileStore: persistenceStore,
+            policyOperations: policy,
+            backend: MockBackend()
+        ).handle(AutomationRequest(protocolVersion: 1, action: "policy.reset"))
+        XCTAssertEqual(persistenceFailure.error?.code, "policy_persistence_failed")
+    }
+
 
     func testPolicySelectionPersistsAndReconcilesAuthoritativeRuntimeWithoutMutation() async throws {
         let root = temporaryRoot()
@@ -536,6 +572,22 @@ final class AutomationControlPlaneTests: XCTestCase {
 
 private struct AutomationPassingChecker: SingBoxConfigurationChecking {
     func check(configurationURL: URL) -> Result<Void, ConfigurationDiagnostic> { .success(()) }
+}
+
+private final class ResetManifestWriteFault: ProfileStorageFaultInjecting, @unchecked Sendable {
+    var failManifestWrites = false
+
+    func check(_ point: ProfileStorageFaultPoint) throws {
+        guard failManifestWrites, point == .manifestWrite else { return }
+        throw NSError(domain: "ResetManifestWriteFault", code: 1)
+    }
+}
+
+private struct ResetErrorPolicyOperation: TargetPolicyOperating {
+    func readPersisted() throws -> PolicyCatalog { throw ProfileStoreError.noValidVersion }
+    func read() async throws -> PolicyCatalog { throw ProfileStoreError.noValidVersion }
+    func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog { throw ProfileStoreError.noValidVersion }
+    func reset() async throws -> PolicyResetResult { throw ProfileStoreError.noValidVersion }
 }
 
 private actor AutomationConcurrencyTracker {

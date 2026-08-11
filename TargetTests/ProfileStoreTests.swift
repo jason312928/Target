@@ -195,6 +195,58 @@ final class ProfileStoreTests: XCTestCase {
         XCTAssertEqual(try reopened.selectedValidVersion().profile.policyOverrides, ["group": "second"])
     }
 
+    func testPolicySelectionAndResetCommitInSerializedOrder() async throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let faults = BlockingManifestWriteFault()
+        let store = ProfileStore(
+            rootDirectory: root,
+            checker: TestChecker(result: .success(())),
+            keyProvider: keys,
+            storageFaults: faults
+        )
+        let profile = try store.create(name: "Policy")
+        try store.save(json: policyConfiguration(configuredDefault: "first", members: ["first", "second"]), for: profile.id)
+        let policy = TargetPolicyOperations(profileStore: store)
+
+        // A selection owns the shared commit lock while its manifest write is
+        // explicitly gated. Reset may be invoked, but cannot commit first.
+        faults.armNextManifestWrite()
+        let selectFirst = Task.detached { try await policy.select(selectorTag: "group", outboundTag: "second") }
+        XCTAssertEqual(faults.waitUntilBlocked(), .success)
+        let resetStarted = DispatchSemaphore(value: 0)
+        let resetAfterSelect = Task.detached {
+            resetStarted.signal()
+            return try await policy.reset()
+        }
+        XCTAssertEqual(resetStarted.wait(timeout: .now() + 2), .success)
+        faults.release()
+        let firstSelection = try await selectFirst.value
+        let resetFollowingSelection = try await resetAfterSelect.value
+        XCTAssertEqual(firstSelection.selectors.first?.effectiveDesired, "second")
+        XCTAssertEqual(resetFollowingSelection.clearedOverrideCount, 1)
+        XCTAssertEqual(try policy.readPersisted().selectors.first?.effectiveDesired, "first")
+
+        // The inverse order must also hold: reset commits before the later
+        // selection, so the final persisted desired choice is the selection.
+        _ = try await policy.select(selectorTag: "group", outboundTag: "second")
+        faults.armNextManifestWrite()
+        let resetFirst = Task.detached { try await policy.reset() }
+        XCTAssertEqual(faults.waitUntilBlocked(), .success)
+        let selectStarted = DispatchSemaphore(value: 0)
+        let selectAfterReset = Task.detached {
+            selectStarted.signal()
+            return try await policy.select(selectorTag: "group", outboundTag: "second")
+        }
+        XCTAssertEqual(selectStarted.wait(timeout: .now() + 2), .success)
+        faults.release()
+        let firstReset = try await resetFirst.value
+        let selectionFollowingReset = try await selectAfterReset.value
+        XCTAssertEqual(firstReset.clearedOverrideCount, 1)
+        XCTAssertEqual(selectionFollowingReset.selectors.first?.effectiveDesired, "second")
+        XCTAssertEqual(try policy.readPersisted().selectors.first?.effectiveDesired, "second")
+    }
+
     func testPolicyOverrideReconcilesAcrossSaveAndRestoreWithoutApplyingStaleChoice() async throws {
         let store = try makeStore()
         let profile = try store.create(name: "Policy History")
@@ -2071,6 +2123,38 @@ private final class BlockingInitialManifestWriteFault: ProfileStorageFaultInject
 
     func release() {
         continueManifestWrite.signal()
+    }
+}
+
+private final class BlockingManifestWriteFault: ProfileStorageFaultInjecting, @unchecked Sendable {
+    private let entered = DispatchSemaphore(value: 0)
+    private let continuation = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var armed = false
+
+    func armNextManifestWrite() {
+        lock.lock()
+        armed = true
+        lock.unlock()
+    }
+
+    func check(_ point: ProfileStorageFaultPoint) throws {
+        guard point == .manifestWrite else { return }
+        lock.lock()
+        let shouldBlock = armed
+        armed = false
+        lock.unlock()
+        guard shouldBlock else { return }
+        entered.signal()
+        _ = continuation.wait(timeout: .now() + 5)
+    }
+
+    func waitUntilBlocked() -> DispatchTimeoutResult {
+        entered.wait(timeout: .now() + 2)
+    }
+
+    func release() {
+        continuation.signal()
     }
 }
 
