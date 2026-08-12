@@ -509,8 +509,13 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
 
     func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog {
         let committed = try commitSelection(selectorTag: selectorTag, outboundTag: outboundTag)
-        if let runtimeController = runtimeEvidenceProvider as? any RuntimePolicyApplying {
-            _ = await runtimeController.applyLivePolicySelection(selectorTag: selectorTag, outboundTag: outboundTag)
+        if let runtimeController = runtimeEvidenceProvider as? any RuntimePolicyApplying,
+           let expectedRuntime = committed.expectedRuntimeIdentity {
+            _ = await runtimeController.applyLivePolicySelection(
+                expectedRuntime: expectedRuntime,
+                selectorTag: selectorTag,
+                outboundTag: outboundTag
+            )
         }
         return PolicyCatalogReconciler.reconcile(
             committed,
@@ -520,10 +525,15 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
 
     func reset() async throws -> PolicyResetResult {
         let committed = try commitReset()
-        if let runtimeController = runtimeEvidenceProvider as? any RuntimePolicyApplying {
+        if let runtimeController = runtimeEvidenceProvider as? any RuntimePolicyApplying,
+           let expectedRuntime = committed.catalog.expectedRuntimeIdentity {
             for selector in committed.catalog.selectors where selector.isMutable {
                 guard let tag = selector.tag, let desired = selector.effectiveDesired else { continue }
-                _ = await runtimeController.applyLivePolicySelection(selectorTag: tag, outboundTag: desired)
+                _ = await runtimeController.applyLivePolicySelection(
+                    expectedRuntime: expectedRuntime,
+                    selectorTag: tag,
+                    outboundTag: desired
+                )
             }
         }
         let reconciled = PolicyCatalogReconciler.reconcile(
@@ -583,6 +593,17 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
         } catch {
             throw TargetPolicyOperationError.persistenceFailed
         }
+    }
+}
+
+private extension PolicyCatalog {
+    var expectedRuntimeIdentity: ExpectedPolicyRuntimeIdentity? {
+        guard let profileID, let profileRevision, let sourceFingerprint else { return nil }
+        return ExpectedPolicyRuntimeIdentity(
+            profileID: profileID,
+            profileRevision: profileRevision,
+            sourceFingerprint: sourceFingerprint
+        )
     }
 }
 

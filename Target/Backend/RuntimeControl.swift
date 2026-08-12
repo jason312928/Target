@@ -28,7 +28,20 @@ protocol RuntimeControlDescriptorProviding: Sendable {
 }
 
 protocol RuntimePolicyApplying: Sendable {
-    func applyLivePolicySelection(selectorTag: String, outboundTag: String) async -> Bool
+    func applyLivePolicySelection(
+        expectedRuntime: ExpectedPolicyRuntimeIdentity,
+        selectorTag: String,
+        outboundTag: String
+    ) async -> Bool
+}
+
+/// Immutable identity of the committed Profile policy mutation.  This must cross
+/// the async controller boundary so a backend never infers it from a later
+/// selected Profile.
+struct ExpectedPolicyRuntimeIdentity: Equatable, Sendable {
+    let profileID: UUID
+    let profileRevision: Int
+    let sourceFingerprint: String
 }
 
 protocol RuntimeObservationProviding: Sendable {

@@ -76,6 +76,74 @@ final class EngineLifecycleTests: XCTestCase {
         }
     }
 
+    func testPolicySelectionForSelectedProfileDoesNotMutateDifferentRunningProfile() async throws {
+        let fixture = try EngineLifecycleFixture(mode: .listening)
+        do {
+            let source = #"{"inbounds":[{"type":"mixed","tag":"local","listen":"127.0.0.1","listen_port":0}],"outbounds":[{"type":"selector","tag":"group","outbounds":["first","second"],"default":"first"},{"type":"direct","tag":"first"},{"type":"block","tag":"second"}],"route":{"final":"group"}}"#
+            try fixture.store.save(json: source, for: fixture.profile.id)
+            _ = try await fixture.backend.startEngine()
+            let initialRunningSelection = await fixture.runtimeControl.selection()
+            XCTAssertEqual(initialRunningSelection, "first")
+
+            let profileB = try fixture.store.create(name: "Other")
+            try fixture.store.select(profileB.id)
+            try fixture.store.save(json: source, for: profileB.id)
+            let policy = TargetPolicyOperations(profileStore: fixture.store, runtimeEvidenceProvider: fixture.backend)
+
+            let catalog = try await policy.select(selectorTag: "group", outboundTag: "second")
+            XCTAssertEqual(try policy.readPersisted().profileID, profileB.id)
+            XCTAssertEqual(try policy.readPersisted().selectors[0].effectiveDesired, "second")
+            let runningSelection = await fixture.runtimeControl.selection()
+            let mutationCount = await fixture.runtimeControl.selectionCallCount()
+            XCTAssertEqual(runningSelection, "first")
+            XCTAssertEqual(mutationCount, 0)
+            XCTAssertNil(catalog.selectors[0].runningSelection)
+            XCTAssertEqual(catalog.selectors[0].runtimeConvergence, .unavailable)
+            XCTAssertTrue(catalog.selectors[0].restartRequired)
+
+            _ = try await fixture.backend.stopEngine()
+            try await fixture.assertStoppedAndClean()
+            await fixture.removeRoot()
+        } catch {
+            await fixture.cleanup()
+            throw error
+        }
+    }
+
+    func testPolicyResetForSelectedProfileDoesNotMutateDifferentRunningProfile() async throws {
+        let fixture = try EngineLifecycleFixture(mode: .listening)
+        do {
+            let source = #"{"inbounds":[{"type":"mixed","tag":"local","listen":"127.0.0.1","listen_port":0}],"outbounds":[{"type":"selector","tag":"group","outbounds":["first","second"],"default":"first"},{"type":"direct","tag":"first"},{"type":"block","tag":"second"}],"route":{"final":"group"}}"#
+            try fixture.store.save(json: source, for: fixture.profile.id)
+            _ = try await fixture.backend.startEngine()
+
+            let profileB = try fixture.store.create(name: "Other")
+            try fixture.store.select(profileB.id)
+            try fixture.store.save(json: source, for: profileB.id)
+            let persistence = TargetPolicyOperations(profileStore: fixture.store)
+            _ = try await persistence.select(selectorTag: "group", outboundTag: "second")
+            let policy = TargetPolicyOperations(profileStore: fixture.store, runtimeEvidenceProvider: fixture.backend)
+
+            let reset = try await policy.reset()
+            XCTAssertEqual(reset.clearedOverrideCount, 1)
+            XCTAssertEqual(try policy.readPersisted().selectors[0].effectiveDesired, "first")
+            let runningSelection = await fixture.runtimeControl.selection()
+            let mutationCount = await fixture.runtimeControl.selectionCallCount()
+            XCTAssertEqual(runningSelection, "first")
+            XCTAssertEqual(mutationCount, 0)
+            XCTAssertNil(reset.catalog.selectors[0].runningSelection)
+            XCTAssertEqual(reset.catalog.selectors[0].runtimeConvergence, .unavailable)
+            XCTAssertTrue(reset.catalog.selectors[0].restartRequired)
+
+            _ = try await fixture.backend.stopEngine()
+            try await fixture.assertStoppedAndClean()
+            await fixture.removeRoot()
+        } catch {
+            await fixture.cleanup()
+            throw error
+        }
+    }
+
     func testRefreshStartRevisionRestartStopAndCleanup() async throws {
         let fixture = try EngineLifecycleFixture(mode: .listening)
         do {
@@ -627,10 +695,14 @@ private final class EngineLifecycleFixture: @unchecked Sendable {
 
 private actor LifecycleRuntimeControlClient: RuntimeControlClient {
     private var selected = "first"
+    private var selectCalls = 0
+    func selection() -> String { selected }
+    func selectionCallCount() -> Int { selectCalls }
     func selectors(using descriptor: RuntimeControlDescriptor) async throws -> [String: RuntimeSelectorState] {
         ["group": RuntimeSelectorState(tag: "group", selected: selected, members: ["first", "second"])]
     }
     func select(selector: String, outbound: String, using descriptor: RuntimeControlDescriptor) async throws {
+        selectCalls += 1
         selected = outbound
     }
     func connectionTotals(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionTotals {

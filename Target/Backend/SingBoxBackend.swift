@@ -134,11 +134,20 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         await verifiedRuntimeControlMaterial()?.descriptor
     }
 
-    func applyLivePolicySelection(selectorTag: String, outboundTag: String) async -> Bool {
-        guard let descriptor = await verifiedRuntimeControlDescriptor() else { return false }
+    func applyLivePolicySelection(
+        expectedRuntime: ExpectedPolicyRuntimeIdentity,
+        selectorTag: String,
+        outboundTag: String
+    ) async -> Bool {
+        guard let verified = await verifiedRuntimeControlMaterial(),
+              verified.record.profileID == expectedRuntime.profileID,
+              verified.record.profileRevision == expectedRuntime.profileRevision,
+              verified.record.sourceConfigurationFingerprint == expectedRuntime.sourceFingerprint else {
+            return false
+        }
         do {
-            try await runtimeControlClient.select(selector: selectorTag, outbound: outboundTag, using: descriptor)
-            let selectors = try await runtimeControlClient.selectors(using: descriptor)
+            try await runtimeControlClient.select(selector: selectorTag, outbound: outboundTag, using: verified.descriptor)
+            let selectors = try await runtimeControlClient.selectors(using: verified.descriptor)
             return selectors[selectorTag]?.selected == outboundTag
         } catch {
             return false

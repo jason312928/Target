@@ -124,7 +124,16 @@ private actor HotPolicyEvidence: PolicyRuntimeEvidenceProviding, RuntimePolicyAp
         )
     }
 
-    func applyLivePolicySelection(selectorTag: String, outboundTag: String) async -> Bool {
+    func applyLivePolicySelection(
+        expectedRuntime: ExpectedPolicyRuntimeIdentity,
+        selectorTag: String,
+        outboundTag: String
+    ) async -> Bool {
+        guard expectedRuntime.profileID == profileID,
+              expectedRuntime.profileRevision == revision,
+              expectedRuntime.sourceFingerprint == TargetConfigurationFingerprint.sha256(source) else {
+            return false
+        }
         applyCount += 1
         selection = outboundTag
         return true
