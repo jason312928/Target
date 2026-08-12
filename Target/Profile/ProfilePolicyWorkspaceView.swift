@@ -32,24 +32,23 @@ struct ProfilePolicyWorkspaceView: View {
     var body: some View {
         Group {
             if unavailable {
-                ContentUnavailableView(
-                    "policy.catalog.unavailable.title",
-                    systemImage: "lock.trianglebadge.exclamationmark",
-                    description: Text("policy.catalog.unavailable.description")
+                PolicyCatalogState(
+                    titleKey: "policy.catalog.unavailable.title",
+                    symbol: "lock.trianglebadge.exclamationmark",
+                    descriptionKey: "policy.catalog.unavailable.description",
+                    accessibilityIdentifier: "policy.catalog.unavailable"
                 )
-                .accessibilityIdentifier("policy.catalog.unavailable")
             } else if presentation.selectors.isEmpty {
-                ContentUnavailableView(
-                    "policy.catalog.empty.title",
-                    systemImage: "point.3.connected.trianglepath.dotted",
-                    description: Text("policy.catalog.empty.description")
+                PolicyCatalogState(
+                    titleKey: "policy.catalog.empty.title",
+                    symbol: "point.3.connected.trianglepath.dotted",
+                    descriptionKey: "policy.catalog.empty.description",
+                    accessibilityIdentifier: "policy.catalog.empty"
                 )
-                .accessibilityIdentifier("policy.catalog.empty")
             } else {
                 proxyWorkspace
             }
         }
-        .accessibilityIdentifier("policy.workspace")
         .onChange(of: visibleSelectors.map(\.id)) { _, ids in
             // Filtering is presentation-only. Keep the user's selector choice
             // intact even while it is temporarily filtered out.
@@ -107,15 +106,36 @@ struct ProfilePolicyWorkspaceView: View {
     }
 
     private var selectorList: some View {
-        List(selection: $selectedSelectorID) {
-            ForEach(visibleSelectors) { selector in
-                SelectorRow(selector: selector)
-                    .tag(selector.id)
-                    .accessibilityIdentifier("policy.catalog.selector.\(selector.id)")
+        Group {
+            if visibleSelectors.isEmpty {
+                PolicyCatalogState(
+                    titleKey: "policy.workspace.search.empty.title",
+                    symbol: "magnifyingglass",
+                    descriptionKey: "policy.workspace.search.empty.description",
+                    accessibilityIdentifier: "policy.workspace.search.empty"
+                )
+            } else {
+                List {
+                    ForEach(visibleSelectors) { selector in
+                        Button {
+                            selectedSelectorID = selector.id
+                        } label: {
+                            SelectorRow(selector: selector)
+                        }
+                        .buttonStyle(.plain)
+                        // A native List row does not preserve an accessibility label
+                        // or value set on its SwiftUI content.  The selector itself
+                        // is an interaction, so expose it as the stable Button that
+                        // selects the detail pane.
+                        .accessibilityIdentifier("policy.catalog.selector.\(selector.id)")
+                        .accessibilityLabel(Text(verbatim: selector.displayTag))
+                        .accessibilityValue(selector.accessibilityValue(isSelected: selectedSelectorID == selector.id))
+                    }
+                }
+                .listStyle(.sidebar)
+                .accessibilityIdentifier("policy.workspace.selectors")
             }
         }
-        .listStyle(.sidebar)
-        .accessibilityIdentifier("policy.workspace.selectors")
     }
 
     @ViewBuilder
@@ -135,7 +155,6 @@ struct ProfilePolicyWorkspaceView: View {
                 systemImage: "magnifyingglass",
                 description: Text("policy.workspace.search.empty.description")
             )
-            .accessibilityIdentifier("policy.workspace.search.empty")
         }
     }
 }
@@ -149,7 +168,6 @@ private struct SelectorRow: View {
                 Image(systemName: selector.statusSymbol)
                     .foregroundStyle(selector.statusLevel.tint)
                 Text(selector.displayTag).lineLimit(1)
-                    .accessibilityIdentifier("policy.catalog.selector.\(selector.id).tag")
                 Spacer(minLength: 0)
                 if selector.restartRequired {
                     Image(systemName: "arrow.clockwise")
@@ -170,7 +188,35 @@ private struct SelectorRow: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 3)
-        .accessibilityElement(children: .contain)
+    }
+}
+
+private extension PolicySelectorPresentation {
+    func accessibilityValue(isSelected: Bool) -> Text {
+        var value = Text("policy.workspace.member-count") + Text(verbatim: ": \(memberCount)")
+        if isSelected {
+            value = value + Text(verbatim: ", ") + Text("policy.workspace.filter.selected")
+        }
+        if let configuredDefault {
+            value = value + Text(verbatim: ", ")
+                + Text("policy.catalog.configured-default") + Text(verbatim: ": \(configuredDefault)")
+        }
+        if let desiredSelection {
+            value = value + Text(verbatim: ", ")
+                + Text("policy.catalog.desired-selection") + Text(verbatim: ": \(desiredSelection)")
+        }
+        if let runningSelection, runningSelection != desiredSelection {
+            value = value + Text(verbatim: ", ")
+                + Text("policy.catalog.running-selection") + Text(verbatim: ": \(runningSelection)")
+        }
+        if restartRequired {
+            value = value + Text(verbatim: ", ") + Text("policy.catalog.restart-required")
+        }
+        value = value + Text(verbatim: ", ") + Text(LocalizedStringKey(runtime.titleKey))
+        if let statusKey {
+            value = value + Text(verbatim: ", ") + Text(LocalizedStringKey(statusKey))
+        }
+        return value
     }
 }
 
@@ -192,7 +238,6 @@ private struct SelectorDetail: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(20)
         }
-        .accessibilityIdentifier("policy.workspace.selector-detail")
     }
 
     private var header: some View {
@@ -208,7 +253,6 @@ private struct SelectorDetail: View {
                 if let statusKey = selector.statusKey {
                     Label(LocalizedStringKey(statusKey), systemImage: selector.statusSymbol)
                         .foregroundStyle(selector.statusLevel.tint)
-                        .accessibilityIdentifier("policy.catalog.selector.\(selector.id).status")
                 }
             }
             .font(.caption)
@@ -221,7 +265,6 @@ private struct SelectorDetail: View {
             Label(LocalizedStringKey(selector.runtime.titleKey), systemImage: selector.runtime.symbolName)
                 .font(.callout.weight(.medium))
                 .foregroundStyle(selector.runtime.level.tint)
-                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).runtime")
             Text(LocalizedStringKey(selector.runtime.detailKey))
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -242,17 +285,14 @@ private struct SelectorDetail: View {
         if let configuredDefault = selector.configuredDefault {
             LabeledContent("policy.catalog.configured-default", value: configuredDefault)
                 .font(.caption)
-                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).configured-default")
         }
         if let desired = selector.desiredSelection {
             LabeledContent("policy.catalog.desired-selection", value: desired)
                 .font(.caption)
-                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).desired-selection")
         }
         if let running = selector.runningSelection, running != selector.desiredSelection {
             LabeledContent("policy.catalog.running-selection", value: running)
                 .font(.caption)
-                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).running-selection")
         }
     }
 
@@ -290,17 +330,14 @@ private struct MemberRow: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Text(member.tag).lineLimit(1)
-                            .accessibilityIdentifier("policy.catalog.selector.\(selectorID).member.\(member.id).tag")
                         if let type = member.type {
                             Text(type).foregroundStyle(.secondary)
-                                .accessibilityIdentifier("policy.catalog.selector.\(selectorID).member.\(member.id).type")
                         }
                     }
                     if let statusKey = member.statusKey {
                         Label(LocalizedStringKey(statusKey), systemImage: member.statusSymbol)
                             .font(.caption)
                             .foregroundStyle(member.statusLevel.tint)
-                            .accessibilityIdentifier("policy.catalog.selector.\(selectorID).member.\(member.id).status")
                     }
                     if let titleKey = member.role.titleKey {
                         Text(LocalizedStringKey(titleKey))
@@ -316,8 +353,35 @@ private struct MemberRow: View {
         }
         .buttonStyle(.plain)
         .disabled(!member.isSelectable || isSelecting)
+        // Member rows are semantic Buttons, so their identity and presentation
+        // facts live on the Button rather than on visual label descendants.
         .accessibilityIdentifier("policy.catalog.selector.\(selectorID).member.\(member.id)")
         .accessibilityLabel(Text(member.tag))
+        .accessibilityValue(accessibilityValue)
         .accessibilityHint(Text(member.isSelectable ? "policy.workspace.member.choose.hint" : "policy.workspace.member.unavailable.hint"))
+    }
+
+    private var accessibilityValue: Text {
+        var value = Text(verbatim: member.type ?? "")
+        if let statusKey = member.statusKey {
+            value = value + Text(verbatim: ", ") + Text(LocalizedStringKey(statusKey))
+        }
+        if let titleKey = member.role.titleKey {
+            value = value + Text(verbatim: ", ") + Text(LocalizedStringKey(titleKey))
+        }
+        return value
+    }
+}
+
+private struct PolicyCatalogState: View {
+    let titleKey: LocalizedStringKey
+    let symbol: String
+    let descriptionKey: LocalizedStringKey
+    let accessibilityIdentifier: String
+
+    var body: some View {
+        ContentUnavailableView(titleKey, systemImage: symbol, description: Text(descriptionKey))
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier(accessibilityIdentifier)
     }
 }

@@ -32,11 +32,15 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     func testPolicyCatalogPopulatedPresentationUsesPersistedOrderDefaultAndType() {
         let app = launch(.policyCatalogPopulated)
         showProxies(in: app)
-        assertCatalogText("group", identifier: "policy.catalog.selector.0.tag", in: app)
-        assertCatalogText("Configured default: second", identifier: "policy.catalog.selector.0.configured-default", in: app)
-        assertCatalogText("first", identifier: "policy.catalog.selector.0.member.0.tag", in: app)
-        assertCatalogText("vmess", identifier: "policy.catalog.selector.0.member.0.type", in: app)
-        assertCatalogText("second", identifier: "policy.catalog.selector.0.member.1.tag", in: app)
+        let selector = selectorRow(0, in: app)
+        assertAccessibleLabel("group", for: selector)
+        assertAccessibleValueContains("Selected", for: selector)
+        assertAccessibleValueContains("Members: 2", for: selector)
+        assertAccessibleValueContains("Configured default: second", for: selector)
+        assertAccessibleValueContains("Desired: second", for: selector)
+        assertAccessibleLabel("first", identifier: "policy.catalog.selector.0.member.0", in: app)
+        assertAccessibleValueContains("vmess", identifier: "policy.catalog.selector.0.member.0", in: app)
+        assertAccessibleLabel("second", identifier: "policy.catalog.selector.0.member.1", in: app)
         XCTAssertLessThan(
             element("policy.catalog.selector.0.member.0", in: app).frame.minY,
             element("policy.catalog.selector.0.member.1", in: app).frame.minY,
@@ -52,30 +56,31 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         let app = launch(.policyCatalogEmpty)
         showProxies(in: app)
         assertExists(element("policy.catalog.empty", in: app), message: "Missing localized Policy Catalog empty state")
-        assertDoesNotExist(element("policy.catalog.unavailable", in: app), message: "Empty catalog rendered as unavailable")
+        assertDoesNotExist(app.outlines["policy.workspace.selectors"], message: "Empty catalog rendered selector rows")
     }
 
     func testPolicyCatalogUnavailablePresentationClearsStaleRows() {
         let app = launch(.policyCatalogUnavailable)
         showProxies(in: app)
         assertExists(element("policy.catalog.unavailable", in: app), message: "Missing Policy Catalog unavailable state")
+        assertDoesNotExist(app.outlines["policy.workspace.selectors"], message: "Unavailable catalog rendered selector rows")
         assertDoesNotExist(element("policy.catalog.selector.0", in: app), message: "Unavailable state retained a stale selector row")
     }
 
     func testPolicyCatalogWarningsAndDuplicateRowsAreRenderedWithoutCollapse() {
         let app = launch(.policyCatalogWarnings)
         showProxies(in: app)
-        assertCatalogText("Missing reference", identifier: "policy.catalog.selector.0.member.0.status", in: app)
-        assertCatalogText("Ambiguous tag", identifier: "policy.catalog.selector.0.member.1.status", in: app)
-        assertCatalogText("Ambiguous tag", identifier: "policy.catalog.selector.0.member.2.status", in: app)
-        assertCatalogText("Unavailable", identifier: "policy.catalog.selector.0.member.3.status", in: app)
-        assertCatalogText("Invalid selector tag", identifier: "policy.catalog.selector.4.tag", in: app)
-        assertCatalogText("Invalid tag", identifier: "policy.catalog.selector.4.status", in: app)
-        assertCatalogText("Invalid members", identifier: "policy.catalog.selector.5.status", in: app)
+        assertAccessibleValueContains("Missing reference", identifier: "policy.catalog.selector.0.member.0", in: app)
+        assertAccessibleValueContains("Ambiguous tag", identifier: "policy.catalog.selector.0.member.1", in: app)
+        assertAccessibleValueContains("Ambiguous tag", identifier: "policy.catalog.selector.0.member.2", in: app)
+        assertAccessibleValueContains("Unavailable", identifier: "policy.catalog.selector.0.member.3", in: app)
+        assertAccessibleLabel("Invalid selector tag", for: selectorRow(4, in: app))
+        assertAccessibleValueContains("Invalid tag", for: selectorRow(4, in: app))
+        assertAccessibleValueContains("Invalid members", for: selectorRow(5, in: app))
         assertExists(element("policy.catalog.selector.0.member.1", in: app), message: "First duplicate member row collapsed")
         assertExists(element("policy.catalog.selector.0.member.2", in: app), message: "Second duplicate member row collapsed")
-        assertExists(element("policy.catalog.selector.4", in: app), message: "Invalid selector row collapsed")
-        assertExists(element("policy.catalog.selector.5", in: app), message: "Malformed selector row collapsed")
+        assertExists(selectorRow(4, in: app), message: "Invalid selector row collapsed")
+        assertExists(selectorRow(5, in: app), message: "Malformed selector row collapsed")
         XCTAssertEqual(
             app.descendants(matching: .any)
                 .matching(NSPredicate(format: "identifier CONTAINS %@", ".selection"))
@@ -88,9 +93,9 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     func testPolicyCatalogPresentationMutationRemainsCredentialSafe() {
         let app = launch(.policyCatalogSecrets)
         showProxies(in: app)
-        assertCatalogText("safe-group", identifier: "policy.catalog.selector.0.tag", in: app)
-        assertCatalogText("safe-member", identifier: "policy.catalog.selector.0.member.0.tag", in: app)
-        assertCatalogText("vmess", identifier: "policy.catalog.selector.0.member.0.type", in: app)
+        assertAccessibleLabel("safe-group", for: selectorRow(0, in: app))
+        assertAccessibleLabel("safe-member", identifier: "policy.catalog.selector.0.member.0", in: app)
+        assertAccessibleValueContains("vmess", identifier: "policy.catalog.selector.0.member.0", in: app)
         let policyElements = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "policy.catalog"))
             .allElementsBoundByIndex
@@ -111,16 +116,10 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     func testPolicyCatalogMismatchShowsRunningChoiceAndLocalizedRestartNotice() {
         let app = launch(.policyCatalogMismatch)
         showProxies(in: app)
-        assertCatalogText(
-            "Currently running: first",
-            identifier: "policy.catalog.selector.0.running-selection",
-            in: app
-        )
-        assertCatalogText(
-            "Restart required to apply",
-            identifier: "policy.catalog.selector.0.runtime",
-            in: app
-        )
+        let selector = selectorRow(0, in: app)
+        assertAccessibleValueContains("Desired: second", for: selector)
+        assertAccessibleValueContains("Currently running: first", for: selector)
+        assertAccessibleValueContains("Restart required to apply", for: selector)
         let selection = element("policy.catalog.selector.0.member.1", in: app)
         assertExists(selection, message: "Desired Policy selection control is unavailable")
         XCTAssertTrue(selection.isEnabled)
@@ -134,17 +133,14 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         showProxies(in: app)
         clickButton("policy.catalog.reset", in: app)
         assertDoesNotExist(element("policy.catalog.reset", in: app), message: "Reset control remained after all overrides were cleared")
-        assertCatalogText(
-            "Applied",
-            identifier: "policy.catalog.selector.0.runtime",
-            in: app
-        )
+        assertAccessibleValueContains("Applied", for: selectorRow(0, in: app))
     }
 
     func testProxiesWorkspaceSupportsSectionNavigationSearchAndFilter() {
         let app = launch(.policyCatalogPopulated)
-        let switcher = app.segmentedControls["profile.workspace.section-switcher"]
-        assertExists(switcher, message: "Missing Profile workspace section switcher")
+        _ = sectionControl("Overview", in: app)
+        _ = sectionControl("Proxies", in: app)
+        let configuration = sectionControl("Configuration", in: app)
         showProxies(in: app)
         assertExists(element("policy.workspace.search", in: app), message: "Missing Proxies search")
         assertExists(element("policy.workspace.filter", in: app), message: "Missing Proxies filter")
@@ -153,11 +149,16 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         let search = app.textFields["policy.workspace.search"]
         search.click()
         search.typeText("no-such-proxy")
-        assertExists(element("policy.workspace.search.empty", in: app), message: "Missing deliberate Proxies search empty state")
+        XCTAssertEqual(search.value as? String, "no-such-proxy", "Proxies search input did not accept the query")
+        app.typeKey(.return, modifierFlags: [])
+        assertExists(
+            element("policy.workspace.search.empty", in: app),
+            message: "Search did not produce the Proxies empty state"
+        )
 
-        switcher.buttons["Configuration"].click()
+        configuration.click()
         assertExists(element("profile.workspace.configuration", in: app), message: "Configuration section did not open")
-        assertExists(element("profile.json-editor", in: app), message: "Configuration editor disappeared after workspace navigation")
+        assertExists(app.scrollViews["profile.json-editor.scroll"], message: "Configuration editor disappeared after workspace navigation")
     }
 
     func testSaveFailureThenRecoveryAndSuccess() {
@@ -472,17 +473,17 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     private func assertFullShellSelectedProfile(_ scenario: Scenario, size: String) {
         let app = launchFullShell(scenario, windowSize: size, resetDestination: true)
         navigateToProfiles(in: app)
+        let expandedWidth = detailWidth(in: app, identifier: "profile.workspace.overview")
         assertSelectedShellWorkspace(in: app)
         assertExactlyOneMainSidebarToggle(in: app, expectedLabel: "Toggle Main Sidebar")
-        let expandedWidth = detailWidth(in: app, identifier: "profile.workspace.detail")
         assertOuterProfilesTitle(in: app)
 
-        collapseOuterSidebar(in: app, detailIdentifier: "profile.workspace.detail", expandedWidth: expandedWidth)
+        collapseOuterSidebar(in: app, detailIdentifier: "profile.workspace.configuration", expandedWidth: expandedWidth)
         assertSelectedShellWorkspace(in: app, expectsOuterSidebar: false)
-        expandOuterSidebar(in: app, detailIdentifier: "profile.workspace.detail")
+        expandOuterSidebar(in: app, detailIdentifier: "profile.workspace.configuration")
         assertSelectedShellWorkspace(in: app)
         assertToolbarReachable(in: app)
-        recordShellFrames(in: app, detailIdentifier: "profile.workspace.detail")
+        recordShellFrames(in: app, detailIdentifier: "profile.workspace.configuration")
         assertNoModal(in: app)
     }
 
@@ -591,7 +592,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         assertVisibleInsideWindow(app.buttons["Validate & Save"], in: app, message: "Save is unavailable")
         assertVisibleInsideWindow(app.buttons["Format"], in: app, message: "Format is unavailable")
         assertVisibleInsideWindow(app.menuButtons["More Actions"], in: app, message: "More Actions is unavailable")
-        assertDetailUsesAvailableWidth(element("profile.workspace.detail", in: app), in: app)
+        assertDetailUsesAvailableWidth(element("profile.workspace.configuration", in: app), in: app)
     }
 
     private func assertUsableProfileList(in app: XCUIApplication) {
@@ -760,6 +761,25 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         XCTAssertEqual(observed, expected, "Unexpected Policy Catalog text for \(identifier)")
     }
 
+    private func assertAccessibleLabel(_ expected: String, for result: XCUIElement) {
+        assertExists(result, message: "Missing Policy Catalog element")
+        XCTAssertEqual(result.label, expected, "Unexpected Policy Catalog label")
+    }
+
+    private func assertAccessibleLabel(_ expected: String, identifier: String, in app: XCUIApplication) {
+        assertAccessibleLabel(expected, for: element(identifier, in: app))
+    }
+
+    private func assertAccessibleValueContains(_ expected: String, for result: XCUIElement) {
+        assertExists(result, message: "Missing Policy Catalog element")
+        let value = result.value as? String ?? ""
+        XCTAssertTrue(value.contains(expected), "Policy Catalog value did not contain \(expected): \(value)")
+    }
+
+    private func assertAccessibleValueContains(_ expected: String, identifier: String, in app: XCUIApplication) {
+        assertAccessibleValueContains(expected, for: element(identifier, in: app))
+    }
+
     private func integerState(_ identifier: String, in app: XCUIApplication) -> Int {
         let value = state(identifier, in: app)
         guard let integer = Int(value) else {
@@ -771,6 +791,10 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
 
     private func element(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any)[identifier]
+    }
+
+    private func selectorRow(_ index: Int, in app: XCUIApplication) -> XCUIElement {
+        element("policy.catalog.selector.\(index)", in: app)
     }
 
     private func waitForState(_ identifier: String, toEqual expectedValue: String, in app: XCUIApplication) {
@@ -811,39 +835,28 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     }
 
     private func showProxies(in app: XCUIApplication) {
-        let switcher = app.segmentedControls["profile.workspace.section-switcher"]
-        assertExists(switcher, message: "Missing Profile workspace section switcher")
-        let proxies = switcher.buttons["Proxies"]
-        guard proxies.exists || proxies.waitForExistence(timeout: timeout) else {
-            XCTFail("Missing Proxies section")
-            return
-        }
-        proxies.click()
-        assertExists(element("policy.workspace", in: app), message: "Proxies workspace did not open")
+        sectionControl("Proxies", in: app).click()
     }
 
     private func showConfiguration(in app: XCUIApplication) {
-        let switcher = app.segmentedControls["profile.workspace.section-switcher"]
-        assertExists(switcher, message: "Missing Profile workspace section switcher")
-        let configuration = switcher.buttons["Configuration"]
-        guard configuration.exists || configuration.waitForExistence(timeout: timeout) else {
-            XCTFail("Missing Configuration section")
-            return
-        }
-        configuration.click()
+        sectionControl("Configuration", in: app).click()
         assertExists(element("profile.workspace.configuration", in: app), message: "Configuration workspace did not open")
     }
 
     private func showOverview(in app: XCUIApplication) {
-        let switcher = app.segmentedControls["profile.workspace.section-switcher"]
-        assertExists(switcher, message: "Missing Profile workspace section switcher")
-        let overview = switcher.buttons["Overview"]
-        guard overview.exists || overview.waitForExistence(timeout: timeout) else {
-            XCTFail("Missing Overview section")
-            return
-        }
-        overview.click()
+        sectionControl("Overview", in: app).click()
         assertExists(element("profile.workspace.overview", in: app), message: "Overview workspace did not open")
+    }
+
+    private func sectionControl(_ title: String, in app: XCUIApplication) -> XCUIElement {
+        let control = app.radioButtons
+            .matching(NSPredicate(format: "label == %@", title))
+            .firstMatch
+        guard control.exists || control.waitForExistence(timeout: timeout) else {
+            XCTFail("Missing \(title) section")
+            return control
+        }
+        return control
     }
 
     private func dismissTextCompletionIfPresent(in app: XCUIApplication) {

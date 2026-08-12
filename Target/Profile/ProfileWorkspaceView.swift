@@ -273,7 +273,6 @@ private struct ProfileWorkspaceDetailView: View {
             sectionContent
         }
         .navigationTitle("profile.editor.title")
-        .accessibilityIdentifier("profile.workspace.detail")
         .overlay(alignment: .top) {
             if model.isPreparingImport || model.isCommittingImport {
                 ProgressView(model.isCommittingImport ? "profile.import.committing" : "profile.import.preparing")
@@ -504,7 +503,12 @@ private struct ProfileConfigurationView: View {
                 requestExport: requestExport
             )
         }
+        // Keep the Configuration workspace's AX frame aligned with its detail
+        // pane. Without an explicit expansion, AppKit reports only this
+        // VStack's intrinsic content width even when the editor fills the pane.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(20)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("profile.workspace.configuration")
     }
 }
