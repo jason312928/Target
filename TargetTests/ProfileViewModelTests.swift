@@ -65,4 +65,71 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         model.exportSelectedProfile(to: directory)
         XCTAssertEqual(model.messageKey, "profile.export.error.unsafe-destination")
     }
+
+    func testPolicyWorkspacePresentationSeparatesStoppedConvergedRestartAndUnavailableRuntime() {
+        XCTAssertEqual(PolicyRuntimePresentation(selector: selector(runtime: .notRunning)).titleKey, "policy.workspace.runtime.not-running")
+        XCTAssertEqual(PolicyRuntimePresentation(selector: selector(runtime: .converged)).titleKey, "policy.workspace.runtime.converged")
+        XCTAssertEqual(PolicyRuntimePresentation(selector: selector(runtime: .restartRequired)).titleKey, "policy.catalog.restart-required")
+        XCTAssertEqual(PolicyRuntimePresentation(selector: selector(runtime: .unavailable)).titleKey, "policy.workspace.runtime.unavailable")
+    }
+
+    func testPolicyWorkspacePresentationSearchesCredentialSafeTagAndTypeFacts() {
+        let catalog = PolicyCatalog(
+            formatVersion: 1,
+            profileID: nil,
+            profileRevision: nil,
+            sourceFingerprint: nil,
+            storedOverrideCount: 1,
+            selectors: [selector(runtime: .restartRequired)]
+        )
+        let presentation = PolicyWorkspacePresentation(catalog: catalog, unavailable: false)
+
+        XCTAssertEqual(presentation.selectors(matching: "fast", filter: .all).count, 1)
+        XCTAssertEqual(presentation.selectors(matching: "vmess", filter: .all).count, 1)
+        XCTAssertEqual(presentation.selectors(matching: "missing", filter: .all).count, 0)
+        XCTAssertEqual(presentation.selectors(matching: "", filter: .selected).count, 1)
+        XCTAssertEqual(presentation.selectors(matching: "", filter: .needsRestart).count, 1)
+        XCTAssertEqual(presentation.selectors(matching: "", filter: .issues).count, 0)
+    }
+
+    func testPolicyWorkspacePresentationTreatsStructuralMembersAsIssuesAndNotSelectable() {
+        let invalidMember = PolicyCatalogMember(identity: 0, tag: "broken", type: nil, status: .missingReference)
+        let invalidSelector = PolicyCatalogSelector(
+            identity: 0,
+            tag: "group",
+            status: .available,
+            configuredDefault: "broken",
+            targetOverride: nil,
+            overrideValid: false,
+            effectiveDesired: "broken",
+            runningSelection: nil,
+            runtimeConvergence: .notRunning,
+            restartRequired: false,
+            members: [invalidMember]
+        )
+        let presentation = PolicySelectorPresentation(invalidSelector)
+
+        XCTAssertTrue(presentation.hasIssue)
+        XCTAssertFalse(presentation.isMutable)
+        XCTAssertFalse(presentation.members[0].isSelectable)
+    }
+
+    private func selector(runtime: PolicyRuntimeConvergenceState) -> PolicyCatalogSelector {
+        PolicyCatalogSelector(
+            identity: 0,
+            tag: "Fast Group",
+            status: .available,
+            configuredDefault: "direct",
+            targetOverride: "fast",
+            overrideValid: true,
+            effectiveDesired: "fast",
+            runningSelection: runtime == .notRunning ? nil : (runtime == .converged ? "fast" : "direct"),
+            runtimeConvergence: runtime,
+            restartRequired: runtime == .restartRequired,
+            members: [
+                PolicyCatalogMember(identity: 0, tag: "fast", type: "vmess", status: .available),
+                PolicyCatalogMember(identity: 1, tag: "direct", type: "direct", status: .available)
+            ]
+        )
+    }
 }

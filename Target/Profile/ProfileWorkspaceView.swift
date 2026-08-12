@@ -69,6 +69,11 @@ struct ProfileWorkspaceView: View {
         }
         .task { model.refreshPolicyState() }
         .onChange(of: model.readinessChangeGeneration) { _, _ in lifecycle?.refresh() }
+        .onChange(of: lifecycle?.isBusy) { wasBusy, isBusy in
+            if wasBusy == true, isBusy == false {
+                model.refreshPolicyState()
+            }
+        }
         .alert("profile.delete.title", isPresented: Binding(
             get: { deleteTarget != nil },
             set: { if !$0 { deleteTarget = nil } }
@@ -123,7 +128,8 @@ struct ProfileWorkspaceView: View {
                 model: model,
                 showRename: { sheet = .rename(profile.id, profile.name) },
                 requestDelete: { deleteTarget = profile.id },
-                requestExport: { model.requestExport() }
+                requestExport: { model.requestExport() },
+                lifecycle: lifecycle
             )
         } else {
             ProfileWorkspaceEmptyState(
@@ -242,6 +248,8 @@ private struct ProfileWorkspaceDetailView: View {
     let showRename: () -> Void
     let requestDelete: () -> Void
     let requestExport: () -> Void
+    let lifecycle: BackendLifecycleModel?
+    @State private var section: ProfileWorkspaceSection = .overview
 
     private var presentation: ProfileWorkspacePresentation { ProfileWorkspacePresentation(profile: profile) }
 
@@ -251,89 +259,18 @@ private struct ProfileWorkspaceDetailView: View {
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
 
-            if let subscription = profile.subscription {
-                Divider().padding(.top, 12)
-                ProfileSubscriptionStatus(
-                    subscription: subscription,
-                    presentation: presentation,
-                    isUpdating: model.isUpdatingSubscription,
-                    update: model.updateSubscription,
-                    cancel: model.cancelSubscriptionUpdate
-                )
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-            }
-
-            Divider().padding(.top, 8)
-            PolicyCatalogSection(
-                catalog: model.policyCatalog,
-                unavailable: model.isPolicyCatalogUnavailable,
-                isSelecting: model.isSelectingPolicy,
-                select: model.selectPolicy,
-                reset: model.resetPolicy
-            )
-                .padding(.horizontal, 20)
-                .padding(.vertical, model.policyCatalog?.selectors.isEmpty == true || model.isPolicyCatalogUnavailable ? 0 : 4)
-
-            Divider().padding(.top, 12)
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    TargetSectionTitle("profile.editor.section", systemImage: "curlybraces")
-                        .accessibilityIdentifier("profile.editor.section")
-                    Spacer()
-                    if model.isDirty {
-                        Label("profile.unsaved.indicator", systemImage: "circle.fill")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.orange)
-                            .accessibilityLabel(Text("profile.unsaved.indicator"))
-                            .accessibilityHint(Text("profile.unsaved.accessibility.hint"))
-                            .accessibilityIdentifier("profile.editor.dirty")
-                    }
+            Picker("profile.workspace.section", selection: $section) {
+                ForEach(ProfileWorkspaceSection.allCases) { item in
+                    Label(LocalizedStringKey(item.titleKey), systemImage: item.symbolName).tag(item)
                 }
-
-                ZStack {
-                    JSONCodeEditor(
-                        text: Binding(get: { model.editorText }, set: model.updateEditor),
-                        isEditable: model.canEditConfiguration,
-                        accessibilityIdentifier: "profile.json-editor",
-                        accessibilityLabel: String(localized: "profile.editor.accessibility.label")
-                    )
-                    .id(profile.id)
-
-                    if !model.isConfigurationLoaded {
-                        ContentUnavailableView(
-                            "profile.editor.unavailable.title",
-                            systemImage: "lock.trianglebadge.exclamationmark",
-                            description: Text("profile.editor.unavailable.description")
-                        )
-                        .accessibilityIdentifier("profile.editor.unavailable")
-                    }
-                }
-                .frame(
-                    maxWidth: .infinity,
-                    minHeight: ProfileWorkspaceLayout.minimumEditorHeight,
-                    idealHeight: ProfileWorkspaceLayout.preferredEditorHeight,
-                    maxHeight: .infinity
-                )
-                .layoutPriority(1)
-
-                ProfileFeedback(diagnostic: model.diagnostic, messageKey: model.messageKey)
             }
+            .pickerStyle(.segmented)
             .padding(.horizontal, 20)
-            .padding(.top, 12)
-            .padding(.bottom, 10)
+            .padding(.vertical, 14)
+            .accessibilityIdentifier("profile.workspace.section-switcher")
 
             Divider()
-            ProfileEditorActions(
-                profile: profile,
-                model: model,
-                showRename: showRename,
-                requestDelete: requestDelete,
-                requestExport: requestExport
-            )
-            .padding(.horizontal, 20)
-            .padding(.vertical, 10)
+            sectionContent
         }
         .navigationTitle("profile.editor.title")
         .accessibilityIdentifier("profile.workspace.detail")
@@ -346,139 +283,229 @@ private struct ProfileWorkspaceDetailView: View {
             }
         }
     }
-}
 
-private struct PolicyCatalogSection: View {
-    let catalog: PolicyCatalog?
-    let unavailable: Bool
-    let isSelecting: Bool
-    let select: (String, String) -> Void
-    let reset: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            TargetSectionTitle("policy.catalog.section", systemImage: "list.bullet")
-            if unavailable {
-                VStack(alignment: .leading, spacing: 3) {
-                    Label("policy.catalog.unavailable.title", systemImage: "lock.trianglebadge.exclamationmark")
-                        .font(.callout.weight(.semibold))
-                        .accessibilityIdentifier("policy.catalog.unavailable")
-                    Text("policy.catalog.unavailable.description")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else if let catalog, catalog.selectors.isEmpty, catalog.storedOverrideCount == 0 {
-                VStack(alignment: .leading, spacing: 3) {
-                    Label("policy.catalog.empty.title", systemImage: "list.bullet")
-                        .font(.callout.weight(.semibold))
-                        .accessibilityIdentifier("policy.catalog.empty")
-                    Text("policy.catalog.empty.description")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            } else if let catalog {
-                if catalog.storedOverrideCount > 0 {
-                    Button("policy.catalog.reset", action: reset)
-                        .controlSize(.small)
-                        .disabled(isSelecting)
-                        .accessibilityIdentifier("policy.catalog.reset")
-                }
-                ForEach(catalog.selectors) { selector in
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(selector.tag ?? String(localized: "policy.catalog.invalid-tag"))
-                            .font(.callout.weight(.semibold))
-                            .accessibilityIdentifier("policy.catalog.selector.\(selector.id).tag")
-                        if let configuredDefault = selector.configuredDefault {
-                            (Text("policy.catalog.configured-default") + Text(": \(configuredDefault)"))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).configured-default")
-                        }
-                        if let warning = selector.status.presentationWarning {
-                            Text(verbatim: warning)
-                                .font(.caption).foregroundStyle(.orange)
-                                .accessibilityLabel(Text(verbatim: warning))
-                                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).status")
-                        }
-                        if selector.isMutable,
-                           let selectorTag = selector.tag,
-                           let desired = selector.effectiveDesired {
-                            Picker(
-                                "policy.catalog.desired-selection",
-                                selection: Binding(
-                                    get: { desired },
-                                    set: { select(selectorTag, $0) }
-                                )
-                            ) {
-                                ForEach(selector.members.filter { $0.status == .available }) { member in
-                                    Text(member.tag).tag(member.tag)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .controlSize(.small)
-                            .disabled(isSelecting)
-                            .accessibilityIdentifier("policy.catalog.selector.\(selector.id).selection")
-                        }
-                        if let running = selector.runningSelection,
-                           running != selector.effectiveDesired {
-                            (Text("policy.catalog.running-selection") + Text(": \(running)"))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).running-selection")
-                        }
-                        if selector.runtimeConvergence == .unavailable {
-                            Text("policy.catalog.running-unavailable")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).running-unavailable")
-                        }
-                        if selector.restartRequired {
-                            Label("policy.catalog.restart-required", systemImage: "arrow.clockwise")
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(.orange)
-                                .accessibilityIdentifier("policy.catalog.selector.\(selector.id).restart-required")
-                        }
-                        ForEach(selector.members) { member in
-                            HStack(spacing: 5) {
-                                Text(member.tag)
-                                    .accessibilityIdentifier("policy.catalog.selector.\(selector.id).member.\(member.id).tag")
-                                if let type = member.type {
-                                    Text(type)
-                                        .foregroundStyle(.secondary)
-                                        .accessibilityIdentifier("policy.catalog.selector.\(selector.id).member.\(member.id).type")
-                                }
-                                if let warning = member.status.presentationWarning {
-                                    Text(verbatim: warning)
-                                        .foregroundStyle(.orange)
-                                        .accessibilityLabel(Text(verbatim: warning))
-                                        .accessibilityIdentifier("policy.catalog.selector.\(selector.id).member.\(member.id).status")
-                                }
-                            }
-                            .font(.caption)
-                            .accessibilityElement(children: .contain)
-                            .accessibilityIdentifier("policy.catalog.selector.\(selector.id).member.\(member.id)")
-                        }
-                    }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("policy.catalog.selector.\(selector.id)")
-                }
-            }
+    @ViewBuilder
+    private var sectionContent: some View {
+        switch section {
+        case .overview:
+            ProfileOverviewView(
+                profile: profile,
+                model: model,
+                presentation: presentation,
+                showRename: showRename,
+                requestDelete: requestDelete,
+                requestExport: requestExport,
+                showProxies: { section = .proxies }
+            )
+        case .proxies:
+            ProfilePolicyWorkspaceView(
+                catalog: model.policyCatalog,
+                unavailable: model.isPolicyCatalogUnavailable,
+                isSelecting: model.isSelectingPolicy,
+                lifecycle: lifecycle,
+                select: model.selectPolicy,
+                reset: model.resetPolicy,
+                refresh: model.refreshPolicyState
+            )
+        case .configuration:
+            ProfileConfigurationView(
+                profile: profile,
+                model: model,
+                showRename: showRename,
+                requestDelete: requestDelete,
+                requestExport: requestExport
+            )
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("policy.catalog")
     }
 }
 
-private extension PolicyCatalogStructuralStatus {
-    var presentationWarning: String? {
+private enum ProfileWorkspaceSection: String, CaseIterable, Identifiable {
+    case overview
+    case proxies
+    case configuration
+
+    var id: String { rawValue }
+    var titleKey: String { "profile.workspace.section.\(rawValue)" }
+    var symbolName: String {
         switch self {
-        case .available: nil
-        case .missingReference: String(localized: "policy.catalog.status.missingReference")
-        case .duplicateTag: String(localized: "policy.catalog.status.duplicateTag")
-        case .malformedMembers: String(localized: "policy.catalog.status.malformedMembers")
-        case .invalidTag: String(localized: "policy.catalog.status.invalidTag")
-        case .unavailable: String(localized: "policy.catalog.status.unavailable")
+        case .overview: "rectangle.grid.1x2"
+        case .proxies: "point.3.connected.trianglepath.dotted"
+        case .configuration: "curlybraces"
         }
+    }
+}
+
+private struct ProfileOverviewView: View {
+    let profile: Profile
+    @Bindable var model: ProfileViewModel
+    let presentation: ProfileWorkspacePresentation
+    let showRename: () -> Void
+    let requestDelete: () -> Void
+    let requestExport: () -> Void
+    let showProxies: () -> Void
+
+    private var policyPresentation: PolicyWorkspacePresentation {
+        PolicyWorkspacePresentation(catalog: model.policyCatalog, unavailable: model.isPolicyCatalogUnavailable)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                if let subscription = profile.subscription {
+                    ProfileSubscriptionStatus(
+                        subscription: subscription,
+                        presentation: presentation,
+                        isUpdating: model.isUpdatingSubscription,
+                        update: model.updateSubscription,
+                        cancel: model.cancelSubscriptionUpdate
+                    )
+                }
+                TargetSectionTitle("profile.overview.policy", systemImage: "point.3.connected.trianglepath.dotted")
+                policySummary
+                ProfileFeedback(diagnostic: model.diagnostic, messageKey: model.messageKey)
+                Divider()
+                ProfileOverviewActions(
+                    profile: profile,
+                    model: model,
+                    showRename: showRename,
+                    requestDelete: requestDelete,
+                    requestExport: requestExport
+                )
+            }
+            .frame(maxWidth: TargetUI.pageContentMaxWidth, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
+        }
+        .accessibilityIdentifier("profile.workspace.overview")
+    }
+
+    private var policySummary: some View {
+        Button(action: showProxies) {
+            VStack(alignment: .leading, spacing: 9) {
+                if model.isPolicyCatalogUnavailable {
+                    Label("policy.catalog.unavailable.title", systemImage: "questionmark.circle")
+                        .foregroundStyle(.orange)
+                } else if policyPresentation.selectorCount == 0 {
+                    Label("policy.catalog.empty.title", systemImage: "point.3.connected.trianglepath.dotted")
+                        .foregroundStyle(.secondary)
+                } else {
+                    HStack(spacing: 22) {
+                        ProfilePolicyMetric(labelKey: "profile.overview.selectors", value: "\(policyPresentation.selectorCount)")
+                        ProfilePolicyMetric(labelKey: "profile.overview.overrides", value: "\(policyPresentation.overrideCount)")
+                        ProfilePolicyMetric(
+                            labelKey: "profile.overview.needs-restart",
+                            value: "\(policyPresentation.restartRequiredCount)"
+                        )
+                    }
+                    if policyPresentation.restartRequiredCount > 0 {
+                        Label("policy.catalog.restart-required", systemImage: "arrow.clockwise")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else if policyPresentation.hasIssues {
+                        Label("profile.overview.policy.issues", systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else {
+                        Text("profile.overview.policy.ready")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("profile.overview.policy-summary")
+        .accessibilityHint(Text("profile.overview.policy.open.hint"))
+    }
+}
+
+private struct ProfilePolicyMetric: View {
+    let labelKey: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value).font(.title3.weight(.semibold))
+            Text(LocalizedStringKey(labelKey)).font(.caption).foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct ProfileOverviewActions: View {
+    let profile: Profile
+    @Bindable var model: ProfileViewModel
+    let showRename: () -> Void
+    let requestDelete: () -> Void
+    let requestExport: () -> Void
+
+    var body: some View {
+        ProfileMoreActions(
+            profile: profile,
+            model: model,
+            showRename: showRename,
+            requestDelete: requestDelete,
+            requestExport: requestExport
+        )
+    }
+}
+
+private struct ProfileConfigurationView: View {
+    let profile: Profile
+    @Bindable var model: ProfileViewModel
+    let showRename: () -> Void
+    let requestDelete: () -> Void
+    let requestExport: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                TargetSectionTitle("profile.editor.section", systemImage: "curlybraces")
+                    .accessibilityIdentifier("profile.editor.section")
+                Spacer()
+                if model.isDirty {
+                    Label("profile.unsaved.indicator", systemImage: "circle.fill")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel(Text("profile.unsaved.indicator"))
+                        .accessibilityHint(Text("profile.unsaved.accessibility.hint"))
+                        .accessibilityIdentifier("profile.editor.dirty")
+                }
+            }
+            ZStack {
+                JSONCodeEditor(
+                    text: Binding(get: { model.editorText }, set: model.updateEditor),
+                    isEditable: model.canEditConfiguration,
+                    accessibilityIdentifier: "profile.json-editor",
+                    accessibilityLabel: String(localized: "profile.editor.accessibility.label")
+                )
+                .id(profile.id)
+                if !model.isConfigurationLoaded {
+                    ContentUnavailableView(
+                        "profile.editor.unavailable.title",
+                        systemImage: "lock.trianglebadge.exclamationmark",
+                        description: Text("profile.editor.unavailable.description")
+                    )
+                    .accessibilityIdentifier("profile.editor.unavailable")
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: ProfileWorkspaceLayout.minimumEditorHeight, idealHeight: ProfileWorkspaceLayout.preferredEditorHeight, maxHeight: .infinity)
+            .layoutPriority(1)
+            ProfileFeedback(diagnostic: model.diagnostic, messageKey: model.messageKey)
+            Divider()
+            ProfileEditorActions(
+                profile: profile,
+                model: model,
+                showRename: showRename,
+                requestDelete: requestDelete,
+                requestExport: requestExport
+            )
+        }
+        .padding(20)
+        .accessibilityIdentifier("profile.workspace.configuration")
     }
 }
 
@@ -809,7 +836,13 @@ private struct ProfileRow: View {
             Image(systemName: profile.hasRemoteSubscription ? "link" : "doc.text")
             VStack(alignment: .leading, spacing: 2) {
                 Text(profile.name).lineLimit(1)
-                Text(statusKey).font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text(statusKey)
+                    Text("·")
+                    Text(profile.updatedAt, style: .relative)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
             Spacer()
             Image(systemName: icon).foregroundStyle(color).accessibilityLabel(Text(statusKey))
