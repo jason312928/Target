@@ -63,6 +63,7 @@ actor TargetAutomationOperations {
             case "profile.list": return try profileList()
             case "policy.list": return try await policyList()
             case "policy.select": return try await policySelect(request.arguments)
+            case "policy.probe": return try await policyProbe(request.arguments)
             case "policy.reset": return try await policyReset()
             case "profile.delete": return try profileDelete(request.arguments)
             case "engine.status": return await engineStatus()
@@ -212,6 +213,17 @@ actor TargetAutomationOperations {
             "profileRevision": catalog.profileRevision.map(JSONValue.integer) ?? .null,
             "restartRequired": .boolean(catalog.selectors.contains(where: \.restartRequired))
         ]))
+    }
+
+    private func policyProbe(_ arguments: [String: String]) async throws -> AutomationResponse {
+        guard Set(arguments.keys) == ["selector"],
+              let selectorTag = arguments["selector"], !selectorTag.isEmpty else {
+            return .failure(
+                code: "invalid_arguments",
+                message: "Policy latency probing requires a selector argument."
+            )
+        }
+        return .success(try await policyOperations.probeLatency(selectorTag: selectorTag).automationJSON())
     }
 
     private func profileDelete(_ arguments: [String: String]) throws -> AutomationResponse {
@@ -422,11 +434,11 @@ actor TargetAutomationOperations {
     }
 
     private static let commands = [
-        "capabilities", "status", "runtime.status", "profile.import", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.reset",
+        "capabilities", "status", "runtime.status", "profile.import", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset",
         "engine.status", "engine.start", "engine.stop", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
     ]
     private static let argumentFreeActions = Set(commands).subtracting([
-        "profile.import", "profile.delete", "policy.select"
+        "profile.import", "profile.delete", "policy.select", "policy.probe"
     ])
 }

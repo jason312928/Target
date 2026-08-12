@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimeObservationProviding {
+actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeObservationProviding {
     static let applicationSupportDirectoryName = "Target"
     static let engineDirectoryName = "sing-box"
 
@@ -152,6 +152,76 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         } catch {
             return false
         }
+    }
+
+    func probePolicyMemberLatency(
+        expectedRuntime: ExpectedPolicyRuntimeIdentity,
+        outboundTags: [String]
+    ) async throws -> RuntimePolicyHealthProbeOutcome {
+        guard !outboundTags.isEmpty,
+              let verified = await verifiedRuntimeControlMaterial(),
+              verified.record.profileID == expectedRuntime.profileID,
+              verified.record.profileRevision == expectedRuntime.profileRevision,
+              verified.record.sourceConfigurationFingerprint == expectedRuntime.sourceFingerprint else {
+            return .runtimeUnavailable
+        }
+
+        let client = runtimeControlClient
+        let descriptor = verified.descriptor
+        let maximumConcurrentProbes = 4
+        let indexedTags = Array(outboundTags.enumerated())
+        var indexedResults: [(Int, RuntimeProxyHealth)] = []
+        var controllerUnavailable = false
+
+        try await withThrowingTaskGroup(of: (Int, RuntimeProxyHealth, Bool).self) { group in
+            var nextIndex = 0
+            func addNext() {
+                guard nextIndex < indexedTags.count else { return }
+                let (index, tag) = indexedTags[nextIndex]
+                nextIndex += 1
+                group.addTask {
+                    try Task.checkCancellation()
+                    do {
+                        let latency = try await client.probeLatency(outbound: tag, using: descriptor)
+                        guard let health = RuntimeProxyHealth.reachable(
+                            tag: tag,
+                            latencyMilliseconds: latency,
+                            observedAt: Date()
+                        ) else {
+                            return (index, .unreachable(tag: tag, observedAt: Date()), false)
+                        }
+                        return (index, health, false)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch let error as RuntimeControlError {
+                        switch error {
+                        case .unavailable, .invalidDescriptor, .redirectRefused, .selectionRejected:
+                            return (index, .runtimeUnavailable(tag: tag), true)
+                        case .malformedResponse, .probeFailed:
+                            return (index, .unreachable(tag: tag, observedAt: Date()), false)
+                        }
+                    } catch {
+                        return (index, .unreachable(tag: tag, observedAt: Date()), false)
+                    }
+                }
+            }
+
+            for _ in 0..<min(maximumConcurrentProbes, indexedTags.count) { addNext() }
+            while let (index, result, unavailable) = try await group.next() {
+                indexedResults.append((index, result))
+                controllerUnavailable = controllerUnavailable || unavailable
+                addNext()
+            }
+        }
+        try Task.checkCancellation()
+
+        guard !controllerUnavailable,
+              let current = await verifiedRuntimeControlMaterial(),
+              current.record.runtimeConfigurationID == verified.record.runtimeConfigurationID,
+              current.descriptor == verified.descriptor else {
+            return .runtimeUnavailable
+        }
+        return .results(indexedResults.sorted { $0.0 < $1.0 }.map(\.1))
     }
 
     func currentRuntimeConnectionTotals() async -> RuntimeConnectionTotals? {

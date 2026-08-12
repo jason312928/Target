@@ -114,6 +114,83 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertFalse(presentation.members[0].isSelectable)
     }
 
+    func testPolicyMemberHealthPresentationCoversUnknownTestingReachableAndUnavailableStates() {
+        XCTAssertEqual(PolicyMemberHealthPresentation(nil).state, .unknown)
+        XCTAssertEqual(
+            PolicyMemberHealthPresentation(.testing(tag: "node")).titleKey,
+            "policy.health.testing"
+        )
+        let reachable = PolicyMemberHealthPresentation(RuntimeProxyHealth.reachable(
+            tag: "node",
+            latencyMilliseconds: 42,
+            observedAt: Date(timeIntervalSince1970: 1)
+        ))
+        XCTAssertEqual(reachable.state, .reachable)
+        XCTAssertEqual(reachable.latencyMilliseconds, 42)
+        XCTAssertEqual(reachable.titleKey, "policy.health.latency")
+        XCTAssertEqual(
+            PolicyMemberHealthPresentation(.unreachable(tag: "node", observedAt: .now)).titleKey,
+            "policy.health.unavailable"
+        )
+        XCTAssertEqual(
+            PolicyMemberHealthPresentation(.runtimeUnavailable(tag: "node")).titleKey,
+            "policy.health.runtime-unavailable"
+        )
+    }
+
+    func testPolicyMemberHealthDoesNotAlterSelectionRoles() {
+        let source = selector(runtime: .restartRequired)
+        let health = [
+            "fast": RuntimeProxyHealth.reachable(
+                tag: "fast",
+                latencyMilliseconds: 42,
+                observedAt: Date(timeIntervalSince1970: 1)
+            )!,
+            "direct": .unreachable(tag: "direct", observedAt: Date(timeIntervalSince1970: 1))
+        ]
+        let presentation = PolicySelectorPresentation(source, health: health)
+
+        XCTAssertEqual(presentation.desiredSelection, "fast")
+        XCTAssertEqual(presentation.runningSelection, "direct")
+        XCTAssertEqual(presentation.configuredDefault, "direct")
+        XCTAssertEqual(presentation.members[0].role, .desired)
+        XCTAssertEqual(presentation.members[1].role, .running)
+        XCTAssertEqual(presentation.members[0].health.latencyMilliseconds, 42)
+    }
+
+    @MainActor
+    func testProfileSwitchRejectsStaleLatencyProbeResult() async throws {
+        let store = try makeStore()
+        let first = try store.create(name: "First")
+        try store.save(
+            json: policyConfiguration(configuredDefault: "first", members: ["first"]),
+            for: first.id
+        )
+        let second = try store.create(name: "Second")
+        try store.save(
+            json: policyConfiguration(configuredDefault: "second", members: ["second"]),
+            for: second.id
+        )
+        try store.select(first.id)
+        let gate = PolicyProbeGate()
+        let operations = GatedProbePolicyOperations(store: store, gate: gate)
+        let model = ProfileViewModel(store: store, policyOperations: operations)
+        let selector = try XCTUnwrap(model.policyCatalog?.selectors.first)
+
+        model.probePolicyLatency(selectorID: selector.id, selectorTag: "group")
+        await gate.waitUntilStarted()
+        XCTAssertEqual(model.testingPolicySelectorID, selector.id)
+        XCTAssertEqual(model.policyHealthBySelector[selector.id]?["first"]?.state, .testing)
+
+        model.requestSelection(second.id)
+        await gate.release()
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertEqual(model.selectedID, second.id)
+        XCTAssertNil(model.testingPolicySelectorID)
+        XCTAssertTrue(model.policyHealthBySelector.isEmpty)
+    }
+
     private func selector(runtime: PolicyRuntimeConvergenceState) -> PolicyCatalogSelector {
         PolicyCatalogSelector(
             identity: 0,
@@ -130,6 +207,65 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
                 PolicyCatalogMember(identity: 0, tag: "fast", type: "vmess", status: .available),
                 PolicyCatalogMember(identity: 1, tag: "direct", type: "direct", status: .available)
             ]
+        )
+    }
+}
+
+private actor PolicyProbeGate {
+    private var started = false
+    private var startedContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func enter() async {
+        started = true
+        startedContinuation?.resume()
+        startedContinuation = nil
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { startedContinuation = $0 }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+private final class GatedProbePolicyOperations: TargetPolicyOperating, @unchecked Sendable {
+    private let base: TargetPolicyOperations
+    private let gate: PolicyProbeGate
+
+    init(store: ProfileStore, gate: PolicyProbeGate) {
+        base = TargetPolicyOperations(profileStore: store)
+        self.gate = gate
+    }
+
+    func readPersisted() throws -> PolicyCatalog { try base.readPersisted() }
+    func read() async throws -> PolicyCatalog { try await base.read() }
+    func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog {
+        try await base.select(selectorTag: selectorTag, outboundTag: outboundTag)
+    }
+    func reset() async throws -> PolicyResetResult { try await base.reset() }
+
+    func probeLatency(selectorTag: String) async throws -> PolicyLatencyProbeResult {
+        let catalog = try base.readPersisted()
+        let selector = try XCTUnwrap(catalog.selectors.first(where: { $0.tag == selectorTag }))
+        let profileID = try XCTUnwrap(catalog.profileID)
+        let revision = try XCTUnwrap(catalog.profileRevision)
+        let fingerprint = try XCTUnwrap(catalog.sourceFingerprint)
+        await gate.enter()
+        return PolicyLatencyProbeResult(
+            profileID: profileID,
+            profileRevision: revision,
+            sourceFingerprint: fingerprint,
+            selector: selectorTag,
+            runtimeAvailable: true,
+            members: selector.members.compactMap {
+                RuntimeProxyHealth.reachable(tag: $0.tag, latencyMilliseconds: 42, observedAt: .now)
+            }
         )
     }
 }

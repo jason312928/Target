@@ -272,6 +272,99 @@ struct StoppedPolicyRuntimeEvidenceProvider: PolicyRuntimeEvidenceProviding {
     func currentPolicyRuntimeEvidence() async -> PolicyRuntimeEvidence { .stopped }
 }
 
+/// Immutable identity of a selected Profile revision at the runtime boundary.
+/// It must cross every asynchronous controller operation so the backend never
+/// infers identity from a later Profile selection.
+struct ExpectedPolicyRuntimeIdentity: Equatable, Sendable {
+    let profileID: UUID
+    let profileRevision: Int
+    let sourceFingerprint: String
+}
+
+protocol RuntimePolicyApplying: Sendable {
+    func applyLivePolicySelection(
+        expectedRuntime: ExpectedPolicyRuntimeIdentity,
+        selectorTag: String,
+        outboundTag: String
+    ) async -> Bool
+}
+
+enum RuntimeProxyHealthState: String, Codable, Equatable, Sendable {
+    case unknown
+    case testing
+    case reachable
+    case unreachable
+    case runtimeUnavailable
+}
+
+struct RuntimeProxyHealth: Equatable, Sendable {
+    static let maximumLatencyMilliseconds = Int(UInt16.max)
+
+    let tag: String
+    let state: RuntimeProxyHealthState
+    let latencyMilliseconds: Int?
+    let observedAt: Date?
+
+    static func unknown(tag: String) -> RuntimeProxyHealth {
+        RuntimeProxyHealth(tag: tag, state: .unknown, latencyMilliseconds: nil, observedAt: nil)
+    }
+
+    static func testing(tag: String) -> RuntimeProxyHealth {
+        RuntimeProxyHealth(tag: tag, state: .testing, latencyMilliseconds: nil, observedAt: nil)
+    }
+
+    static func reachable(
+        tag: String,
+        latencyMilliseconds: Int,
+        observedAt: Date
+    ) -> RuntimeProxyHealth? {
+        guard (1...maximumLatencyMilliseconds).contains(latencyMilliseconds) else { return nil }
+        return RuntimeProxyHealth(
+            tag: tag,
+            state: .reachable,
+            latencyMilliseconds: latencyMilliseconds,
+            observedAt: observedAt
+        )
+    }
+
+    static func unreachable(tag: String, observedAt: Date) -> RuntimeProxyHealth {
+        RuntimeProxyHealth(tag: tag, state: .unreachable, latencyMilliseconds: nil, observedAt: observedAt)
+    }
+
+    static func runtimeUnavailable(tag: String) -> RuntimeProxyHealth {
+        RuntimeProxyHealth(tag: tag, state: .runtimeUnavailable, latencyMilliseconds: nil, observedAt: nil)
+    }
+}
+
+enum RuntimePolicyHealthProbeOutcome: Equatable, Sendable {
+    case runtimeUnavailable
+    case results([RuntimeProxyHealth])
+}
+
+protocol RuntimePolicyHealthProbing: Sendable {
+    func probePolicyMemberLatency(
+        expectedRuntime: ExpectedPolicyRuntimeIdentity,
+        outboundTags: [String]
+    ) async throws -> RuntimePolicyHealthProbeOutcome
+}
+
+struct PolicyLatencyProbeResult: Equatable, Sendable {
+    let profileID: UUID
+    let profileRevision: Int
+    let sourceFingerprint: String
+    let selector: String
+    let runtimeAvailable: Bool
+    let members: [RuntimeProxyHealth]
+
+    var expectedRuntimeIdentity: ExpectedPolicyRuntimeIdentity {
+        ExpectedPolicyRuntimeIdentity(
+            profileID: profileID,
+            profileRevision: profileRevision,
+            sourceFingerprint: sourceFingerprint
+        )
+    }
+}
+
 enum TargetPolicyOperationError: Error, Equatable {
     case selectorNotFound
     case selectorAmbiguous
@@ -480,6 +573,13 @@ protocol TargetPolicyOperating: Sendable {
     func read() async throws -> PolicyCatalog
     func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog
     func reset() async throws -> PolicyResetResult
+    func probeLatency(selectorTag: String) async throws -> PolicyLatencyProbeResult
+}
+
+extension TargetPolicyOperating {
+    func probeLatency(selectorTag: String) async throws -> PolicyLatencyProbeResult {
+        throw TargetPolicyOperationError.selectorUnavailable
+    }
 }
 
 final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
@@ -543,6 +643,58 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
         return PolicyResetResult(
             clearedOverrideCount: committed.clearedOverrideCount,
             catalog: reconciled
+        )
+    }
+
+    func probeLatency(selectorTag: String) async throws -> PolicyLatencyProbeResult {
+        let catalog = try readPersisted()
+        let matches = catalog.selectors.filter { $0.tag == selectorTag }
+        guard !matches.isEmpty else { throw TargetPolicyOperationError.selectorNotFound }
+        guard matches.count == 1, matches[0].status != .duplicateTag else {
+            throw TargetPolicyOperationError.selectorAmbiguous
+        }
+        let selector = matches[0]
+        guard selector.status == .available else { throw TargetPolicyOperationError.selectorUnavailable }
+        let members = selector.members.filter { $0.status == .available }
+        guard !members.isEmpty,
+              let expectedRuntime = catalog.expectedRuntimeIdentity else {
+            throw TargetPolicyOperationError.selectorUnavailable
+        }
+
+        let outcome: RuntimePolicyHealthProbeOutcome
+        if let runtimeProber = runtimeEvidenceProvider as? any RuntimePolicyHealthProbing {
+            outcome = try await runtimeProber.probePolicyMemberLatency(
+                expectedRuntime: expectedRuntime,
+                outboundTags: members.map(\.tag)
+            )
+        } else {
+            outcome = .runtimeUnavailable
+        }
+        try Task.checkCancellation()
+
+        let runtimeAvailable: Bool
+        let health: [RuntimeProxyHealth]
+        switch outcome {
+        case .runtimeUnavailable:
+            runtimeAvailable = false
+            health = members.map { .runtimeUnavailable(tag: $0.tag) }
+        case .results(let results):
+            guard results.count == members.count,
+                  zip(results, members).allSatisfy({ pair in pair.0.tag == pair.1.tag }) else {
+                runtimeAvailable = false
+                health = members.map { .runtimeUnavailable(tag: $0.tag) }
+                break
+            }
+            runtimeAvailable = true
+            health = results
+        }
+        return PolicyLatencyProbeResult(
+            profileID: expectedRuntime.profileID,
+            profileRevision: expectedRuntime.profileRevision,
+            sourceFingerprint: expectedRuntime.sourceFingerprint,
+            selector: selectorTag,
+            runtimeAvailable: runtimeAvailable,
+            members: health
         )
     }
 
@@ -626,6 +778,25 @@ extension PolicyCatalog {
                      "tag": selector.tag.map(JSONValue.string) ?? .null,
                      "targetOverride": selector.targetOverride.map(JSONValue.string) ?? .null])
         })])
+    }
+}
+
+extension PolicyLatencyProbeResult {
+    func automationJSON() -> JSONValue {
+        .object([
+            "formatVersion": .integer(1),
+            "members": .array(members.map { member in
+                .object([
+                    "latencyMilliseconds": member.latencyMilliseconds.map(JSONValue.integer) ?? .null,
+                    "state": .string(member.state.rawValue),
+                    "tag": .string(member.tag)
+                ])
+            }),
+            "profileID": .string(profileID.uuidString.lowercased()),
+            "profileRevision": .integer(profileRevision),
+            "runtimeAvailable": .boolean(runtimeAvailable),
+            "selector": .string(selector)
+        ])
     }
 }
 

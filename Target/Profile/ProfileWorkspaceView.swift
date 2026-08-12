@@ -279,7 +279,10 @@ private struct ProfileWorkspaceDetailView: View {
                     .padding(10)
                     .background(.regularMaterial, in: Capsule())
                     .accessibilityIdentifier("profile.workspace.busy")
-            }
+                }
+        }
+        .onChange(of: lifecycle?.status) { _, _ in
+            model.invalidatePolicyHealth()
         }
     }
 
@@ -301,8 +304,11 @@ private struct ProfileWorkspaceDetailView: View {
                 catalog: model.policyCatalog,
                 unavailable: model.isPolicyCatalogUnavailable,
                 isSelecting: model.isSelectingPolicy,
+                healthBySelector: model.policyHealthBySelector,
+                testingSelectorID: model.testingPolicySelectorID,
                 lifecycle: lifecycle,
                 select: model.selectPolicy,
+                probeLatency: model.probePolicyLatency,
                 reset: model.resetPolicy,
                 refresh: model.refreshPolicyState
             )

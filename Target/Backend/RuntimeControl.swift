@@ -8,6 +8,7 @@ enum RuntimeControlError: Error, Equatable, Sendable {
     case unavailable
     case redirectRefused
     case malformedResponse
+    case probeFailed
     case selectionRejected
 }
 
@@ -27,23 +28,6 @@ protocol RuntimeControlDescriptorProviding: Sendable {
     func verifiedRuntimeControlDescriptor() async -> RuntimeControlDescriptor?
 }
 
-protocol RuntimePolicyApplying: Sendable {
-    func applyLivePolicySelection(
-        expectedRuntime: ExpectedPolicyRuntimeIdentity,
-        selectorTag: String,
-        outboundTag: String
-    ) async -> Bool
-}
-
-/// Immutable identity of the committed Profile policy mutation.  This must cross
-/// the async controller boundary so a backend never infers it from a later
-/// selected Profile.
-struct ExpectedPolicyRuntimeIdentity: Equatable, Sendable {
-    let profileID: UUID
-    let profileRevision: Int
-    let sourceFingerprint: String
-}
-
 protocol RuntimeObservationProviding: Sendable {
     func runtimeObservationAvailability() async -> RuntimeObservationState
     func currentRuntimeConnectionTotals() async -> RuntimeConnectionTotals?
@@ -52,12 +36,28 @@ protocol RuntimeObservationProviding: Sendable {
 protocol RuntimeControlClient: Sendable {
     func selectors(using descriptor: RuntimeControlDescriptor) async throws -> [String: RuntimeSelectorState]
     func select(selector: String, outbound: String, using descriptor: RuntimeControlDescriptor) async throws
+    func probeLatency(outbound: String, using descriptor: RuntimeControlDescriptor) async throws -> Int
     func connectionTotals(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionTotals
+}
+
+extension RuntimeControlClient {
+    func probeLatency(outbound: String, using descriptor: RuntimeControlDescriptor) async throws -> Int {
+        throw RuntimeControlError.unavailable
+    }
 }
 
 /// Fixed-purpose, loopback-only client for sing-box's local Clash-compatible
 /// adapter. This is deliberately not a general HTTP client.
 actor SingBoxRuntimeControlClient: RuntimeControlClient {
+    enum ProbePolicy {
+        /// This fixed HTTPS endpoint matches the connectivity semantics used by
+        /// the pinned sing-box URL tester. It is intentionally not configurable
+        /// by a Profile, the UI, or automation clients.
+        static let connectivityURL = "https://www.gstatic.com/generate_204"
+        static let timeoutMilliseconds = 1_500
+        static let maximumLatencyMilliseconds = Int(UInt16.max)
+    }
+
     private let session: URLSession
 
     init(session: URLSession? = nil) {
@@ -94,7 +94,19 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
     func select(selector: String, outbound: String, using descriptor: RuntimeControlDescriptor) async throws {
         guard !selector.isEmpty, !outbound.isEmpty else { throw RuntimeControlError.invalidDescriptor }
         let payload = try JSONEncoder().encode(SelectorRequest(name: outbound))
-        _ = try await request(path: "/proxies/\(escapedPathComponent(selector))", method: "PUT", descriptor: descriptor, body: payload)
+        _ = try await request(path: "/proxies/\(Self.escapedPathComponent(selector))", method: "PUT", descriptor: descriptor, body: payload)
+    }
+
+    func probeLatency(outbound: String, using descriptor: RuntimeControlDescriptor) async throws -> Int {
+        let request = try Self.makeDelayRequest(outbound: outbound, descriptor: descriptor)
+        let data = try await send(request, nonSuccessError: .probeFailed)
+        let decoded: DelayResponse
+        do { decoded = try JSONDecoder().decode(DelayResponse.self, from: data) }
+        catch { throw RuntimeControlError.malformedResponse }
+        guard (1...ProbePolicy.maximumLatencyMilliseconds).contains(decoded.delay) else {
+            throw RuntimeControlError.malformedResponse
+        }
+        return decoded.delay
     }
 
     func connectionTotals(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionTotals {
@@ -119,15 +131,52 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
         body: Data?
     ) async throws -> Data {
         let request = try Self.makeRequest(path: path, method: method, descriptor: descriptor, body: body)
+        return try await send(request, nonSuccessError: .unavailable)
+    }
+
+    private func send(
+        _ request: URLRequest,
+        nonSuccessError: RuntimeControlError
+    ) async throws -> Data {
         let (data, response): (Data, URLResponse)
         do { (data, response) = try await session.data(for: request) }
+        catch is CancellationError { throw CancellationError() }
         catch { throw RuntimeControlError.unavailable }
         guard let http = response as? HTTPURLResponse else { throw RuntimeControlError.unavailable }
         guard (200...299).contains(http.statusCode) else {
             if http.statusCode == 401 || http.statusCode == 403 { throw RuntimeControlError.selectionRejected }
-            throw RuntimeControlError.unavailable
+            if (300...399).contains(http.statusCode) { throw RuntimeControlError.redirectRefused }
+            throw nonSuccessError
         }
         return data
+    }
+
+    static func makeDelayRequest(
+        outbound: String,
+        descriptor: RuntimeControlDescriptor
+    ) throws -> URLRequest {
+        guard !outbound.isEmpty else { throw RuntimeControlError.invalidDescriptor }
+        var request = try makeRequest(
+            path: "/proxies/\(escapedPathComponent(outbound))/delay",
+            method: "GET",
+            descriptor: descriptor,
+            body: nil
+        )
+        guard var components = request.url.flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) }) else {
+            throw RuntimeControlError.invalidDescriptor
+        }
+        components.queryItems = [
+            URLQueryItem(name: "url", value: ProbePolicy.connectivityURL),
+            URLQueryItem(name: "timeout", value: String(ProbePolicy.timeoutMilliseconds))
+        ]
+        guard let url = components.url,
+              url.scheme == "http",
+              url.host == RuntimeControlDescriptor.host,
+              url.port == Int(descriptor.port) else {
+            throw RuntimeControlError.invalidDescriptor
+        }
+        request.url = url
+        return request
     }
 
     static func makeRequest(
@@ -159,13 +208,15 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
         return request
     }
 
-    private func escapedPathComponent(_ component: String) -> String {
-        component.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? ""
+    private static func escapedPathComponent(_ component: String) -> String {
+        let unreserved = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        return component.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""
     }
 
     private struct SelectorRequest: Encodable { let name: String }
     private struct ProxyResponse: Decodable { let proxies: [String: Proxy] }
     private struct Proxy: Decodable { let now: String?; let all: [String]? }
+    private struct DelayResponse: Decodable { let delay: Int }
     private struct ConnectionsResponse: Decodable {
         let uploadTotal: Int64
         let downloadTotal: Int64
@@ -174,7 +225,7 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
     private struct Connection: Decodable {}
 }
 
-private final class RedirectRefusingDelegate: NSObject, URLSessionTaskDelegate {
+final class RedirectRefusingDelegate: NSObject, URLSessionTaskDelegate {
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,

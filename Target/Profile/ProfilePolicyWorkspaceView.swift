@@ -4,8 +4,11 @@ struct ProfilePolicyWorkspaceView: View {
     let catalog: PolicyCatalog?
     let unavailable: Bool
     let isSelecting: Bool
+    let healthBySelector: [Int: [String: RuntimeProxyHealth]]
+    let testingSelectorID: Int?
     let lifecycle: BackendLifecycleModel?
     let select: (String, String) -> Void
+    let probeLatency: (Int, String) -> Void
     let reset: () -> Void
     let refresh: () -> Void
 
@@ -14,7 +17,11 @@ struct ProfilePolicyWorkspaceView: View {
     @State private var filter: PolicyWorkspaceFilter = .all
 
     private var presentation: PolicyWorkspacePresentation {
-        PolicyWorkspacePresentation(catalog: catalog, unavailable: unavailable)
+        PolicyWorkspacePresentation(
+            catalog: catalog,
+            unavailable: unavailable,
+            healthBySelector: healthBySelector
+        )
     }
 
     private var visibleSelectors: [PolicySelectorPresentation] {
@@ -144,9 +151,14 @@ struct ProfilePolicyWorkspaceView: View {
             SelectorDetail(
                 selector: selector,
                 isSelecting: isSelecting,
+                isTestingLatency: testingSelectorID == selector.id,
                 canRestart: lifecycle?.canRestart == true,
                 lifecycleBusy: lifecycle?.isBusy == true,
                 select: select,
+                probeLatency: {
+                    guard let tag = selector.tag else { return }
+                    probeLatency(selector.id, tag)
+                },
                 restart: { lifecycle?.restartWithCurrentProfile() }
             )
         } else {
@@ -223,9 +235,11 @@ private extension PolicySelectorPresentation {
 private struct SelectorDetail: View {
     let selector: PolicySelectorPresentation
     let isSelecting: Bool
+    let isTestingLatency: Bool
     let canRestart: Bool
     let lifecycleBusy: Bool
     let select: (String, String) -> Void
+    let probeLatency: () -> Void
     let restart: () -> Void
 
     var body: some View {
@@ -298,7 +312,23 @@ private struct SelectorDetail: View {
 
     private var members: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TargetSectionTitle("policy.workspace.members", systemImage: "circle.grid.2x2")
+            HStack {
+                TargetSectionTitle("policy.workspace.members", systemImage: "circle.grid.2x2")
+                Spacer()
+                Button(action: probeLatency) {
+                    Text(LocalizedStringKey(
+                        isTestingLatency
+                            ? "policy.health.testing"
+                            : (selector.hasHealthResults ? "policy.health.probe-again" : "policy.health.test-latency")
+                    ))
+                }
+                .controlSize(.small)
+                .disabled(
+                    isTestingLatency || lifecycleBusy || selector.tag == nil
+                        || !selector.members.contains(where: \.isSelectable)
+                )
+                .accessibilityIdentifier("policy.health.test-latency")
+            }
             ForEach(selector.members) { member in
                 MemberRow(
                     member: member,
@@ -347,6 +377,7 @@ private struct MemberRow: View {
                 }
                 Spacer()
                 if isSelecting && isDesired { ProgressView().controlSize(.small) }
+                healthValue
             }
             .padding(.vertical, 6)
             .contentShape(Rectangle())
@@ -369,7 +400,49 @@ private struct MemberRow: View {
         if let titleKey = member.role.titleKey {
             value = value + Text(verbatim: ", ") + Text(LocalizedStringKey(titleKey))
         }
+        value = value + Text(verbatim: ", ") + healthAccessibilityValue
         return value
+    }
+
+    @ViewBuilder
+    private var healthValue: some View {
+        switch member.health.state {
+        case .unknown:
+            Text(verbatim: "—")
+                .foregroundStyle(.secondary)
+                .help(Text("policy.health.not-tested"))
+        case .testing:
+            HStack(spacing: 5) {
+                ProgressView().controlSize(.small)
+                Text("policy.health.testing")
+            }
+            .foregroundStyle(.secondary)
+        case .reachable:
+            if let latency = member.health.latencyMilliseconds {
+                (Text(verbatim: "\(latency) ") + Text("policy.health.milliseconds.short"))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        case .unreachable:
+            Text("policy.health.unavailable")
+                .foregroundStyle(member.health.level.tint)
+        case .runtimeUnavailable:
+            Text("policy.health.runtime-unavailable")
+                .foregroundStyle(member.health.level.tint)
+        }
+    }
+
+    private var healthAccessibilityValue: Text {
+        switch member.health.state {
+        case .reachable:
+            if let latency = member.health.latencyMilliseconds {
+                return Text("policy.health.latency") + Text(verbatim: ": \(latency) ")
+                    + Text("policy.health.milliseconds")
+            }
+            return Text("policy.health.unavailable")
+        case .unknown, .testing, .unreachable, .runtimeUnavailable:
+            return Text(LocalizedStringKey(member.health.titleKey))
+        }
     }
 }
 

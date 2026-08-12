@@ -13,7 +13,9 @@ final class ProfileViewModel {
     private var subscriptionTask: Task<Void, Never>?
     private var importTask: Task<Void, Never>?
     private var policyTask: Task<Void, Never>?
+    private var policyProbeTask: Task<Void, Never>?
     private var policyRefreshGeneration = 0
+    private var policyHealthGeneration = 0
 
     private(set) var profiles: [Profile] = []
     private(set) var selectedID: UUID?
@@ -40,6 +42,8 @@ final class ProfileViewModel {
     private(set) var policyCatalog: PolicyCatalog?
     private(set) var isPolicyCatalogUnavailable = false
     private(set) var isSelectingPolicy = false
+    private(set) var testingPolicySelectorID: Int?
+    private(set) var policyHealthBySelector: [Int: [String: RuntimeProxyHealth]] = [:]
 
     init(
         store: ProfileStore = ProfileStore(),
@@ -278,7 +282,70 @@ final class ProfileViewModel {
     }
 
     func refreshPolicyState() {
+        invalidatePolicyHealth()
         refreshPolicyCatalog()
+    }
+
+    func probePolicyLatency(selectorID: Int, selectorTag: String) {
+        guard policyProbeTask == nil,
+              let catalog = policyCatalog,
+              let profileID = catalog.profileID,
+              let profileRevision = catalog.profileRevision,
+              let sourceFingerprint = catalog.sourceFingerprint,
+              let selector = catalog.selectors.first(where: { $0.id == selectorID && $0.tag == selectorTag }) else {
+            return
+        }
+        let availableMembers = selector.members.filter { $0.status == .available }
+        guard !availableMembers.isEmpty else { return }
+
+        policyHealthGeneration &+= 1
+        let generation = policyHealthGeneration
+        let selectedProfileID = selectedID
+        testingPolicySelectorID = selectorID
+        policyHealthBySelector[selectorID] = Dictionary(
+            uniqueKeysWithValues: availableMembers.map { ($0.tag, .testing(tag: $0.tag)) }
+        )
+
+        policyProbeTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if generation == self.policyHealthGeneration {
+                    self.policyProbeTask = nil
+                    self.testingPolicySelectorID = nil
+                }
+            }
+            do {
+                let result = try await self.policyOperations.probeLatency(selectorTag: selectorTag)
+                guard !Task.isCancelled,
+                      generation == self.policyHealthGeneration,
+                      self.selectedID == selectedProfileID,
+                      result.profileID == profileID,
+                      result.profileRevision == profileRevision,
+                      result.sourceFingerprint == sourceFingerprint,
+                      result.selector == selectorTag,
+                      self.policyCatalog?.profileID == profileID,
+                      self.policyCatalog?.profileRevision == profileRevision,
+                      self.policyCatalog?.sourceFingerprint == sourceFingerprint else { return }
+                self.policyHealthBySelector[selectorID] = Dictionary(
+                    uniqueKeysWithValues: result.members.map { ($0.tag, $0) }
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                guard generation == self.policyHealthGeneration else { return }
+                self.policyHealthBySelector[selectorID] = Dictionary(
+                    uniqueKeysWithValues: availableMembers.map { ($0.tag, .runtimeUnavailable(tag: $0.tag)) }
+                )
+            }
+        }
+    }
+
+    func invalidatePolicyHealth() {
+        policyHealthGeneration &+= 1
+        policyProbeTask?.cancel()
+        policyProbeTask = nil
+        testingPolicySelectorID = nil
+        policyHealthBySelector = [:]
     }
 
     func updateEditor(_ text: String) {
@@ -322,6 +389,7 @@ final class ProfileViewModel {
             isDirty = false
             messageKey = "profile.message.saved"
             refreshMetadataPreservingEditor()
+            invalidatePolicyHealth()
             // Read only the newly persisted valid revision.  Do not reload the
             // editor: formatting and cursor/editor semantics remain unchanged.
             refreshPolicyCatalog()
@@ -490,6 +558,7 @@ final class ProfileViewModel {
     }
 
     private func loadSelectedText() {
+        invalidatePolicyHealth()
         guard let selectedID else {
             editorText = ""
             diagnostic = nil

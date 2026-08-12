@@ -3,6 +3,7 @@
 /// test-target symbol is never instantiated and cannot reach backend/service code.
 @MainActor
 final class BackendLifecycleModel {
+    var status: Int { 0 }
     var isBusy: Bool { false }
     var canRestart: Bool { false }
     func refresh() {}

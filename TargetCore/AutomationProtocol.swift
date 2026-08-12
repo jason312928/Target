@@ -39,6 +39,10 @@ public enum TargetCtlCommandParser {
            values[2] == "--selector", values[4] == "--outbound" {
             return ("policy.select", ["selector": values[3], "outbound": values[5]])
         }
+        if values.count == 4, values[0...1] == ["policy", "probe"],
+           values[2] == "--selector" {
+            return ("policy.probe", ["selector": values[3]])
+        }
         throw AutomationSocketError.unavailable
     }
 }

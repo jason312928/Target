@@ -23,9 +23,12 @@ enum PolicyWorkspaceFilter: String, CaseIterable, Identifiable {
 struct PolicyWorkspacePresentation {
     let catalog: PolicyCatalog?
     let unavailable: Bool
+    var healthBySelector: [Int: [String: RuntimeProxyHealth]] = [:]
 
     var selectors: [PolicySelectorPresentation] {
-        catalog?.selectors.map(PolicySelectorPresentation.init) ?? []
+        catalog?.selectors.map { selector in
+            PolicySelectorPresentation(selector, health: healthBySelector[selector.id] ?? [:])
+        } ?? []
     }
 
     var selectorCount: Int { selectors.count }
@@ -42,9 +45,11 @@ struct PolicyWorkspacePresentation {
 
 struct PolicySelectorPresentation: Identifiable, Equatable {
     let selector: PolicyCatalogSelector
+    let health: [String: RuntimeProxyHealth]
 
-    init(_ selector: PolicyCatalogSelector) {
+    init(_ selector: PolicyCatalogSelector, health: [String: RuntimeProxyHealth] = [:]) {
         self.selector = selector
+        self.health = health
     }
 
     var id: Int { selector.id }
@@ -69,7 +74,14 @@ struct PolicySelectorPresentation: Identifiable, Equatable {
         PolicyRuntimePresentation(selector: selector)
     }
 
-    var members: [PolicyMemberPresentation] { selector.members.map { PolicyMemberPresentation($0, selector: selector) } }
+    var members: [PolicyMemberPresentation] {
+        selector.members.map { member in
+            PolicyMemberPresentation(member, selector: selector, health: health[member.tag])
+        }
+    }
+    var hasHealthResults: Bool {
+        health.values.contains { ![.unknown, .testing].contains($0.state) }
+    }
 
     func matches(query: String) -> Bool {
         let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -91,9 +103,15 @@ struct PolicySelectorPresentation: Identifiable, Equatable {
 struct PolicyMemberPresentation: Identifiable, Equatable {
     let member: PolicyCatalogMember
     let role: PolicyMemberRole
+    let health: PolicyMemberHealthPresentation
 
-    init(_ member: PolicyCatalogMember, selector: PolicyCatalogSelector) {
+    init(
+        _ member: PolicyCatalogMember,
+        selector: PolicyCatalogSelector,
+        health: RuntimeProxyHealth? = nil
+    ) {
         self.member = member
+        self.health = PolicyMemberHealthPresentation(health)
         if selector.effectiveDesired == member.tag {
             role = .desired
         } else if selector.runningSelection == member.tag {
@@ -112,6 +130,33 @@ struct PolicyMemberPresentation: Identifiable, Equatable {
     var statusSymbol: String { member.status.presentationSymbol }
     var statusLevel: TargetStatusLevel { member.status.presentationLevel }
     var isSelectable: Bool { member.status == .available }
+}
+
+struct PolicyMemberHealthPresentation: Equatable {
+    let state: RuntimeProxyHealthState
+    let latencyMilliseconds: Int?
+
+    init(_ health: RuntimeProxyHealth?) {
+        state = health?.state ?? .unknown
+        latencyMilliseconds = health?.latencyMilliseconds
+    }
+
+    var titleKey: String {
+        switch state {
+        case .unknown: "policy.health.not-tested"
+        case .testing: "policy.health.testing"
+        case .reachable: "policy.health.latency"
+        case .unreachable: "policy.health.unavailable"
+        case .runtimeUnavailable: "policy.health.runtime-unavailable"
+        }
+    }
+
+    var level: TargetStatusLevel {
+        switch state {
+        case .unreachable, .runtimeUnavailable: .warning
+        case .unknown, .testing, .reachable: .neutral
+        }
+    }
 }
 
 enum PolicyMemberRole: Equatable {

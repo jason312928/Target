@@ -103,6 +103,94 @@ final class AutomationControlPlaneTests: XCTestCase {
         ]))
     }
 
+    func testTargetCtlPolicyProbeParserRequiresExactSelector() throws {
+        let parsed = try TargetCtlCommandParser.parse([
+            "policy", "probe", "--selector", "group", "--json"
+        ])
+        XCTAssertEqual(parsed.action, "policy.probe")
+        XCTAssertEqual(parsed.arguments, ["selector": "group"])
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse([
+            "policy", "probe", "--json"
+        ]))
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse([
+            "policy", "probe", "--selector", "group", "extra", "--json"
+        ]))
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse([
+            "policy", "probe", "--selector", "group"
+        ]))
+    }
+
+    func testPolicyProbeAutomationUsesSharedOperationAndReturnsDeterministicSafeJSON() async throws {
+        let profileID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let shared = AutomationProbePolicyOperation(result: PolicyLatencyProbeResult(
+            profileID: profileID,
+            profileRevision: 3,
+            sourceFingerprint: "SOURCE-FINGERPRINT-SENTINEL",
+            selector: "Proxy",
+            runtimeAvailable: true,
+            members: [
+                RuntimeProxyHealth.reachable(
+                    tag: "Hong Kong 01",
+                    latencyMilliseconds: 42,
+                    observedAt: Date(timeIntervalSince1970: 1)
+                )!,
+                .unreachable(tag: "Tokyo 02", observedAt: Date(timeIntervalSince1970: 2))
+            ]
+        ))
+        let operations = TargetAutomationOperations(policyOperations: shared, backend: MockBackend())
+        let response = await operations.handle(.init(
+            protocolVersion: 1,
+            action: "policy.probe",
+            arguments: ["selector": "Proxy"]
+        ))
+        let encoded = String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self)
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(shared.probeCount, 1)
+        XCTAssertEqual(shared.lastSelector, "Proxy")
+        XCTAssertEqual(encoded, String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self))
+        XCTAssertTrue(encoded.contains(#""formatVersion":1"#))
+        XCTAssertTrue(encoded.contains(#""latencyMilliseconds":42"#))
+        XCTAssertTrue(encoded.contains(#""state":"unreachable""#))
+        XCTAssertTrue(encoded.contains(#""runtimeAvailable":true"#))
+        XCTAssertFalse(encoded.contains("SOURCE-FINGERPRINT-SENTINEL"))
+        XCTAssertFalse(encoded.contains("127.0.0.1"))
+        XCTAssertFalse(encoded.lowercased().contains("secret"))
+
+        let capabilities = await operations.handle(.init(protocolVersion: 1, action: "capabilities"))
+        XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(capabilities), as: UTF8.self).contains("policy.probe"))
+        let invalid = await operations.handle(.init(
+            protocolVersion: 1,
+            action: "policy.probe",
+            arguments: ["selector": "Proxy", "extra": "x"]
+        ))
+        XCTAssertEqual(invalid.error?.code, "invalid_arguments")
+    }
+
+    func testPolicyProbeAutomationRuntimeMismatchUsesStableSafeState() async {
+        let shared = AutomationProbePolicyOperation(result: PolicyLatencyProbeResult(
+            profileID: UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!,
+            profileRevision: 7,
+            sourceFingerprint: "PRIVATE-SOURCE-FINGERPRINT",
+            selector: "Proxy",
+            runtimeAvailable: false,
+            members: [.runtimeUnavailable(tag: "node")]
+        ))
+        let response = await TargetAutomationOperations(
+            policyOperations: shared,
+            backend: MockBackend()
+        ).handle(.init(
+            protocolVersion: 1,
+            action: "policy.probe",
+            arguments: ["selector": "Proxy"]
+        ))
+        let encoded = String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self)
+        XCTAssertTrue(response.ok)
+        XCTAssertTrue(encoded.contains(#""runtimeAvailable":false"#))
+        XCTAssertTrue(encoded.contains(#""state":"runtimeUnavailable""#))
+        XCTAssertFalse(encoded.contains("PRIVATE-SOURCE-FINGERPRINT"))
+    }
+
     func testPolicyCatalogRedactsExpandedCredentialSentinels() throws {
         let secret = "POLICY-SECRET-SENTINEL"
         let catalog = PolicyCatalogParser.parse(Data("""
@@ -591,6 +679,40 @@ private struct ResetErrorPolicyOperation: TargetPolicyOperating {
     func read() async throws -> PolicyCatalog { throw ProfileStoreError.noValidVersion }
     func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog { throw ProfileStoreError.noValidVersion }
     func reset() async throws -> PolicyResetResult { throw ProfileStoreError.noValidVersion }
+}
+
+private final class AutomationProbePolicyOperation: TargetPolicyOperating, @unchecked Sendable {
+    private let lock = NSLock()
+    private let result: PolicyLatencyProbeResult
+    private var probes = 0
+    private var selector: String?
+
+    init(result: PolicyLatencyProbeResult) { self.result = result }
+
+    var probeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return probes
+    }
+
+    var lastSelector: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return selector
+    }
+
+    func readPersisted() throws -> PolicyCatalog { throw ProfileStoreError.noValidVersion }
+    func read() async throws -> PolicyCatalog { throw ProfileStoreError.noValidVersion }
+    func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog { throw ProfileStoreError.noValidVersion }
+    func reset() async throws -> PolicyResetResult { throw ProfileStoreError.noValidVersion }
+
+    func probeLatency(selectorTag: String) async throws -> PolicyLatencyProbeResult {
+        lock.withLock {
+            probes += 1
+            selector = selectorTag
+        }
+        return result
+    }
 }
 
 private actor AutomationConcurrencyTracker {
