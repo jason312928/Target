@@ -10,6 +10,7 @@ struct TargetApp: App {
     init() {
         let profileStore = ProfileStore()
         let backend = SingBoxBackend(profileStore: profileStore)
+        let runtimeObservationOperations = TargetRuntimeObservationOperations(provider: backend)
         let policyOperations = TargetPolicyOperations(
             profileStore: profileStore,
             runtimeEvidenceProvider: backend
@@ -25,7 +26,8 @@ struct TargetApp: App {
             backend: backend,
             systemProxyClient: systemProxyClient,
             systemProxyOperations: systemProxyOperations,
-            runtimeOperations: runtimeOperations
+            runtimeOperations: runtimeOperations,
+            runtimeObservationOperations: runtimeObservationOperations
         )
         _lifecycle = State(initialValue: lifecycle)
         _profileModel = State(initialValue: ProfileViewModel(
@@ -39,6 +41,7 @@ struct TargetApp: App {
             serviceClient: systemProxyClient,
             systemProxyOperations: systemProxyOperations,
             runtimeOperations: runtimeOperations,
+            runtimeObservationOperations: runtimeObservationOperations,
             engineStatusObserver: { status in
                 await MainActor.run { lifecycle.applyAutomationEngineStatus(status) }
             },

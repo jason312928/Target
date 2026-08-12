@@ -11,7 +11,9 @@ final class BackendLifecycleModel {
     private let systemProxyClient: any SystemProxyClient
     private let systemProxyOperations: any TargetSystemProxyOperating
     private let runtimeOperations: any TargetRuntimeOperating
+    private let runtimeObservationOperations: any TargetRuntimeObserving
     private var operationTask: Task<Void, Never>?
+    private var observationTask: Task<Void, Never>?
     private let hostNetworkSafetyMode: HostNetworkSafetyMode
     private let cancellationReconciliationTimeout = Duration.milliseconds(250)
 
@@ -22,12 +24,14 @@ final class BackendLifecycleModel {
     private(set) var error: BackendError?
     private(set) var pingResult: String?
     private(set) var systemProxyStatus = SystemProxyStatus.disabled
+    private(set) var runtimeObservation = RuntimeObservation.stopped
 
     init(
         backend: any EngineBackend = SingBoxBackend(),
         systemProxyClient: any SystemProxyClient = TargetServiceXPCClient(),
         systemProxyOperations: (any TargetSystemProxyOperating)? = nil,
         runtimeOperations: (any TargetRuntimeOperating)? = nil,
+        runtimeObservationOperations: any TargetRuntimeObserving = UnavailableRuntimeObservationProvider(),
         hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode
     ) {
         self.backend = backend
@@ -43,6 +47,7 @@ final class BackendLifecycleModel {
             systemProxyOperations: resolvedSystemProxyOperations,
             hostNetworkSafetyMode: hostNetworkSafetyMode
         )
+        self.runtimeObservationOperations = runtimeObservationOperations
         self.hostNetworkSafetyMode = hostNetworkSafetyMode
         self.status = .mockDefault
         self.serviceInstallation = TargetServiceRegistration.status
@@ -111,6 +116,7 @@ final class BackendLifecycleModel {
                 try Task.checkCancellation()
                 self?.error = nil
                 self?.lifecycleState = .settled(from: engineStatus)
+                self?.updateObservationLifecycle(for: engineStatus)
                 self?.operationTask = nil
             } catch is CancellationError {
                 await self?.finishCancellation(afterReconciling: backend)
@@ -378,6 +384,8 @@ final class BackendLifecycleModel {
     }
 
     func stopOnApplicationTermination() {
+        observationTask?.cancel()
+        observationTask = nil
         guard status.engineState == .running else { return }
         Task { [runtimeOperations] in
             _ = try? await runtimeOperations.stopEngineSafely()
@@ -389,6 +397,7 @@ final class BackendLifecycleModel {
         status = engineStatus
         lifecycleState = .settled(from: engineStatus)
         error = nil
+        updateObservationLifecycle(for: engineStatus)
     }
 
     func applyAutomationSystemProxyStatus(_ proxyStatus: SystemProxyStatus) {
@@ -444,6 +453,7 @@ final class BackendLifecycleModel {
         error = nil
         lifecycleState = .settled(from: updatedStatus)
         operationTask = nil
+        updateObservationLifecycle(for: updatedStatus)
     }
 
     private func finish(with error: BackendError) {
@@ -472,6 +482,7 @@ final class BackendLifecycleModel {
         }
         error = .operationCancelled
         operationTask = nil
+        updateObservationLifecycle(for: status)
     }
 
     private func finishStopFailure(afterReconciling backend: any EngineBackend, error: BackendError) async {
@@ -486,6 +497,7 @@ final class BackendLifecycleModel {
         }
         self.error = error
         operationTask = nil
+        updateObservationLifecycle(for: status)
     }
 
     private func reconciledStatus(from backend: any EngineBackend) async -> BackendStatus? {
@@ -553,5 +565,30 @@ final class BackendLifecycleModel {
     private func finishUnknownSystemProxyFailure() {
         systemProxyStatus = systemProxyStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
         operationTask = nil
+    }
+
+    private func updateObservationLifecycle(for status: BackendStatus) {
+        guard status.engineState == .running else {
+            observationTask?.cancel()
+            observationTask = nil
+            runtimeObservation = .stopped
+            return
+        }
+        guard observationTask == nil else { return }
+        runtimeObservation = .loading
+        let operations = runtimeObservationOperations
+        observationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let observation = await operations.read()
+                guard !Task.isCancelled else { return }
+                self?.runtimeObservation = observation
+                if observation.state == .stopped {
+                    self?.observationTask = nil
+                    return
+                }
+                do { try await Task.sleep(for: .seconds(1)) }
+                catch { return }
+            }
+        }
     }
 }

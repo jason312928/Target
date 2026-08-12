@@ -40,6 +40,7 @@ struct DashboardView: View {
                     serviceCard
                 }
             }
+            observationCard
             TargetSectionTitle("dashboard.section.network", systemImage: "lock")
             safetySection
         }
@@ -171,6 +172,25 @@ struct DashboardView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(minWidth: 280, maxWidth: .infinity)
+    }
+
+    private var observationCard: some View {
+        let observation = RuntimeObservationPresentation(observation: lifecycle.runtimeObservation)
+        return TargetCard {
+            VStack(alignment: .leading, spacing: 12) {
+                TargetSectionTitle("dashboard.section.activity", systemImage: "arrow.up.arrow.down")
+                TargetStatusRow(labelKey: "dashboard.observation.status", valueKey: observation.stateKey, value: nil)
+                if lifecycle.runtimeObservation.state == .available {
+                    TargetStatusRow(labelKey: "dashboard.observation.upload-rate", valueKey: nil, value: observation.uploadRate)
+                    TargetStatusRow(labelKey: "dashboard.observation.download-rate", valueKey: nil, value: observation.downloadRate)
+                    TargetStatusRow(labelKey: "dashboard.observation.uploaded", valueKey: nil, value: observation.uploadedTotal)
+                    TargetStatusRow(labelKey: "dashboard.observation.downloaded", valueKey: nil, value: observation.downloadedTotal)
+                    TargetStatusRow(labelKey: "dashboard.observation.connections", valueKey: nil, value: observation.activeConnections)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .contain)
+        }
     }
 
     @ViewBuilder

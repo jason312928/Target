@@ -32,7 +32,7 @@ final class EngineLifecycleTests: XCTestCase {
         }
     }
 
-    func testPolicySelectionWhileRunningWaitsForExplicitRestartAndThenConverges() async throws {
+    func testPolicySelectionHotSwitchesVerifiedRunningRuntime() async throws {
         let fixture = try EngineLifecycleFixture(mode: .listening)
         do {
             let source = #"{"inbounds":[{"type":"mixed","tag":"local","listen":"127.0.0.1","listen_port":0}],"outbounds":[{"type":"selector","tag":"group","outbounds":["first","second"],"default":"first"},{"type":"direct","tag":"first"},{"type":"block","tag":"second"}],"route":{"final":"group"}}"#
@@ -51,10 +51,11 @@ final class EngineLifecycleTests: XCTestCase {
             catalog = try await policy.select(selectorTag: "group", outboundTag: "second")
             XCTAssertEqual(fixture.ownership.currentRecord(), originalRecord)
             XCTAssertEqual(catalog.selectors[0].effectiveDesired, "second")
-            XCTAssertEqual(catalog.selectors[0].runningSelection, "first")
-            XCTAssertTrue(catalog.selectors[0].restartRequired)
+            XCTAssertEqual(catalog.selectors[0].runningSelection, "second")
+            XCTAssertEqual(catalog.selectors[0].runtimeConvergence, .converged)
+            XCTAssertFalse(catalog.selectors[0].restartRequired)
             let mismatchStatus = try await fixture.backend.queryStatus()
-            XCTAssertTrue(mismatchStatus.restartRequired)
+            XCTAssertFalse(mismatchStatus.restartRequired)
 
             _ = try await fixture.backend.stopEngine()
             _ = try await fixture.backend.startEngine()
@@ -517,6 +518,7 @@ private final class EngineLifecycleFixture: @unchecked Sendable {
     let store: ProfileStore
     let profile: Profile
     let backend: SingBoxBackend
+    let runtimeControl = LifecycleRuntimeControlClient()
 
     init(
         mode: Mode,
@@ -553,7 +555,8 @@ private final class EngineLifecycleFixture: @unchecked Sendable {
             profileStore: store,
             engineDirectory: engineDirectory,
             executableURL: executable,
-            readinessTimeout: readinessTimeout
+            readinessTimeout: readinessTimeout,
+            runtimeControlClient: runtimeControl
         )
     }
 
@@ -620,6 +623,19 @@ private final class EngineLifecycleFixture: @unchecked Sendable {
     esac
     exit 1
     """
+}
+
+private actor LifecycleRuntimeControlClient: RuntimeControlClient {
+    private var selected = "first"
+    func selectors(using descriptor: RuntimeControlDescriptor) async throws -> [String: RuntimeSelectorState] {
+        ["group": RuntimeSelectorState(tag: "group", selected: selected, members: ["first", "second"])]
+    }
+    func select(selector: String, outbound: String, using descriptor: RuntimeControlDescriptor) async throws {
+        selected = outbound
+    }
+    func connectionTotals(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionTotals {
+        RuntimeConnectionTotals(uploadTotalBytes: 0, downloadTotalBytes: 0, activeConnectionCount: 0)
+    }
 }
 
 private struct LifecycleConfigurationChecker: SingBoxConfigurationChecking {

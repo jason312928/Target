@@ -2,6 +2,18 @@ import XCTest
 @testable import Target
 
 final class DashboardPresentationTests: XCTestCase {
+    func testRuntimeObservationPresentationFormatsBoundedLiveMetrics() {
+        let presentation = RuntimeObservationPresentation(observation: .init(
+            state: .available, uploadTotalBytes: 1_536, downloadTotalBytes: 10_240,
+            uploadBytesPerSecond: 512, downloadBytesPerSecond: 2_048,
+            activeConnectionCount: 3, observedAt: Date()
+        ))
+        XCTAssertEqual(presentation.stateKey, "dashboard.observation.state.available")
+        XCTAssertEqual(presentation.uploadRate, "512 B/s")
+        XCTAssertEqual(presentation.downloadRate, "2.0 KB/s")
+        XCTAssertEqual(presentation.uploadedTotal, "1.5 KB")
+        XCTAssertEqual(presentation.activeConnections, "3")
+    }
     private func makePresentation(
         status: BackendStatus = .mockDefault,
         lifecycle: BackendLifecycleState = .stopped,

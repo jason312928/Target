@@ -13,6 +13,7 @@ actor TargetAutomationOperations {
     private let serviceClient: any SystemProxyClient
     private let systemProxyOperations: any TargetSystemProxyOperating
     private let runtimeOperations: any TargetRuntimeOperating
+    private let runtimeObservationOperations: any TargetRuntimeObserving
     private let hostNetworkSafetyMode: HostNetworkSafetyMode
     private let engineStatusObserver: (@Sendable (BackendStatus) async -> Void)?
     private let systemProxyStatusObserver: (@Sendable (SystemProxyStatus) async -> Void)?
@@ -24,6 +25,7 @@ actor TargetAutomationOperations {
         serviceClient: any SystemProxyClient = TargetServiceXPCClient(),
         systemProxyOperations: (any TargetSystemProxyOperating)? = nil,
         runtimeOperations: (any TargetRuntimeOperating)? = nil,
+        runtimeObservationOperations: any TargetRuntimeObserving = UnavailableRuntimeObservationProvider(),
         hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode,
         engineStatusObserver: (@Sendable (BackendStatus) async -> Void)? = nil,
         systemProxyStatusObserver: (@Sendable (SystemProxyStatus) async -> Void)? = nil
@@ -39,6 +41,7 @@ actor TargetAutomationOperations {
             systemProxyClient: serviceClient,
             systemProxyOperations: resolvedSystemProxyOperations
         )
+        self.runtimeObservationOperations = runtimeObservationOperations
         self.hostNetworkSafetyMode = hostNetworkSafetyMode
         self.engineStatusObserver = engineStatusObserver
         self.systemProxyStatusObserver = systemProxyStatusObserver
@@ -55,6 +58,7 @@ actor TargetAutomationOperations {
             switch request.action {
             case "capabilities": return capabilities()
             case "status": return await consolidatedStatus()
+            case "runtime.status": return await runtimeStatus()
             case "profile.import": return try profileImport(request.arguments)
             case "profile.list": return try profileList()
             case "policy.list": return try await policyList()
@@ -224,6 +228,11 @@ actor TargetAutomationOperations {
         do { return engineResult(try await backend.queryStatus()) }
         catch let error as BackendError { return backendFailure(error) }
         catch { return .failure(code: "engine_unavailable", message: "Engine status is unavailable.") }
+    }
+
+    private func runtimeStatus() async -> AutomationResponse {
+        let observation = await runtimeObservationOperations.read()
+        return .success(observation.automationJSON())
     }
 
     private func engineStart() async throws -> AutomationResponse {
@@ -413,7 +422,7 @@ actor TargetAutomationOperations {
     }
 
     private static let commands = [
-        "capabilities", "status", "profile.import", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.reset",
+        "capabilities", "status", "runtime.status", "profile.import", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.reset",
         "engine.status", "engine.start", "engine.stop", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
     ]

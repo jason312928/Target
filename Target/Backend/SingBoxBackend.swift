@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding {
+actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimeObservationProviding {
     static let applicationSupportDirectoryName = "Target"
     static let engineDirectoryName = "sing-box"
 
@@ -15,6 +15,7 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding {
     private let readinessTimeout: Duration
     private let executableURL: URL
     private let logURL: URL
+    private let runtimeControlClient: any RuntimeControlClient
 
     init(
         portProbe: any LocalEnginePortProbing = LocalTCPPortProbe(),
@@ -23,7 +24,8 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding {
         profileStore: ProfileStore = ProfileStore(),
         engineDirectory: URL? = nil,
         executableURL: URL? = nil,
-        readinessTimeout: Duration = .seconds(3)
+        readinessTimeout: Duration = .seconds(3),
+        runtimeControlClient: any RuntimeControlClient = SingBoxRuntimeControlClient()
     ) {
         let defaultDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: Self.applicationSupportDirectoryName, directoryHint: .isDirectory)
@@ -37,6 +39,7 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding {
         self.readinessTimeout = readinessTimeout
         self.executableURL = executableURL ?? resolvedDirectory.appending(path: "bin/sing-box")
         self.logURL = resolvedDirectory.appending(path: "logs/sing-box.log")
+        self.runtimeControlClient = runtimeControlClient
     }
 
     func queryStatus() async throws -> BackendStatus {
@@ -73,31 +76,30 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding {
             verifiedRecord = nil
         }
         let selected = try? profileStore.selectedValidVersion()
-        let restartRequired = verifiedRecord.map { record in
-            let profileRequiresRestart = EngineRuntimeProfileState.requiresRestart(record: record, selected: selected)
-            guard !profileRequiresRestart, let selected else { return profileRequiresRestart }
-            let desired = PolicyCatalogParser.parse(
-                selected.data,
-                profileID: selected.profile.id,
-                profileRevision: selected.revision,
-                overrides: selected.profile.policyOverrides
-            )
-            guard desired.selectors.contains(where: \.isMutable) else { return false }
-            guard let runtimeData = runtimeConfigurations.readVerified(
-                id: record.runtimeConfigurationID,
-                fingerprint: record.configurationFingerprint
-            ) else { return true }
-            let reconciled = PolicyCatalogReconciler.reconcile(
-                desired,
-                evidence: .running(
-                    profileID: record.profileID,
-                    profileRevision: record.profileRevision,
-                    sourceFingerprint: record.sourceConfigurationFingerprint,
-                    configuration: runtimeData
+        let restartRequired: Bool
+        if let verifiedRecord, let selected {
+            let profileRequiresRestart = EngineRuntimeProfileState.requiresRestart(record: verifiedRecord, selected: selected)
+            if profileRequiresRestart { restartRequired = true }
+            else {
+                let desired = PolicyCatalogParser.parse(
+                    selected.data,
+                    profileID: selected.profile.id,
+                    profileRevision: selected.revision,
+                    overrides: selected.profile.policyOverrides
                 )
-            )
-            return reconciled.selectors.contains(where: \.restartRequired)
-        } ?? false
+                if desired.selectors.contains(where: \.isMutable) {
+                    let evidence = await currentPolicyRuntimeEvidence()
+                    restartRequired = PolicyCatalogReconciler.reconcile(
+                        desired,
+                        evidence: evidence
+                    ).selectors.contains(where: \.restartRequired)
+                } else {
+                    restartRequired = false
+                }
+            }
+        } else {
+            restartRequired = false
+        }
         return BackendStatus(
             serviceInstallation: .notRegistered,
             engineState: verifiedRecord == nil ? .stopped : .running,
@@ -112,31 +114,60 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding {
     }
 
     func currentPolicyRuntimeEvidence() async -> PolicyRuntimeEvidence {
-        let disposition: EngineRuntimeRecordDisposition
-        do { disposition = try await runtimeOwnership.recordDisposition() }
-        catch { return .unavailable }
-        switch disposition {
-        case .noRecord, .processExited:
-            return .stopped
-        case .liveUnproven:
+        guard let verified = await verifiedRuntimeControlMaterial() else {
+            let disposition = try? await runtimeOwnership.recordDisposition()
+            if case .noRecord? = disposition { return .stopped }
+            if case .processExited? = disposition { return .stopped }
             return .unavailable
-        case .ownedRunning(let record):
-            guard let version = try? profileStore.validVersion(
-                for: record.profileID,
-                revision: record.profileRevision
-            ),
-            TargetConfigurationFingerprint.sha256(version.data) == record.sourceConfigurationFingerprint,
-            let data = runtimeConfigurations.readVerified(
+        }
+        let selectors = try? await runtimeControlClient.selectors(using: verified.descriptor)
+        return .running(
+            profileID: verified.record.profileID,
+            profileRevision: verified.record.profileRevision,
+            sourceFingerprint: verified.record.sourceConfigurationFingerprint,
+            configuration: verified.configuration,
+            liveSelections: selectors?.mapValues(\.selected)
+        )
+    }
+
+    func verifiedRuntimeControlDescriptor() async -> RuntimeControlDescriptor? {
+        await verifiedRuntimeControlMaterial()?.descriptor
+    }
+
+    func applyLivePolicySelection(selectorTag: String, outboundTag: String) async -> Bool {
+        guard let descriptor = await verifiedRuntimeControlDescriptor() else { return false }
+        do {
+            try await runtimeControlClient.select(selector: selectorTag, outbound: outboundTag, using: descriptor)
+            let selectors = try await runtimeControlClient.selectors(using: descriptor)
+            return selectors[selectorTag]?.selected == outboundTag
+        } catch {
+            return false
+        }
+    }
+
+    func currentRuntimeConnectionTotals() async -> RuntimeConnectionTotals? {
+        guard let descriptor = await verifiedRuntimeControlDescriptor() else { return nil }
+        return try? await runtimeControlClient.connectionTotals(using: descriptor)
+    }
+
+    func runtimeObservationAvailability() async -> RuntimeObservationState {
+        if await verifiedRuntimeControlDescriptor() != nil { return .loading }
+        let disposition = try? await runtimeOwnership.recordDisposition()
+        if case .noRecord? = disposition { return .stopped }
+        if case .processExited? = disposition { return .stopped }
+        return .unavailable
+    }
+
+    private func verifiedRuntimeControlMaterial() async -> (record: EngineRuntimeRecord, configuration: Data, descriptor: RuntimeControlDescriptor)? {
+        guard case let .ownedRunning(record) = try? await runtimeOwnership.recordDisposition(),
+              let version = try? profileStore.validVersion(for: record.profileID, revision: record.profileRevision),
+              TargetConfigurationFingerprint.sha256(version.data) == record.sourceConfigurationFingerprint,
+              let configuration = runtimeConfigurations.readVerified(
                 id: record.runtimeConfigurationID,
                 fingerprint: record.configurationFingerprint
-            ) else { return .unavailable }
-            return .running(
-                profileID: record.profileID,
-                profileRevision: record.profileRevision,
-                sourceFingerprint: record.sourceConfigurationFingerprint,
-                configuration: data
-            )
-        }
+              ),
+              let descriptor = RuntimeControlDescriptorParser.parse(configuration) else { return nil }
+        return (record, configuration, descriptor)
     }
 
     func installEngine() async throws -> BackendStatus {
@@ -259,7 +290,9 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding {
         } catch let error as ProfileRuntimeConfigurationError {
             switch error {
             case .unsafeConfiguration: throw BackendError.profileConfigurationUnsafe
-            case .invalidJSON, .noLoopbackMixedInbound, .invalidPort: throw BackendError.profileConfigurationInvalid
+            case .invalidJSON, .noLoopbackMixedInbound, .invalidPort,
+                 .secretGenerationFailed, .controllerPortUnavailable:
+                throw BackendError.profileConfigurationInvalid
             }
         } catch {
             throw BackendError.profileConfigurationInvalid

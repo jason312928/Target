@@ -225,7 +225,8 @@ final class AutomationControlPlaneTests: XCTestCase {
             profileID: versionA.profile.id,
             profileRevision: versionA.revision,
             sourceFingerprint: runtimeA.sourceFingerprint,
-            configuration: runtimeA.data
+            configuration: runtimeA.data,
+            liveSelections: ["group": "first"]
         ))
         let runtimeBeforeMutation = runtimeA.data
 
@@ -243,7 +244,8 @@ final class AutomationControlPlaneTests: XCTestCase {
             profileID: versionB.profile.id,
             profileRevision: versionB.revision,
             sourceFingerprint: runtimeB.sourceFingerprint,
-            configuration: runtimeB.data
+            configuration: runtimeB.data,
+            liveSelections: ["group": "second"]
         ))
         let converged = try await policy.read()
         XCTAssertEqual(converged.selectors[0].runningSelection, "second")
@@ -603,7 +605,7 @@ private actor MutablePolicyRuntimeEvidence: PolicyRuntimeEvidenceProviding {
     func set(_ value: PolicyRuntimeEvidence) { self.value = value }
     func currentPolicyRuntimeEvidence() async -> PolicyRuntimeEvidence { value }
     var configuration: Data? {
-        guard case .running(_, _, _, let configuration) = value else { return nil }
+        guard case .running(_, _, _, let configuration, _) = value else { return nil }
         return configuration
     }
 }

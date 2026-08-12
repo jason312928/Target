@@ -11,6 +11,7 @@ public enum TargetCtlCommandParser {
         switch values {
         case ["capabilities"]: return ("capabilities", [:])
         case ["status"]: return ("status", [:])
+        case ["runtime", "status"]: return ("runtime.status", [:])
         case ["profile", "list"]: return ("profile.list", [:])
         case ["policy", "list"]: return ("policy.list", [:])
         case ["policy", "reset"]: return ("policy.reset", [:])
@@ -164,6 +165,7 @@ public enum JSONValue: Codable, Equatable, Sendable {
     case array([JSONValue])
     case string(String)
     case integer(Int)
+    case number(Double)
     case boolean(Bool)
     case null
 
@@ -174,6 +176,7 @@ public enum JSONValue: Codable, Equatable, Sendable {
         else if let value = try? container.decode([JSONValue].self) { self = .array(value) }
         else if let value = try? container.decode(Bool.self) { self = .boolean(value) }
         else if let value = try? container.decode(Int.self) { self = .integer(value) }
+        else if let value = try? container.decode(Double.self), value.isFinite { self = .number(value) }
         else if let value = try? container.decode(String.self) { self = .string(value) }
         else { throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported JSON value") }
     }
@@ -185,6 +188,7 @@ public enum JSONValue: Codable, Equatable, Sendable {
         case .array(let value): try container.encode(value)
         case .string(let value): try container.encode(value)
         case .integer(let value): try container.encode(value)
+        case .number(let value): try container.encode(value)
         case .boolean(let value): try container.encode(value)
         case .null: try container.encodeNil()
         }

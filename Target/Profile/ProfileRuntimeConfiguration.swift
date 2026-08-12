@@ -1,5 +1,37 @@
 import Darwin
 import Foundation
+import Security
+
+/// Ephemeral, Target-owned access material for a single engine launch. It is
+/// written only into the 0600 runtime configuration and must never cross a UI,
+/// automation, logging, or persistent-profile boundary.
+struct RuntimeControlDescriptor: Sendable, Equatable {
+    static let host = "127.0.0.1"
+
+    let host: String
+    let port: UInt16
+    let secret: String
+
+    var endpoint: String { "\(host):\(port)" }
+}
+
+protocol RuntimeControlSecretGenerating: Sendable {
+    func generate() throws -> String
+}
+
+struct SecureRuntimeControlSecretGenerator: RuntimeControlSecretGenerating {
+    func generate() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw ProfileRuntimeConfigurationError.secretGenerationFailed
+        }
+        // Base64URL has no control characters and is safe for a JSON string.
+        return Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
 
 struct PreparedProfileConfiguration: Sendable {
     let profileID: UUID
@@ -7,6 +39,7 @@ struct PreparedProfileConfiguration: Sendable {
     let sourceFingerprint: String
     let configurationFingerprint: String
     let primaryPort: UInt16
+    let runtimeControl: RuntimeControlDescriptor
     let data: Data
 }
 
@@ -15,6 +48,8 @@ enum ProfileRuntimeConfigurationError: Error, Equatable {
     case unsafeConfiguration
     case noLoopbackMixedInbound
     case invalidPort
+    case secretGenerationFailed
+    case controllerPortUnavailable
 }
 
 /// Produces an ephemeral launch document. The Profile's source JSON is never
@@ -22,9 +57,17 @@ enum ProfileRuntimeConfigurationError: Error, Equatable {
 /// in this copy are replaced.
 struct ProfileRuntimeConfigurationPreparer {
     private let portSelector: any LocalEnginePortSelecting
+    private let controllerPortSelector: any LocalEnginePortSelecting
+    private let secretGenerator: any RuntimeControlSecretGenerating
 
-    init(portSelector: any LocalEnginePortSelecting = DynamicHighLocalPortSelector()) {
+    init(
+        portSelector: any LocalEnginePortSelecting = DynamicHighLocalPortSelector(),
+        controllerPortSelector: any LocalEnginePortSelecting = DynamicHighLocalPortSelector(),
+        secretGenerator: any RuntimeControlSecretGenerating = SecureRuntimeControlSecretGenerator()
+    ) {
         self.portSelector = portSelector
+        self.controllerPortSelector = controllerPortSelector
+        self.secretGenerator = secretGenerator
     }
 
     func prepare(_ version: ProfileConfigurationVersion) throws -> PreparedProfileConfiguration {
@@ -64,6 +107,13 @@ struct ProfileRuntimeConfigurationPreparer {
         }
         guard let primaryPort else { throw ProfileRuntimeConfigurationError.noLoopbackMixedInbound }
         root["inbounds"] = inbounds
+        let controllerPort = try selectControllerPort(excluding: selectedPorts)
+        let runtimeControl = RuntimeControlDescriptor(
+            host: RuntimeControlDescriptor.host,
+            port: controllerPort,
+            secret: try secretGenerator.generate()
+        )
+        root = applyRuntimeControl(to: root, descriptor: runtimeControl)
         let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
         return PreparedProfileConfiguration(
             profileID: version.profile.id,
@@ -71,6 +121,7 @@ struct ProfileRuntimeConfigurationPreparer {
             sourceFingerprint: TargetConfigurationFingerprint.sha256(version.data),
             configurationFingerprint: TargetConfigurationFingerprint.sha256(data),
             primaryPort: primaryPort,
+            runtimeControl: runtimeControl,
             data: data
         )
     }
@@ -104,6 +155,39 @@ struct ProfileRuntimeConfigurationPreparer {
         }
         var result = root
         result["outbounds"] = outbounds
+        return result
+    }
+
+    private func selectControllerPort(excluding selectedPorts: Set<UInt16>) throws -> UInt16 {
+        // A selector may be backed by a deterministic fixture that repeatedly
+        // yields the same port. Bound the retry rather than spinning forever.
+        for _ in 0..<64 {
+            let port = try controllerPortSelector.selectAvailablePort()
+            if !selectedPorts.contains(port) { return port }
+        }
+        throw ProfileRuntimeConfigurationError.controllerPortUnavailable
+    }
+
+    private func applyRuntimeControl(
+        to root: [String: Any],
+        descriptor: RuntimeControlDescriptor
+    ) -> [String: Any] {
+        var result = root
+        var experimental = result["experimental"] as? [String: Any] ?? [:]
+        var clashAPI = experimental["clash_api"] as? [String: Any] ?? [:]
+
+        // Target owns all fields that could expose its authenticated local
+        // adapter. Keep unrelated experimental configuration intact.
+        clashAPI["external_controller"] = descriptor.endpoint
+        clashAPI["secret"] = descriptor.secret
+        for key in [
+            "external_ui", "external_ui_download_url", "external_ui_download_detour",
+            "access_control_allow_origin", "access_control_allow_private_network"
+        ] {
+            clashAPI.removeValue(forKey: key)
+        }
+        experimental["clash_api"] = clashAPI
+        result["experimental"] = experimental
         return result
     }
 }

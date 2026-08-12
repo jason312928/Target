@@ -1,5 +1,36 @@
 import Foundation
 
+struct RuntimeObservationPresentation: Equatable {
+    let stateKey: String
+    let uploadRate: String?
+    let downloadRate: String?
+    let uploadedTotal: String?
+    let downloadedTotal: String?
+    let activeConnections: String?
+
+    init(observation: RuntimeObservation) {
+        stateKey = "dashboard.observation.state.\(observation.state.rawValue)"
+        uploadRate = observation.uploadBytesPerSecond.map { Self.format(bytes: $0, suffix: "/s") }
+        downloadRate = observation.downloadBytesPerSecond.map { Self.format(bytes: $0, suffix: "/s") }
+        uploadedTotal = observation.uploadTotalBytes.map { Self.format(bytes: Double($0), suffix: "") }
+        downloadedTotal = observation.downloadTotalBytes.map { Self.format(bytes: Double($0), suffix: "") }
+        activeConnections = observation.activeConnectionCount.map(String.init)
+    }
+
+    private static func format(bytes: Double, suffix: String) -> String {
+        let safe = max(0, bytes)
+        let units = ["B", "KB", "MB", "GB", "TB"]
+        var value = safe
+        var index = 0
+        while value >= 1024, index < units.count - 1 {
+            value /= 1024
+            index += 1
+        }
+        let digits = index == 0 ? 0 : (value < 10 ? 1 : 0)
+        return String(format: "%.*f %@%@", digits, value, units[index], suffix)
+    }
+}
+
 enum DashboardPrimaryAction: Equatable {
     case installEngine
     case start

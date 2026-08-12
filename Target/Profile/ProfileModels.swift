@@ -258,7 +258,8 @@ enum PolicyRuntimeEvidence: Equatable, Sendable {
         profileID: UUID,
         profileRevision: Int,
         sourceFingerprint: String,
-        configuration: Data
+        configuration: Data,
+        liveSelections: [String: String]? = nil
     )
     case unavailable
 }
@@ -400,18 +401,22 @@ struct PolicyCatalogOperation: @unchecked Sendable {
 enum PolicyCatalogReconciler {
     static func reconcile(_ desired: PolicyCatalog, evidence: PolicyRuntimeEvidence) -> PolicyCatalog {
         let runningCatalog: PolicyCatalog?
+        let liveSelections: [String: String]?
         let evidenceMatchesSelected: Bool
         switch evidence {
         case .stopped:
             runningCatalog = nil
+            liveSelections = nil
             evidenceMatchesSelected = false
         case .unavailable:
             runningCatalog = nil
+            liveSelections = nil
             evidenceMatchesSelected = false
-        case .running(let profileID, let revision, let sourceFingerprint, let configuration):
+        case .running(let profileID, let revision, let sourceFingerprint, let configuration, let selections):
             evidenceMatchesSelected = desired.profileID == profileID
                 && desired.profileRevision == revision
                 && desired.sourceFingerprint == sourceFingerprint
+            liveSelections = selections
             runningCatalog = PolicyCatalogParser.parse(
                 configuration,
                 profileID: profileID,
@@ -440,9 +445,12 @@ enum PolicyCatalogReconciler {
                     restartRequired = selector.isMutable
                 case .running:
                     if evidenceMatchesSelected,
+                       let liveSelections,
                        let tag = selector.tag,
-                       let runningSelector = runningCatalog?.selectors.first(where: { $0.tag == tag && $0.isMutable }) {
-                        running = runningSelector.effectiveDesired
+                       let runningSelection = liveSelections[tag],
+                       let runningSelector = runningCatalog?.selectors.first(where: { $0.tag == tag && $0.isMutable }),
+                       runningSelector.members.contains(where: { $0.tag == runningSelection && $0.status == .available }) {
+                        running = runningSelection
                         restartRequired = running != selector.effectiveDesired
                         convergence = restartRequired ? .restartRequired : .converged
                     } else {
@@ -501,6 +509,9 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
 
     func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog {
         let committed = try commitSelection(selectorTag: selectorTag, outboundTag: outboundTag)
+        if let runtimeController = runtimeEvidenceProvider as? any RuntimePolicyApplying {
+            _ = await runtimeController.applyLivePolicySelection(selectorTag: selectorTag, outboundTag: outboundTag)
+        }
         return PolicyCatalogReconciler.reconcile(
             committed,
             evidence: await runtimeEvidenceProvider.currentPolicyRuntimeEvidence()
@@ -509,6 +520,12 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
 
     func reset() async throws -> PolicyResetResult {
         let committed = try commitReset()
+        if let runtimeController = runtimeEvidenceProvider as? any RuntimePolicyApplying {
+            for selector in committed.catalog.selectors where selector.isMutable {
+                guard let tag = selector.tag, let desired = selector.effectiveDesired else { continue }
+                _ = await runtimeController.applyLivePolicySelection(selectorTag: tag, outboundTag: desired)
+            }
+        }
         let reconciled = PolicyCatalogReconciler.reconcile(
             committed.catalog,
             evidence: await runtimeEvidenceProvider.currentPolicyRuntimeEvidence()
