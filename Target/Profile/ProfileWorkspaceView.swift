@@ -69,10 +69,8 @@ struct ProfileWorkspaceView: View {
         }
         .task { model.refreshPolicyState() }
         .onChange(of: model.readinessChangeGeneration) { _, _ in lifecycle?.refresh() }
-        .onChange(of: lifecycle?.isBusy) { wasBusy, isBusy in
-            if wasBusy == true, isBusy == false {
-                model.refreshPolicyState()
-            }
+        .onChange(of: lifecycle?.runtimeChangeGeneration) { _, _ in
+            model.refreshPolicyState()
         }
         .alert("profile.delete.title", isPresented: Binding(
             get: { deleteTarget != nil },

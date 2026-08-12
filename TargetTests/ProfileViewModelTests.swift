@@ -191,6 +191,33 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertTrue(model.policyHealthBySelector.isEmpty)
     }
 
+    @MainActor
+    func testRuntimeChangeInvalidatesHealthAndRejectsInFlightLatencyResult() async throws {
+        let store = try makeStore()
+        let profile = try store.create(name: "Runtime")
+        try store.save(
+            json: policyConfiguration(configuredDefault: "node", members: ["node"]),
+            for: profile.id
+        )
+        let gate = PolicyProbeGate()
+        let operations = GatedProbePolicyOperations(store: store, gate: gate)
+        let model = ProfileViewModel(store: store, policyOperations: operations)
+        let selector = try XCTUnwrap(model.policyCatalog?.selectors.first)
+
+        model.probePolicyLatency(selectorID: selector.id, selectorTag: "group")
+        await gate.waitUntilStarted()
+        XCTAssertEqual(model.testingPolicySelectorID, selector.id)
+        XCTAssertEqual(model.policyHealthBySelector[selector.id]?["node"]?.state, .testing)
+
+        model.refreshPolicyState()
+        XCTAssertNil(model.testingPolicySelectorID)
+        XCTAssertTrue(model.policyHealthBySelector.isEmpty)
+
+        await gate.release()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertTrue(model.policyHealthBySelector.isEmpty)
+    }
+
     private func selector(runtime: PolicyRuntimeConvergenceState) -> PolicyCatalogSelector {
         PolicyCatalogSelector(
             identity: 0,

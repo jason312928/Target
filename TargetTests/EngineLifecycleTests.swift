@@ -6,6 +6,53 @@ import XCTest
 
 @MainActor
 final class EngineLifecycleTests: XCTestCase {
+    func testAutomationRuntimeStatusChangesIncrementGenerationWithoutProxyOnlyChanges() {
+        let model = BackendLifecycleModel(backend: MockBackend())
+        let profileA = UUID()
+        let profileB = UUID()
+        let stopped = BackendStatus(
+            serviceInstallation: .enabled,
+            engineState: .stopped,
+            engineInstallation: .installed,
+            hasSelectedValidProfile: true
+        )
+        let runningA = BackendStatus(
+            serviceInstallation: .enabled,
+            engineState: .running,
+            engineInstallation: .installed,
+            hasSelectedValidProfile: true,
+            enginePort: 12_345,
+            runningProfileID: profileA,
+            runningProfileRevision: 1
+        )
+
+        XCTAssertEqual(model.runtimeChangeGeneration, 0)
+        model.applyAutomationEngineStatus(runningA)
+        XCTAssertEqual(model.runtimeChangeGeneration, 1)
+        model.applyAutomationEngineStatus(runningA)
+        XCTAssertEqual(model.runtimeChangeGeneration, 1)
+
+        var serviceOnlyChange = runningA
+        serviceOnlyChange.serviceInstallation = .notRegistered
+        serviceOnlyChange.restartRequired = true
+        model.applyAutomationEngineStatus(serviceOnlyChange)
+        XCTAssertEqual(model.runtimeChangeGeneration, 1)
+
+        var replacement = runningA
+        replacement.runningProfileID = profileB
+        replacement.runningProfileRevision = 2
+        replacement.enginePort = 12_346
+        model.applyAutomationEngineStatus(replacement)
+        XCTAssertEqual(model.runtimeChangeGeneration, 2)
+
+        model.applyAutomationEngineStatus(stopped)
+        XCTAssertEqual(model.runtimeChangeGeneration, 3)
+        model.applyAutomationEngineStatus(stopped)
+        XCTAssertEqual(model.runtimeChangeGeneration, 3)
+        model.applyAutomationEngineStatus(runningA)
+        XCTAssertEqual(model.runtimeChangeGeneration, 4)
+    }
+
     func testUnreadableRuntimePolicyEvidenceDoesNotAddRestartForProfileWithoutSelectors() async throws {
         let fixture = try EngineLifecycleFixture(mode: .listening)
         do {

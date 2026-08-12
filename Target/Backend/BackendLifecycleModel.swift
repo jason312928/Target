@@ -25,6 +25,9 @@ final class BackendLifecycleModel {
     private(set) var pingResult: String?
     private(set) var systemProxyStatus = SystemProxyStatus.disabled
     private(set) var runtimeObservation = RuntimeObservation.stopped
+    /// Changes only when the non-sensitive identity of the effective engine runtime changes.
+    /// Profiles use this to discard transient observations made against a prior runtime.
+    private(set) var runtimeChangeGeneration = 0
 
     init(
         backend: any EngineBackend = SingBoxBackend(),
@@ -110,7 +113,7 @@ final class BackendLifecycleModel {
             do {
                 let engineStatus = try await backend.queryStatus()
                 try Task.checkCancellation()
-                self?.status = engineStatus
+                self?.applyAuthoritativeEngineStatus(engineStatus)
                 await self?.refreshServiceStatus()
                 await self?.loadSystemProxyStatus()
                 try Task.checkCancellation()
@@ -394,7 +397,7 @@ final class BackendLifecycleModel {
 
     func applyAutomationEngineStatus(_ engineStatus: BackendStatus) {
         guard !isBusy else { return }
-        status = engineStatus
+        applyAuthoritativeEngineStatus(engineStatus)
         lifecycleState = .settled(from: engineStatus)
         error = nil
         updateObservationLifecycle(for: engineStatus)
@@ -449,7 +452,7 @@ final class BackendLifecycleModel {
     }
 
     private func finish(with updatedStatus: BackendStatus) {
-        status = updatedStatus
+        applyAuthoritativeEngineStatus(updatedStatus)
         error = nil
         lifecycleState = .settled(from: updatedStatus)
         operationTask = nil
@@ -472,7 +475,7 @@ final class BackendLifecycleModel {
 
     private func finishCancellation(afterReconciling backend: any EngineBackend) async {
         if let currentStatus = await reconciledStatus(from: backend) {
-            status = currentStatus
+            applyAuthoritativeEngineStatus(currentStatus)
             lifecycleState = .settled(from: currentStatus)
         } else {
             lifecycleState = .failed(.operationCancelled)
@@ -487,7 +490,7 @@ final class BackendLifecycleModel {
 
     private func finishStopFailure(afterReconciling backend: any EngineBackend, error: BackendError) async {
         if let currentStatus = await reconciledStatus(from: backend) {
-            status = currentStatus
+            applyAuthoritativeEngineStatus(currentStatus)
             lifecycleState = .settled(from: currentStatus)
         } else {
             lifecycleState = .failed(error)
@@ -526,6 +529,29 @@ final class BackendLifecycleModel {
             return await iterator.next() ?? nil
         }
         return await reconciliation.value
+    }
+
+    private func applyAuthoritativeEngineStatus(_ updatedStatus: BackendStatus) {
+        let previousIdentity = EffectiveRuntimeIdentity(status: status)
+        let updatedIdentity = EffectiveRuntimeIdentity(status: updatedStatus)
+        status = updatedStatus
+        if previousIdentity != updatedIdentity {
+            runtimeChangeGeneration &+= 1
+        }
+    }
+
+    private struct EffectiveRuntimeIdentity: Equatable {
+        let engineState: EngineState
+        let runningProfileID: UUID?
+        let runningProfileRevision: Int?
+        let enginePort: Int?
+
+        init(status: BackendStatus) {
+            engineState = status.engineState
+            runningProfileID = status.runningProfileID
+            runningProfileRevision = status.runningProfileRevision
+            enginePort = status.enginePort
+        }
     }
 
     private func refreshServiceStatus() async {
