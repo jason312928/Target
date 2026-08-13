@@ -8,7 +8,6 @@ struct RuntimeConnection: Identifiable, Equatable, Sendable {
     let network: String?
     let inbound: String?
     let outboundChain: [String]
-    let rule: String?
     let uploadBytes: Int64?
     let downloadBytes: Int64?
     let startedAt: Date?

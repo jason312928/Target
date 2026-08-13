@@ -436,7 +436,9 @@ final class BackendLifecycleModel {
         Task { [weak self] in
             await runtimeLogProvider.clearRuntimeLogs()
             let entries = await runtimeLogProvider.runtimeLogs()
-            guard !Task.isCancelled, self?.runtimeChangeGeneration == generation else { return }
+            guard !Task.isCancelled,
+                  self?.runtimeChangeGeneration == generation,
+                  self?.observesLogs == true else { return }
             self?.runtimeLogEntries = entries
         }
     }
@@ -679,12 +681,16 @@ final class BackendLifecycleModel {
                 self?.appendTrafficSample(observation)
                 if self?.observesConnectionDetails == true, let connectionProvider {
                     let availability = await connectionProvider.runtimeConnectionAvailability()
-                    guard !Task.isCancelled, self?.runtimeChangeGeneration == generation else { return }
+                    guard !Task.isCancelled,
+                          self?.runtimeChangeGeneration == generation,
+                          self?.observesConnectionDetails == true else { return }
                     if availability != .loading {
                         self?.runtimeConnections = availability == .stopped ? .stopped : .unavailable
                     } else {
                         let connections = await connectionProvider.currentRuntimeConnections()
-                        guard !Task.isCancelled, self?.runtimeChangeGeneration == generation else { return }
+                        guard !Task.isCancelled,
+                              self?.runtimeChangeGeneration == generation,
+                              self?.observesConnectionDetails == true else { return }
                         self?.runtimeConnections = connections.map {
                             .init(state: .available, connections: $0, observedAt: .now)
                         } ?? .unavailable
@@ -692,8 +698,13 @@ final class BackendLifecycleModel {
                 }
                 if self?.observesLogs == true, let logProvider {
                     let availability = await logProvider.runtimeLogAvailability()
+                    guard !Task.isCancelled,
+                          self?.runtimeChangeGeneration == generation,
+                          self?.observesLogs == true else { return }
                     let entries = availability == .available ? await logProvider.runtimeLogs() : []
-                    guard !Task.isCancelled, self?.runtimeChangeGeneration == generation else { return }
+                    guard !Task.isCancelled,
+                          self?.runtimeChangeGeneration == generation,
+                          self?.observesLogs == true else { return }
                     self?.runtimeLogState = availability
                     self?.runtimeLogEntries = entries
                 }

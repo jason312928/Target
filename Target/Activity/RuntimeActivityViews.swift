@@ -59,7 +59,7 @@ struct ConnectionsView: View {
                 }
                 .width(min: 120, ideal: 170)
                 TableColumn("connections.column.route") { connection in
-                    Text(connection.outboundChain.joined(separator: " → ").isEmpty ? (connection.rule ?? "—") : connection.outboundChain.joined(separator: " → "))
+                    Text(connection.outboundChain.joined(separator: " → ").isEmpty ? "—" : connection.outboundChain.joined(separator: " → "))
                         .lineLimit(1)
                 }
                 .width(min: 150, ideal: 220)

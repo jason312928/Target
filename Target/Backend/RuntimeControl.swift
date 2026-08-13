@@ -222,7 +222,7 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
 enum RuntimeConnectionsParser {
     /// sing-box 1.13's Clash adapter serializes only this documented snapshot
     /// shape. The product DTO intentionally drops source addresses, process paths,
-    /// memory values, and unknown controller data.
+    /// raw rules, memory values, and unknown controller data.
     static func parse(_ data: Data) throws -> RuntimeConnectionsSnapshot {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let upload = nonNegativeInt64(root["uploadTotal"]),
@@ -255,7 +255,6 @@ enum RuntimeConnectionsParser {
             network: nonEmptyString(metadata["network"]),
             inbound: nonEmptyString(metadata["type"]),
             outboundChain: chain,
-            rule: nonEmptyString(dictionary["rule"]),
             uploadBytes: nonNegativeInt64(dictionary["upload"]),
             downloadBytes: nonNegativeInt64(dictionary["download"]),
             startedAt: parseDate(dictionary["start"])

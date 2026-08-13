@@ -94,6 +94,67 @@ final class EngineLifecycleTests: XCTestCase {
         XCTAssertEqual(model.runtimeObservation.uploadTotalBytes, 1)
     }
 
+    func testConnectionDeactivationBlocksLateDetailedObservationWriteback() async throws {
+        let connectionProvider = DelayedRuntimeConnectionProvider()
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            runtimeObservationOperations: ImmediateRuntimeObservationProvider(),
+            runtimeConnectionProvider: connectionProvider
+        )
+        model.applyAutomationEngineStatus(runningStatus())
+        model.setConnectionObservationActive(true)
+        try await waitUntil { await connectionProvider.readCount() == 1 }
+
+        model.setConnectionObservationActive(false)
+        XCTAssertEqual(model.runtimeConnections, .stopped)
+
+        await connectionProvider.resumeNext(with: [.init(
+            id: "late-connection", destinationHost: "example.test", destinationIP: nil,
+            destinationPort: 443, network: "tcp", inbound: "mixed",
+            outboundChain: ["proxy"], uploadBytes: 1, downloadBytes: 2, startedAt: .now
+        )])
+        try await waitUntil { await connectionProvider.completedReadCount() == 1 }
+
+        XCTAssertEqual(model.runtimeConnections, .stopped)
+        XCTAssertTrue(model.runtimeConnections.connections.isEmpty)
+    }
+
+    func testLogDeactivationBlocksLateDetailedObservationWriteback() async throws {
+        let logProvider = DelayedRuntimeLogProvider()
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            runtimeObservationOperations: ImmediateRuntimeObservationProvider(),
+            runtimeLogProvider: logProvider
+        )
+        model.applyAutomationEngineStatus(runningStatus())
+        model.setLogObservationActive(true)
+        try await waitUntil { await logProvider.readCount() == 1 }
+
+        model.setLogObservationActive(false)
+        XCTAssertEqual(model.runtimeLogState, .stopped)
+        XCTAssertTrue(model.runtimeLogEntries.isEmpty)
+
+        await logProvider.resumeNext(with: [.init(
+            id: 1, timestamp: .now, level: .info, message: "late log"
+        )])
+        try await waitUntil { await logProvider.completedReadCount() == 1 }
+
+        XCTAssertEqual(model.runtimeLogState, .stopped)
+        XCTAssertTrue(model.runtimeLogEntries.isEmpty)
+    }
+
+    private func runningStatus() -> BackendStatus {
+        .init(
+            serviceInstallation: .enabled,
+            engineState: .running,
+            engineInstallation: .installed,
+            hasSelectedValidProfile: true,
+            enginePort: 12_345,
+            runningProfileID: UUID(),
+            runningProfileRevision: 1
+        )
+    }
+
     private func waitForObservationRead(
         _ provider: DelayedRuntimeObservationProvider,
         count: Int
@@ -684,6 +745,63 @@ private actor DelayedRuntimeObservationProvider: TargetRuntimeObserving {
     func resumeNext(with observation: RuntimeObservation) {
         guard !continuations.isEmpty else { return }
         continuations.removeFirst().resume(returning: observation)
+    }
+}
+
+private struct ImmediateRuntimeObservationProvider: TargetRuntimeObserving {
+    func read() async -> RuntimeObservation {
+        .init(
+            state: .available, uploadTotalBytes: 0, downloadTotalBytes: 0,
+            uploadBytesPerSecond: 0, downloadBytesPerSecond: 0,
+            activeConnectionCount: 0, observedAt: .now
+        )
+    }
+}
+
+private actor DelayedRuntimeConnectionProvider: RuntimeConnectionProviding {
+    private var continuations: [CheckedContinuation<[RuntimeConnection]?, Never>] = []
+    private var completedReads = 0
+
+    func runtimeConnectionAvailability() async -> RuntimeObservationState { .loading }
+
+    func currentRuntimeConnections() async -> [RuntimeConnection]? {
+        let connections = await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+        completedReads += 1
+        return connections
+    }
+
+    func readCount() -> Int { continuations.count + completedReads }
+    func completedReadCount() -> Int { completedReads }
+
+    func resumeNext(with connections: [RuntimeConnection]?) {
+        guard !continuations.isEmpty else { return }
+        continuations.removeFirst().resume(returning: connections)
+    }
+}
+
+private actor DelayedRuntimeLogProvider: RuntimeLogProviding {
+    private var continuations: [CheckedContinuation<[RuntimeLogEntry], Never>] = []
+    private var completedReads = 0
+
+    func runtimeLogAvailability() async -> RuntimeObservationState { .available }
+
+    func runtimeLogs() async -> [RuntimeLogEntry] {
+        let entries = await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+        completedReads += 1
+        return entries
+    }
+
+    func clearRuntimeLogs() async {}
+    func readCount() -> Int { continuations.count + completedReads }
+    func completedReadCount() -> Int { completedReads }
+
+    func resumeNext(with entries: [RuntimeLogEntry]) {
+        guard !continuations.isEmpty else { return }
+        continuations.removeFirst().resume(returning: entries)
     }
 }
 

@@ -139,7 +139,7 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         let snapshot = try RuntimeConnectionsParser.parse(Data(#"""
         {"uploadTotal":42,"downloadTotal":84,"memory":123,"connections":[{
           "id":"connection-1","metadata":{"network":"tcp","type":"mixed/local","sourceIP":"127.0.0.1","processPath":"/private/example","destinationIP":"198.51.100.10","destinationPort":"443","host":"example.test"},
-          "upload":4,"download":8,"start":"2026-01-02T03:04:05.123Z","chains":["proxy","node"],"rule":"final","unexpected":{"secret":"do-not-retain"}
+          "upload":4,"download":8,"start":"2026-01-02T03:04:05.123Z","chains":["proxy","node"],"rule":"some-sensitive-or-complex-upstream-rule","unexpected":{"secret":"do-not-retain"}
         }]}
         """#.utf8))
         XCTAssertEqual(snapshot.totals, .init(uploadTotalBytes: 42, downloadTotalBytes: 84, activeConnectionCount: 1))
@@ -154,8 +154,11 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(connection.uploadBytes, 4)
         XCTAssertEqual(connection.downloadBytes, 8)
         XCTAssertNotNil(connection.startedAt)
-        XCTAssertFalse(Mirror(reflecting: connection).children.compactMap(\.label).contains("processPath"))
-        XCTAssertFalse(Mirror(reflecting: connection).children.compactMap(\.label).contains("unexpected"))
+        let fields = Set(Mirror(reflecting: connection).children.compactMap(\.label))
+        XCTAssertEqual(fields, [
+            "id", "destinationHost", "destinationIP", "destinationPort", "network", "inbound",
+            "outboundChain", "uploadBytes", "downloadBytes", "startedAt"
+        ])
     }
 
     func testConnectionsParserRejectsInvalidTopLevelAndToleratesOptionalFields() throws {
@@ -167,6 +170,18 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(snapshot.connections.map(\.id), ["stable"])
         XCTAssertNil(snapshot.connections.first?.uploadBytes)
         XCTAssertNil(snapshot.connections.first?.destinationHost)
+    }
+
+    func testConnectionsParserRejectsSnapshotsOverBound() throws {
+        let rawConnections = Array(repeating: ["id": "connection"] as [String: Any], count: 1_001)
+        let data = try JSONSerialization.data(withJSONObject: [
+            "uploadTotal": 0,
+            "downloadTotal": 0,
+            "connections": rawConnections
+        ])
+        XCTAssertThrowsError(try RuntimeConnectionsParser.parse(data)) { error in
+            XCTAssertEqual(error as? RuntimeControlError, .malformedResponse)
+        }
     }
 
     func testTrafficHistoryIsBoundedAndResetsAtRuntimeBoundary() {
