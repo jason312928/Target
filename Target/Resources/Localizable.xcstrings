@@ -1,6 +1,16 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "menu-bar.action.unavailable" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Unavailable" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不可用" } } } },
+    "menu-bar.open-target" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Open Target" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开 Target" } } } },
+    "menu-bar.proxy.label" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "System Proxy" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "系统代理" } } } },
+    "menu-bar.quit" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Quit Target" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "退出 Target" } } } },
+    "menu-bar.refresh" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Refresh" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "刷新" } } } },
+    "menu-bar.status.error" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Needs Attention" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "需要处理" } } } },
+    "menu-bar.status.restart-required" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Restart Required" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "需要重新启动" } } } },
+    "menu-bar.status.running" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Running" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "运行中" } } } },
+    "menu-bar.status.stopped" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stopped" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已停止" } } } },
+    "menu-bar.status.working" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Working…" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在处理…" } } } },
     "profile.workspace.section" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Workspace section" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "工作区分区" } } } },
     "profile.workspace.section.overview" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Overview" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "概览" } } } },
     "profile.workspace.section.proxies" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Proxies" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "代理" } } } },

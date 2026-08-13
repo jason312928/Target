@@ -63,10 +63,26 @@ struct TargetApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: TargetMainWindowActivation.windowID) {
             AppShellView(lifecycle: lifecycle, profileModel: profileModel)
                 .onAppear { TargetApplicationDelegate.shared.lifecycle = lifecycle }
         }
+
+        MenuBarExtra("Target", systemImage: MenuBarPresentation(
+            status: lifecycle.status,
+            lifecycleState: lifecycle.lifecycleState,
+            error: lifecycle.error,
+            systemProxyStatus: lifecycle.systemProxyStatus,
+            canStart: lifecycle.canStart,
+            canStop: lifecycle.canStop,
+            canRestart: lifecycle.canRestart,
+            canEnableSystemProxy: lifecycle.canEnableSystemProxy,
+            canDisableSystemProxy: lifecycle.canDisableSystemProxy,
+            isBusy: lifecycle.isBusy
+        ).symbolName) {
+            MenuBarView(lifecycle: lifecycle)
+        }
+        .menuBarExtraStyle(.menu)
     }
 }
 
