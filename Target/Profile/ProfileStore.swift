@@ -179,6 +179,39 @@ final class ProfileStore {
     /// RemoteSubscription metadata is created as part of this transaction.
     @discardableResult
     func importCandidate(_ candidate: ProfileImportCandidate, name: String) throws -> Profile {
+        try importCandidate(candidate, name: name, subscription: nil)
+    }
+
+    @discardableResult
+    func importSubscriptionCandidate(
+        _ data: Data,
+        name: String,
+        source: RemoteSubscription,
+        response: SubscriptionResponse
+    ) throws -> Profile {
+        var subscription = source
+        let timestamp = now()
+        subscription.lastCheckedAt = timestamp
+        subscription.lastUpdatedAt = timestamp
+        subscription.etag = response.etag
+        subscription.lastModified = response.lastModified
+        subscription.cacheStatus = .updated
+        subscription.lastErrorKey = nil
+        let candidate = ProfileImportCandidate(
+            data: data,
+            suggestedName: name,
+            fileSize: data.count,
+            validation: ProfileValidation(status: .valid, checkedAt: timestamp, error: nil)
+        )
+        return try importCandidate(candidate, name: name, subscription: subscription)
+    }
+
+    @discardableResult
+    private func importCandidate(
+        _ candidate: ProfileImportCandidate,
+        name: String,
+        subscription: RemoteSubscription?
+    ) throws -> Profile {
         let normalizedName = try validatedName(name)
         try ensureRoot()
         let originalProfiles = try loadManifest()
@@ -186,7 +219,7 @@ final class ProfileStore {
         let originalSelectionEnvelope = try importFileOperations.readFile(at: safeRootFile(Self.selectionName))
         let timestamp = now()
         let profile = Profile(
-            id: UUID(), name: normalizedName, subscription: nil,
+            id: UUID(), name: normalizedName, subscription: subscription,
             createdAt: timestamp, updatedAt: timestamp,
             validation: candidate.validation, validRevision: 1
         )
@@ -390,8 +423,15 @@ final class ProfileStore {
     }
 
     func save(json: String, for id: UUID) throws {
+        try save(json: json, for: id, expectedRevision: nil)
+    }
+
+    private func save(json: String, for id: UUID, expectedRevision: Int?) throws {
         var profiles = try loadManifest()
         guard let index = profiles.firstIndex(where: { $0.id == id }) else { throw ProfileStoreError.profileNotFound }
+        if let expectedRevision, profiles[index].validRevision != expectedRevision {
+            throw ProfileStoreError.noValidVersion
+        }
         if let syntaxError = JSONSyntaxChecker.validate(json) { try markInvalid(id, diagnostic: syntaxError); throw ProfileStoreError.invalidJSON(syntaxError) }
         let data = Data(json.utf8)
         let result = try validationTemporaryStorage.withTemporaryConfiguration(data) { checker.check(configurationURL: $0) }
@@ -441,6 +481,75 @@ final class ProfileStore {
     }
 
     func applySubscriptionUpdate(_ pending: PendingSubscriptionUpdate) throws { try save(json: pending.json, for: pending.profileID); try recordSubscriptionResult(for: pending.profileID, response: pending.response, error: nil) }
+    func checkSubscriptionCandidate(_ data: Data) throws -> Result<Void, ConfigurationDiagnostic> {
+        try validationTemporaryStorage.withTemporaryConfiguration(data) { checker.check(configurationURL: $0) }
+    }
+
+    @discardableResult
+    func applySubscriptionCandidate(
+        _ data: Data,
+        response: SubscriptionResponse,
+        profileID: UUID,
+        expectedRevision: Int
+    ) throws -> Profile {
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw SubscriptionIntakeError.payloadInvalid
+        }
+        if let syntaxError = JSONSyntaxChecker.validate(text) { throw ProfileStoreError.invalidJSON(syntaxError) }
+        var profiles = try loadManifest()
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
+            throw ProfileStoreError.profileNotFound
+        }
+        guard profiles[index].validRevision == expectedRevision,
+              var subscription = profiles[index].subscription else {
+            throw ProfileStoreError.noValidVersion
+        }
+        let check = try checkSubscriptionCandidate(data)
+        if case .failure(let diagnostic) = check { throw ProfileStoreError.validationFailed(diagnostic) }
+
+        let timestamp = now()
+        let nextRevision = expectedRevision + 1
+        try writeConfiguration(data, for: profileID)
+        try writeVersion(data, for: profileID, revision: nextRevision)
+        subscription.lastCheckedAt = timestamp
+        subscription.lastUpdatedAt = timestamp
+        subscription.etag = response.etag
+        subscription.lastModified = response.lastModified
+        subscription.cacheStatus = .updated
+        subscription.lastErrorKey = nil
+        profiles[index].subscription = subscription
+        profiles[index].validation = ProfileValidation(status: .valid, checkedAt: timestamp, error: nil)
+        profiles[index].validRevision = nextRevision
+        profiles[index].updatedAt = timestamp
+        try saveManifest(profiles)
+        return profiles[index]
+    }
+
+    func recordSubscriptionResult(for id: UUID, response: SubscriptionResponse) throws {
+        try recordSubscriptionResult(for: id, response: response, error: nil)
+    }
+    @discardableResult
+    func recordSubscriptionResult(for id: UUID, response: SubscriptionResponse, expectedRevision: Int) throws -> Profile {
+        var profiles = try loadManifest()
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else {
+            throw ProfileStoreError.profileNotFound
+        }
+        guard profiles[index].validRevision == expectedRevision,
+              var subscription = profiles[index].subscription else {
+            throw ProfileStoreError.noValidVersion
+        }
+        let timestamp = now()
+        subscription.lastCheckedAt = timestamp
+        if response.cacheStatus == .updated { subscription.lastUpdatedAt = timestamp }
+        subscription.etag = response.etag
+        subscription.lastModified = response.lastModified
+        subscription.cacheStatus = response.cacheStatus
+        subscription.lastErrorKey = nil
+        profiles[index].subscription = subscription
+        profiles[index].updatedAt = timestamp
+        try saveManifest(profiles)
+        return profiles[index]
+    }
     func recordSubscriptionFailure(for id: UUID, messageKey: String) throws { try update(id) { guard var subscription = $0.subscription else { return }; subscription.lastCheckedAt = now(); subscription.cacheStatus = .failed; subscription.lastErrorKey = messageKey; $0.subscription = subscription } }
     func recordSubscriptionCancellation(for id: UUID) throws { try update(id) { guard var subscription = $0.subscription else { return }; subscription.lastCheckedAt = now(); subscription.cacheStatus = .cancelled; subscription.lastErrorKey = "profile.subscription.error.cancelled"; $0.subscription = subscription } }
     func safeManagedURL(_ relativePath: String) throws -> URL { try safeRootFile(relativePath) }

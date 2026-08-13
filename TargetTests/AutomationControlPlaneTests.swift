@@ -85,6 +85,41 @@ final class AutomationControlPlaneTests: XCTestCase {
         XCTAssertThrowsError(try TargetCtlCommandParser.parse(["policy", "reset", "extra", "--json"]))
     }
 
+    func testTargetCtlSubscriptionParsersRequireStdinAndExplicitConfirmation() throws {
+        let create = try TargetCtlCommandParser.parse([
+            "profile", "subscribe", "--name", "Provider", "--url-stdin", "--confirm", "--json"
+        ])
+        XCTAssertEqual(create.action, "profile.subscribe")
+        XCTAssertEqual(create.arguments, ["name": "Provider", "confirm": "true", "urlStdin": "true"])
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse([
+            "profile", "subscribe", "--name", "Provider", "--url", "https://example.com/secret", "--confirm", "--json"
+        ]))
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse([
+            "profile", "subscribe", "--name", "Provider", "--url-stdin", "--json"
+        ]))
+
+        let id = "11111111-1111-4111-8111-111111111111"
+        let update = try TargetCtlCommandParser.parse([
+            "profile", "subscription-update", id, "--confirm", id, "--json"
+        ])
+        XCTAssertEqual(update.action, "profile.subscription-update")
+        XCTAssertEqual(update.arguments, ["id": id, "confirm": id])
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse([
+            "profile", "subscription-update", id, "--confirm", "different", "--json"
+        ]))
+    }
+
+    func testTargetCtlSubscriptionStdinIsBoundedSingleUTF8URL() throws {
+        XCTAssertEqual(
+            try TargetCtlSubscriptionInput.parse(Data("https://example.com/subscription/test-token\n".utf8)),
+            "https://example.com/subscription/test-token"
+        )
+        for invalid in [Data(), Data("https://example.com/one\nhttps://example.com/two\n".utf8), Data([0xFF])] {
+            XCTAssertThrowsError(try TargetCtlSubscriptionInput.parse(invalid))
+        }
+        XCTAssertThrowsError(try TargetCtlSubscriptionInput.parse(Data(repeating: 65, count: TargetCtlSubscriptionInput.maximumBytes + 1)))
+    }
+
 
     func testTargetCtlPolicySelectParserRequiresExactArguments() throws {
         let parsed = try TargetCtlCommandParser.parse([
@@ -613,6 +648,98 @@ final class AutomationControlPlaneTests: XCTestCase {
         XCTAssertTrue(try store.configurationText(for: profiles[0].id).contains(secretFixture))
     }
 
+    func testProfileSubscribeAutomationUsesSharedOperationAndReturnsSafeFacts() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(
+            rootDirectory: root.appending(path: "Profiles"),
+            checker: AutomationPassingChecker(),
+            keyProvider: TestProfileKeyProvider()
+        )
+        let token = "automation-token-must-not-appear"
+        let operations = TargetAutomationOperations(
+            profileStore: store,
+            subscriptionFetcher: AutomationSubscriptionFetcher(response: .init(
+                data: Data("ss://YWVzLTEyOC1nY206dGVzdC1wYXNzd29yZA==@example.com:8388#Node".utf8),
+                cacheStatus: .updated, etag: "v1", lastModified: nil
+            )),
+            backend: MockBackend()
+        )
+        let response = await operations.handle(.init(
+            protocolVersion: 1,
+            action: "profile.subscribe",
+            arguments: ["name": "Provider", "url": "https://example.com/subscription/\(token)", "confirm": "true"]
+        ))
+        XCTAssertTrue(response.ok)
+        let encoded = String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self)
+        XCTAssertFalse(encoded.contains(token))
+        XCTAssertFalse(encoded.contains("example.com"))
+        XCTAssertFalse(encoded.contains("test-password"))
+        XCTAssertTrue(encoded.contains("uri-list"))
+        XCTAssertTrue(encoded.contains("nodeCount"))
+        XCTAssertEqual(try store.listProfiles().count, 1)
+    }
+
+    func testSubscriptionAutomationErrorsAreStableAndCredentialSafe() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let token = "error-token-must-not-appear"
+        let operations = TargetAutomationOperations(
+            profileStore: ProfileStore(
+                rootDirectory: root.appending(path: "Profiles"),
+                checker: AutomationPassingChecker(),
+                keyProvider: TestProfileKeyProvider()
+            ),
+            subscriptionFetcher: AutomationSubscriptionFetcher(response: .init(
+                data: Data("hysteria2://\(token)@example.com:443".utf8),
+                cacheStatus: .updated, etag: nil, lastModified: nil
+            )),
+            backend: MockBackend()
+        )
+        let response = await operations.handle(.init(
+            protocolVersion: 1,
+            action: "profile.subscribe",
+            arguments: ["name": "Provider", "url": "https://example.com/\(token)", "confirm": "true"]
+        ))
+        XCTAssertEqual(response.error?.code, "subscription_protocol_unsupported")
+        XCTAssertFalse(String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self).contains(token))
+    }
+
+    func testProfileSubscriptionUpdateAutomationUsesStoredSourceAndConfirmation() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(
+            rootDirectory: root.appending(path: "Profiles"),
+            checker: AutomationPassingChecker(),
+            keyProvider: TestProfileKeyProvider()
+        )
+        let profile = try store.create(name: "Provider", subscriptionURL: URL(string: "https://example.com/stored-token")!)
+        let operations = TargetAutomationOperations(
+            profileStore: store,
+            subscriptionFetcher: AutomationSubscriptionFetcher(response: .init(
+                data: Data("trojan://test-password@example.com:443?security=tls&type=tcp#Node".utf8),
+                cacheStatus: .updated, etag: "v2", lastModified: nil
+            )),
+            backend: MockBackend()
+        )
+        let id = profile.id.uuidString.lowercased()
+        let denied = await operations.handle(.init(
+            protocolVersion: 1, action: "profile.subscription-update", arguments: ["id": id, "confirm": "different"]
+        ))
+        XCTAssertEqual(denied.error?.code, "subscription_confirmation_required")
+        XCTAssertEqual(try XCTUnwrap(store.listProfiles().first).validRevision, profile.validRevision)
+
+        let applied = await operations.handle(.init(
+            protocolVersion: 1, action: "profile.subscription-update", arguments: ["id": id, "confirm": id]
+        ))
+        XCTAssertTrue(applied.ok)
+        XCTAssertEqual(try XCTUnwrap(store.listProfiles().first).validRevision, profile.validRevision + 1)
+        let encoded = String(decoding: AutomationProtocol.encodeResponse(applied), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("stored-token"))
+        XCTAssertFalse(encoded.contains("test-password"))
+        XCTAssertFalse(encoded.contains("example.com"))
+    }
+
     func testPrivilegedServiceErrorsUseStableRedactedCodes() async {
         let operations = makeOperations(root: temporaryRoot())
         for (serviceCode, expected) in [
@@ -663,6 +790,11 @@ final class AutomationControlPlaneTests: XCTestCase {
 
 private struct AutomationPassingChecker: SingBoxConfigurationChecking {
     func check(configurationURL: URL) -> Result<Void, ConfigurationDiagnostic> { .success(()) }
+}
+
+private struct AutomationSubscriptionFetcher: ProfileSubscriptionFetching {
+    let response: SubscriptionResponse
+    func fetch(subscription: RemoteSubscription) async throws -> SubscriptionResponse { response }
 }
 
 private final class ResetManifestWriteFault: ProfileStorageFaultInjecting, @unchecked Sendable {

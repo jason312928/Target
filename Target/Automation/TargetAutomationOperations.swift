@@ -8,6 +8,7 @@ actor TargetAutomationOperations {
     }
 
     private let profileStore: ProfileStore
+    private let subscriptionOperations: TargetSubscriptionOperations
     private let policyOperations: any TargetPolicyOperating
     private let backend: any EngineBackend
     private let serviceClient: any SystemProxyClient
@@ -20,6 +21,7 @@ actor TargetAutomationOperations {
 
     init(
         profileStore: ProfileStore = ProfileStore(),
+        subscriptionFetcher: any ProfileSubscriptionFetching = SecureSubscriptionFetcher(),
         policyOperations: (any TargetPolicyOperating)? = nil,
         backend: any EngineBackend = SingBoxBackend(),
         serviceClient: any SystemProxyClient = TargetServiceXPCClient(),
@@ -31,6 +33,7 @@ actor TargetAutomationOperations {
         systemProxyStatusObserver: (@Sendable (SystemProxyStatus) async -> Void)? = nil
     ) {
         self.profileStore = profileStore
+        self.subscriptionOperations = TargetSubscriptionOperations(store: profileStore, fetcher: subscriptionFetcher)
         self.policyOperations = policyOperations ?? TargetPolicyOperations(profileStore: profileStore)
         self.backend = backend
         self.serviceClient = serviceClient
@@ -60,6 +63,8 @@ actor TargetAutomationOperations {
             case "status": return await consolidatedStatus()
             case "runtime.status": return await runtimeStatus()
             case "profile.import": return try profileImport(request.arguments)
+            case "profile.subscribe": return try await profileSubscribe(request.arguments)
+            case "profile.subscription-update": return try await profileSubscriptionUpdate(request.arguments)
             case "profile.list": return try profileList()
             case "policy.list": return try await policyList()
             case "policy.select": return try await policySelect(request.arguments)
@@ -81,6 +86,10 @@ actor TargetAutomationOperations {
             }
         } catch let error as ProfileTransferError {
             return profileTransferFailure(error)
+        } catch let error as SubscriptionUpdateError {
+            return subscriptionFailure(error)
+        } catch let error as SubscriptionIntakeError {
+            return subscriptionIntakeFailure(error)
         } catch let error as TargetPolicyOperationError {
             return policyFailure(error)
         } catch let error as ProfileStoreError {
@@ -151,6 +160,52 @@ actor TargetAutomationOperations {
             "id": .string(profile.id.uuidString.lowercased()),
             "name": .string(profile.name),
             "revision": .integer(profile.validRevision),
+            "selected": .boolean((try profileStore.selectedProfileID()) == profile.id),
+            "valid": .boolean(profile.validation.status == .valid)
+        ]))
+    }
+
+    private func profileSubscribe(_ arguments: [String: String]) async throws -> AutomationResponse {
+        guard Set(arguments.keys) == ["name", "url", "confirm"],
+              arguments["confirm"] == "true", let name = arguments["name"],
+              let rawURL = arguments["url"], let url = URL(string: rawURL) else {
+            return .failure(code: "subscription_confirmation_required", message: "Subscription creation requires an explicit confirmation and a valid URL.")
+        }
+        let pending = try await subscriptionOperations.prepareNew(name: name, url: url)
+        let profile = try subscriptionOperations.commit(pending)
+        return try subscriptionResult(profile: profile, pending: pending)
+    }
+
+    private func profileSubscriptionUpdate(_ arguments: [String: String]) async throws -> AutomationResponse {
+        guard Set(arguments.keys) == ["id", "confirm"], let idText = arguments["id"],
+              arguments["confirm"] == idText, let id = UUID(uuidString: idText) else {
+            return .failure(code: "subscription_confirmation_required", message: "Subscription update requires confirmation with the Profile ID.")
+        }
+        let prepared = try await subscriptionOperations.prepareUpdate(profileID: id)
+        guard let pending = prepared.candidate else {
+            let profile = try subscriptionOperations.commitNotModified(prepared)
+            return .success(.object([
+                "formatVersion": .integer(1), "profileID": .string(profile.id.uuidString.lowercased()),
+                "name": .string(profile.name), "revision": .integer(profile.validRevision),
+                "notModified": .boolean(true), "selected": .boolean((try profileStore.selectedProfileID()) == profile.id),
+                "valid": .boolean(profile.validation.status == .valid)
+            ]))
+        }
+        let profile = try subscriptionOperations.commit(pending)
+        return try subscriptionResult(profile: profile, pending: pending)
+    }
+
+    private func subscriptionResult(profile: Profile, pending: PendingSubscriptionIntake) throws -> AutomationResponse {
+        let summary = pending.normalization.summary
+        return .success(.object([
+            "formatVersion": .integer(1),
+            "profileID": .string(profile.id.uuidString.lowercased()),
+            "name": .string(profile.name),
+            "revision": .integer(profile.validRevision),
+            "detectedFormat": .string(summary.format.rawValue),
+            "nodeCount": .integer(summary.nodeCount),
+            "protocols": .array(summary.protocols.map { .string($0.rawValue) }),
+            "compatibilityWarnings": .array(summary.warnings.map { .string($0.rawValue) }),
             "selected": .boolean((try profileStore.selectedProfileID()) == profile.id),
             "valid": .boolean(profile.validation.status == .valid)
         ]))
@@ -377,6 +432,34 @@ actor TargetAutomationOperations {
         }
     }
 
+    private func subscriptionFailure(_ error: SubscriptionUpdateError) -> AutomationResponse {
+        switch error {
+        case .noSubscription:
+            .failure(code: "subscription_not_configured", message: "The Profile has no subscription source.")
+        case .unsafeURL, .unsafeRedirect:
+            .failure(code: "invalid_subscription_url", message: "Only public HTTPS subscription URLs are allowed.")
+        case .responseTooLarge:
+            .failure(code: "subscription_payload_invalid", message: "The subscription response exceeds the safe limit.")
+        case .cancelled:
+            .failure(code: "subscription_fetch_failed", message: "The subscription request was cancelled.")
+        case .timedOut, .invalidResponse, .httpStatus, .transportFailure:
+            .failure(code: "subscription_fetch_failed", message: "The subscription could not be downloaded safely.")
+        }
+    }
+
+    private func subscriptionIntakeFailure(_ error: SubscriptionIntakeError) -> AutomationResponse {
+        switch error {
+        case .formatUnsupported:
+            .failure(code: "subscription_format_unsupported", message: "The subscription format is not supported.")
+        case .protocolUnsupported, .variantUnsupported:
+            .failure(code: "subscription_protocol_unsupported", message: "The subscription contains an unsupported protocol or variant.")
+        case .validationFailed:
+            .failure(code: "subscription_validation_failed", message: "The normalized Profile failed sing-box validation.")
+        case .emptyPayload, .invalidUTF8, .payloadInvalid, .complexityLimitExceeded:
+            .failure(code: "subscription_payload_invalid", message: "The subscription payload is invalid or exceeds safe limits.")
+        }
+    }
+
     private func policyFailure(_ error: TargetPolicyOperationError) -> AutomationResponse {
         switch error {
         case .selectorNotFound:
@@ -434,11 +517,11 @@ actor TargetAutomationOperations {
     }
 
     private static let commands = [
-        "capabilities", "status", "runtime.status", "profile.import", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset",
+        "capabilities", "status", "runtime.status", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset",
         "engine.status", "engine.start", "engine.stop", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
     ]
     private static let argumentFreeActions = Set(commands).subtracting([
-        "profile.import", "profile.delete", "policy.select", "policy.probe"
+        "profile.import", "profile.subscribe", "profile.subscription-update", "profile.delete", "policy.select", "policy.probe"
     ])
 }

@@ -9,8 +9,9 @@ final class ProfileViewModel {
     private let policyCatalogLoader: () throws -> PolicyCatalog
     private let usesCustomPolicyCatalogLoader: Bool
     private let configurationLoader: (UUID) throws -> String
-    private let subscriptionFetcher: any ProfileSubscriptionFetching
+    private let subscriptionOperations: TargetSubscriptionOperations
     private var subscriptionTask: Task<Void, Never>?
+    private var subscriptionGeneration = 0
     private var importTask: Task<Void, Never>?
     private var policyTask: Task<Void, Never>?
     private var policyProbeTask: Task<Void, Never>?
@@ -24,7 +25,7 @@ final class ProfileViewModel {
     private(set) var isDirty = false
     private(set) var isConfigurationLoaded = false
     private(set) var messageKey: String?
-    private(set) var pendingSubscriptionUpdate: PendingSubscriptionUpdate?
+    private(set) var pendingSubscriptionIntake: PendingSubscriptionIntake?
     private(set) var isUpdatingSubscription = false
     private(set) var pendingImportCandidate: ProfileImportCandidate?
     private(set) var isPreparingImport = false
@@ -57,7 +58,7 @@ final class ProfileViewModel {
         self.policyOperations = resolvedPolicyOperations
         self.policyCatalogLoader = policyCatalogLoader ?? resolvedPolicyOperations.readPersisted
         self.usesCustomPolicyCatalogLoader = policyCatalogLoader != nil
-        self.subscriptionFetcher = subscriptionFetcher
+        self.subscriptionOperations = TargetSubscriptionOperations(store: store, fetcher: subscriptionFetcher)
         self.configurationLoader = configurationLoader ?? { try store.configurationText(for: $0) }
         reloadInitialState()
     }
@@ -67,7 +68,8 @@ final class ProfileViewModel {
     var canExport: Bool { canEditConfiguration && !isDirty && !isExporting }
     var defaultExportFileName: String { store.defaultExportFileNameForSelectedProfile() ?? "Profile.json" }
     var shouldPresentImportConfirmation: Bool { pendingImportCandidate != nil && pendingOperation == nil }
-    var shouldPresentSubscriptionPreview: Bool { pendingSubscriptionUpdate != nil && pendingOperation == nil }
+    var pendingSubscriptionUpdate: PendingSubscriptionIntake? { pendingSubscriptionIntake }
+    var shouldPresentSubscriptionPreview: Bool { pendingSubscriptionIntake != nil && pendingOperation == nil }
 
     func requestSelection(_ id: UUID?) {
         guard id != selectedID else { return }
@@ -76,7 +78,38 @@ final class ProfileViewModel {
     }
 
     func requestCreate(name: String, subscriptionURL: URL? = nil) {
-        request(.create(name: name, subscriptionURL: subscriptionURL))
+        if let subscriptionURL { prepareSubscription(name: name, url: subscriptionURL) }
+        else { request(.create(name: name)) }
+    }
+
+    func prepareSubscription(name: String, url: URL) {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty, normalizedName.count <= 80 else {
+            messageKey = "profile.message.invalid-name"
+            return
+        }
+        cancelSubscriptionOperation(clearCandidate: true)
+        subscriptionGeneration &+= 1
+        let generation = subscriptionGeneration
+        messageKey = nil
+        isUpdatingSubscription = true
+        let operations = subscriptionOperations
+        subscriptionTask = Task { [weak self] in
+            defer {
+                if let self, self.subscriptionGeneration == generation {
+                    self.subscriptionTask = nil
+                    self.isUpdatingSubscription = false
+                }
+            }
+            do {
+                let pending = try await operations.prepareNew(name: normalizedName, url: url)
+                guard let self, !Task.isCancelled, self.subscriptionGeneration == generation else { return }
+                self.pendingSubscriptionIntake = pending
+            } catch {
+                guard let self, !Task.isCancelled, self.subscriptionGeneration == generation else { return }
+                self.presentSubscriptionError(error)
+            }
+        }
     }
 
     func requestDuplicate(_ id: UUID) {
@@ -403,53 +436,87 @@ final class ProfileViewModel {
 
     func updateSubscription() {
         guard let profile = selectedProfile, let subscription = profile.subscription, subscriptionTask == nil else { return }
+        _ = subscription
+        subscriptionGeneration &+= 1
+        let generation = subscriptionGeneration
         messageKey = nil
-        pendingSubscriptionUpdate = nil
+        pendingSubscriptionIntake = nil
         isUpdatingSubscription = true
         let profileID = profile.id
         let store = store
-        let fetcher = subscriptionFetcher
+        let operations = subscriptionOperations
         subscriptionTask = Task { [weak self] in
             defer {
-                self?.subscriptionTask = nil
-                self?.isUpdatingSubscription = false
+                if let self, self.subscriptionGeneration == generation {
+                    self.subscriptionTask = nil
+                    self.isUpdatingSubscription = false
+                }
             }
             do {
-                let response = try await fetcher.fetch(subscription: subscription)
-                guard !Task.isCancelled else { throw SubscriptionUpdateError.cancelled }
-                let pending = try store.previewSubscriptionUpdate(response, for: profileID)
-                guard !Task.isCancelled else { throw SubscriptionUpdateError.cancelled }
-                self?.pendingSubscriptionUpdate = pending
-                self?.refreshMetadataPreservingEditor()
-                if pending == nil { self?.messageKey = "profile.subscription.not-modified" }
-            } catch let error as SubscriptionUpdateError {
-                if error == .cancelled { try? store.recordSubscriptionCancellation(for: profileID) }
-                else { try? store.recordSubscriptionFailure(for: profileID, messageKey: error.messageKey) }
-                self?.refreshMetadataPreservingEditor()
-                self?.messageKey = error.messageKey
-            } catch let error as ProfileStoreError {
-                self?.refreshMetadataPreservingEditor()
-                self?.present(error)
+                let prepared = try await operations.prepareUpdate(profileID: profileID)
+                guard let self, !Task.isCancelled, self.subscriptionGeneration == generation,
+                      self.selectedID == profileID else { return }
+                if prepared.candidate == nil {
+                    _ = try operations.commitNotModified(prepared)
+                }
+                self.pendingSubscriptionIntake = prepared.candidate
+                self.refreshMetadataPreservingEditor()
+                if prepared.candidate == nil { self.messageKey = "profile.subscription.not-modified" }
             } catch {
-                try? store.recordSubscriptionFailure(for: profileID, messageKey: "profile.subscription.error.download-failed")
-                self?.refreshMetadataPreservingEditor()
-                self?.messageKey = "profile.subscription.error.download-failed"
+                guard let self, self.subscriptionGeneration == generation else { return }
+                if Task.isCancelled || (error as? SubscriptionUpdateError) == .cancelled {
+                    try? store.recordSubscriptionCancellation(for: profileID)
+                    self.messageKey = SubscriptionUpdateError.cancelled.messageKey
+                } else {
+                    let key = self.subscriptionMessageKey(for: error)
+                    try? store.recordSubscriptionFailure(for: profileID, messageKey: key)
+                    self.presentSubscriptionError(error)
+                }
+                self.refreshMetadataPreservingEditor()
             }
         }
     }
 
     func cancelSubscriptionUpdate() {
-        subscriptionTask?.cancel()
+        cancelSubscriptionOperation(clearCandidate: false)
+    }
+
+    func cancelSubscriptionIntake() {
+        cancelSubscriptionOperation(clearCandidate: true)
+        messageKey = "profile.subscription.error.cancelled"
     }
 
     func confirmSubscriptionUpdate() {
-        guard let pending = pendingSubscriptionUpdate else { return }
+        guard let pending = pendingSubscriptionIntake else { return }
         request(.applySubscription(pending))
     }
 
     func discardSubscriptionPreview() {
-        pendingSubscriptionUpdate = nil
+        pendingSubscriptionIntake = nil
         messageKey = "profile.subscription.preview-dismissed"
+    }
+
+    private func cancelSubscriptionOperation(clearCandidate: Bool) {
+        subscriptionGeneration &+= 1
+        subscriptionTask?.cancel()
+        subscriptionTask = nil
+        isUpdatingSubscription = false
+        if clearCandidate { pendingSubscriptionIntake = nil }
+    }
+
+    private func subscriptionMessageKey(for error: Error) -> String {
+        if let error = error as? SubscriptionUpdateError { return error.messageKey }
+        if let error = error as? SubscriptionIntakeError { return error.messageKey }
+        if let storeError = error as? ProfileStoreError {
+            if case .validationFailed = storeError {
+                return SubscriptionIntakeError.validationFailed.messageKey
+            }
+        }
+        return "profile.subscription.error.download-failed"
+    }
+
+    private func presentSubscriptionError(_ error: Error) {
+        messageKey = subscriptionMessageKey(for: error)
     }
 
     private func request(_ operation: ProfileWorkspaceOperation) {
@@ -468,13 +535,14 @@ final class ProfileViewModel {
         do {
             switch operation {
             case .select(let id):
+                cancelSubscriptionOperation(clearCandidate: true)
                 try store.select(id)
                 selectedID = id
                 cancelPreparedImport()
                 loadSelectedText()
                 markReadinessChanged()
-            case .create(let name, let subscriptionURL):
-                let profile = try store.create(name: name, subscriptionURL: subscriptionURL)
+            case .create(let name):
+                let profile = try store.create(name: name)
                 try selectAndActivate(profile.id)
                 markReadinessChanged()
             case .duplicate(let id):
@@ -499,10 +567,13 @@ final class ProfileViewModel {
                 messageKey = "profile.import.success"
                 markReadinessChanged()
             case .applySubscription(let pending):
-                try store.applySubscriptionUpdate(pending)
-                pendingSubscriptionUpdate = nil
-                activate(pending.profileID)
-                messageKey = "profile.subscription.applied"
+                let profile = try subscriptionOperations.commit(pending)
+                pendingSubscriptionIntake = nil
+                activate(profile.id)
+                messageKey = {
+                    if case .newProfile = pending.destination { return "profile.subscription.added" }
+                    return "profile.subscription.applied"
+                }()
                 markReadinessChanged()
             }
         } catch let error as ProfileStoreError {

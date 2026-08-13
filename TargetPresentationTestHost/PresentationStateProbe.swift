@@ -22,6 +22,8 @@ struct PresentationStateProbe: View {
             state("presentation.subscription-candidate", fixture.model.pendingSubscriptionUpdate == nil ? "false" : "true")
             state("presentation.subscription-preview-presented", fixture.model.shouldPresentSubscriptionPreview ? "true" : "false")
             state("presentation.subscription-candidate-fingerprint", subscriptionCandidateFingerprint)
+            state("presentation.subscription-intake-state", subscriptionIntakeState)
+            state("presentation.subscription-source-presentation", "Remote Subscription")
             state("presentation.profile-count", "\(fixture.model.profiles.count)")
             state("presentation.selected-revision", "\(fixture.model.selectedProfile?.validRevision ?? 0)")
             state("presentation.second-profile-id", fixture.second.id.uuidString)
@@ -63,7 +65,15 @@ struct PresentationStateProbe: View {
 
     private var subscriptionCandidateFingerprint: String {
         fixture.model.pendingSubscriptionUpdate.map {
-            TargetConfigurationFingerprint.sha256(Data($0.json.utf8))
+            TargetConfigurationFingerprint.sha256($0.normalization.data)
         } ?? "none"
+    }
+
+
+    private var subscriptionIntakeState: String {
+        if fixture.model.isUpdatingSubscription { return "progress" }
+        if fixture.model.pendingSubscriptionIntake != nil { return "preview" }
+        if fixture.model.messageKey == "profile.subscription.error.download-failed" { return "safe-error" }
+        return "idle"
     }
 }

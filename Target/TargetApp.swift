@@ -8,7 +8,15 @@ struct TargetApp: App {
     @State private var profileModel: ProfileViewModel
 
     init() {
-        let profileStore = ProfileStore()
+        let profileStore: ProfileStore
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil,
+           NSClassFromString("XCTestCase") != nil {
+            let root = FileManager.default.temporaryDirectory
+                .appending(path: "Target-XCTest-\(ProcessInfo.processInfo.processIdentifier)/Profiles", directoryHint: .isDirectory)
+            profileStore = ProfileStore(rootDirectory: root, keyProvider: XCTestProfileEncryptionKeyProvider())
+        } else {
+            profileStore = ProfileStore()
+        }
         let backend = SingBoxBackend(profileStore: profileStore)
         let runtimeObservationOperations = TargetRuntimeObservationOperations(provider: backend)
         let policyOperations = TargetPolicyOperations(
@@ -60,6 +68,13 @@ struct TargetApp: App {
                 .onAppear { TargetApplicationDelegate.shared.lifecycle = lifecycle }
         }
     }
+}
+
+private final class XCTestProfileEncryptionKeyProvider: ProfileEncryptionKeyProviding {
+    private let key = Data(repeating: 0xA5, count: 32)
+
+    func loadMasterKey() throws -> Data? { key }
+    func createMasterKey() throws -> Data { key }
 }
 
 @MainActor

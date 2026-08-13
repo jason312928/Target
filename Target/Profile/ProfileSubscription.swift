@@ -202,7 +202,7 @@ final class SecureSubscriptionFetcher: ProfileSubscriptionFetching, @unchecked S
         var request = URLRequest(url: subscription.url)
         request.httpMethod = "GET"
         request.timeoutInterval = timeout
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json, application/yaml, text/yaml, text/plain;q=0.9, */*;q=0.1", forHTTPHeaderField: "Accept")
         if let etag = subscription.etag { request.setValue(etag, forHTTPHeaderField: "If-None-Match") }
         if let lastModified = subscription.lastModified { request.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since") }
 

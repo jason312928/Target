@@ -28,11 +28,13 @@ struct ProfileWorkspaceView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .sheet(item: $sheet) { sheet in
-            ProfileNameSheet(sheet: sheet) { name, url in
-                switch sheet {
-                case .create: model.requestCreate(name: name, subscriptionURL: url)
-                case .rename(let id, _): model.rename(id, to: name)
-                }
+            switch sheet {
+            case .create:
+                ProfileNameSheet(sheet: sheet) { name in model.requestCreate(name: name) }
+            case .subscription:
+                ProfileSubscriptionSheet(model: model)
+            case .rename(let id, _):
+                ProfileNameSheet(sheet: sheet) { name in model.rename(id, to: name) }
             }
         }
         .sheet(isPresented: Binding(
@@ -60,7 +62,7 @@ struct ProfileWorkspaceView: View {
             }
         )) {
             if let pending = model.pendingSubscriptionUpdate {
-                SubscriptionDiffPreview(diff: pending.diff) {
+                SubscriptionIntakePreview(pending: pending) {
                     model.discardSubscriptionPreview()
                 } confirm: {
                     model.confirmSubscriptionUpdate()
@@ -163,6 +165,9 @@ struct ProfileWorkspaceView: View {
             ToolbarItemGroup {
                 Button("profile.action.create", systemImage: "plus") { sheet = .create }
                     .accessibilityIdentifier("profile.action.create")
+                Button("profile.subscription.add", systemImage: "link.badge.plus") { sheet = .subscription }
+                    .disabled(model.isUpdatingSubscription)
+                    .accessibilityIdentifier("profile.action.add-subscription")
                 Button("profile.action.import", systemImage: "square.and.arrow.down") { presentImportPanel() }
                     .disabled(model.isPreparingImport || model.isCommittingImport)
                     .accessibilityIdentifier("profile.action.import")
@@ -766,10 +771,12 @@ private struct ProfileStatusBadge: View {
     }
 }
 
-private struct SubscriptionDiffPreview: View {
-    let diff: ProfileConfigurationDiff
+private struct SubscriptionIntakePreview: View {
+    let pending: PendingSubscriptionIntake
     let dismiss: () -> Void
     let confirm: () -> Void
+
+    private var summary: SubscriptionCompatibilitySummary { pending.normalization.summary }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -777,28 +784,59 @@ private struct SubscriptionDiffPreview: View {
                 .font(.headline)
                 .accessibilityIdentifier("profile.subscription.preview")
             Text("profile.subscription.preview.description").font(.callout).foregroundStyle(.secondary)
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+                GridRow {
+                    Text("profile.subscription.preview.format").foregroundStyle(.secondary)
+                    Text(LocalizedStringKey(summary.format.titleKey))
+                }
+                GridRow {
+                    Text("profile.subscription.preview.nodes").foregroundStyle(.secondary)
+                    Text("\(summary.nodeCount)")
+                }
+                GridRow {
+                    Text("profile.subscription.preview.protocols").foregroundStyle(.secondary)
+                    Text(summary.protocols.map(\.rawValue).joined(separator: ", "))
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("profile.subscription.compatibility-summary")
+            if summary.warnings.contains(.providerSemanticsNotImported) {
+                Label("profile.subscription.warning.provider-semantics", systemImage: "info.circle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("profile.subscription.compatibility-warning")
+            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    DiffSection(section: diff.outbounds)
-                    DiffSection(section: diff.routeRules)
-                    DiffSection(section: diff.dns)
-                    DiffSection(section: diff.inbounds)
-                    DiffSection(section: diff.unknown)
-                    if !diff.hasChanges {
-                        Text("profile.diff.no-changes").foregroundStyle(.secondary)
+                    if let diff = pending.diff {
+                        DiffSection(section: diff.outbounds)
+                        DiffSection(section: diff.routeRules)
+                        DiffSection(section: diff.dns)
+                        DiffSection(section: diff.inbounds)
+                        DiffSection(section: diff.unknown)
+                        if !diff.hasChanges {
+                            Text("profile.diff.no-changes").foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("profile.subscription.preview.new-description").foregroundStyle(.secondary)
                     }
                 }
             }
             HStack {
                 Spacer()
                 Button("profile.subscription.discard") { dismiss() }
-                Button("profile.subscription.confirm") { confirm() }
+                Button(confirmTitleKey) { confirm() }
                     .accessibilityIdentifier("profile.subscription.confirm")
                     .keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
         .frame(width: 540, height: 460)
+    }
+
+    private var confirmTitleKey: LocalizedStringKey {
+        if case .newProfile = pending.destination { return "profile.subscription.add-confirm" }
+        return "profile.subscription.confirm"
     }
 }
 
@@ -894,27 +932,23 @@ private struct ValidationBadge: View {
 
 private enum ProfileSheet: Identifiable {
     case create
+    case subscription
     case rename(UUID, String)
-    var id: String { switch self { case .create: "create"; case .rename: "rename" } }
+    var id: String { switch self { case .create: "create"; case .subscription: "subscription"; case .rename: "rename" } }
 }
 
 private struct ProfileNameSheet: View {
     let sheet: ProfileSheet
-    var completion: (String, URL?) -> Void
+    var completion: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
-    @State private var subscriptionURL = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(titleKey).font(.headline)
             TextField("profile.field.name", text: $name)
-            if case .create = sheet {
-                TextField("profile.field.subscription-url", text: $subscriptionURL)
-                Text("profile.subscription.hint").font(.caption).foregroundStyle(.secondary)
-            }
             HStack { Spacer(); Button("profile.action.cancel") { dismiss() }; Button("profile.action.confirm") {
-                completion(name, URL(string: subscriptionURL.trimmingCharacters(in: .whitespacesAndNewlines)))
+                completion(name)
                 dismiss()
             }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
         }
@@ -924,7 +958,84 @@ private struct ProfileNameSheet: View {
     }
 
     private var titleKey: LocalizedStringKey {
-        switch sheet { case .create: "profile.create.title"; case .rename: "profile.rename.title" }
+        switch sheet {
+        case .create: "profile.create.title"
+        case .subscription: "profile.subscription.add"
+        case .rename: "profile.rename.title"
+        }
+    }
+}
+
+private struct ProfileSubscriptionSheet: View {
+    @Bindable var model: ProfileViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var urlText = ""
+    @State private var submitted = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("profile.subscription.add").font(.headline)
+            Text("profile.subscription.add.description").font(.callout).foregroundStyle(.secondary)
+            if !submitted {
+                TextField("profile.field.name", text: $name)
+                    .accessibilityIdentifier("profile.subscription.name")
+                TextField("profile.field.subscription-url", text: $urlText)
+                    .accessibilityIdentifier("profile.subscription.url")
+                Text("profile.subscription.hint").font(.caption).foregroundStyle(.secondary)
+            } else {
+                Label("profile.subscription.remote-source", systemImage: "lock.shield")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("profile.subscription.safe-source")
+            }
+            if submitted && model.isUpdatingSubscription {
+                ProgressView("profile.subscription.preparing")
+                    .accessibilityIdentifier("profile.subscription.progress")
+            }
+            if submitted, let messageKey = model.messageKey, !model.isUpdatingSubscription {
+                Label(LocalizedStringKey(messageKey), systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("profile.subscription.safe-error")
+            }
+            HStack {
+                Spacer()
+                Button("profile.action.cancel") {
+                    model.cancelSubscriptionIntake()
+                    dismiss()
+                }
+                .accessibilityIdentifier("profile.subscription.intake-cancel")
+                Button("profile.action.continue") { submit() }
+                    .accessibilityIdentifier("profile.subscription.continue")
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(submitted || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || parsedURL == nil)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("profile.subscription.intake-sheet")
+        .onChange(of: model.pendingSubscriptionIntake != nil) { _, ready in
+            if ready { dismiss() }
+        }
+        .onDisappear {
+            if model.isUpdatingSubscription, model.pendingSubscriptionIntake == nil {
+                model.cancelSubscriptionIntake()
+            }
+        }
+    }
+
+    private var parsedURL: URL? {
+        let value = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.utf8.count <= 8 * 1_024 else { return nil }
+        return URL(string: value)
+    }
+
+    private func submit() {
+        guard let url = parsedURL else { return }
+        submitted = true
+        let profileName = name
+        urlText = ""
+        model.prepareSubscription(name: profileName, url: url)
     }
 }
 

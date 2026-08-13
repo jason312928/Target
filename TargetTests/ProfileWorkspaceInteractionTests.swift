@@ -568,6 +568,55 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         }
     }
 
+    func testNewSubscriptionIntakeCommitsOnlyAfterConfirmationAndCancelIsSideEffectFree() async throws {
+        let cancelledFetcher = ControlledSubscriptionFetcher()
+        let cancelledFixture = try makeFixture(subscriptionFetcher: cancelledFetcher)
+        let originalSelection = cancelledFixture.model.selectedID
+        let originalCount = cancelledFixture.model.profiles.count
+        cancelledFixture.model.prepareSubscription(
+            name: "New Provider",
+            url: URL(string: "https://example.com/subscription/test-token")!
+        )
+        await cancelledFetcher.waitUntilStarted()
+        XCTAssertEqual(cancelledFixture.model.profiles.count, originalCount)
+        XCTAssertEqual(cancelledFixture.model.selectedID, originalSelection)
+        cancelledFixture.model.cancelSubscriptionIntake()
+        await cancelledFetcher.waitUntilCancelled()
+        XCTAssertEqual(try cancelledFixture.store.listProfiles().count, originalCount)
+        XCTAssertEqual(try cancelledFixture.store.selectedProfileID(), originalSelection)
+
+        let successFetcher = ControlledSubscriptionFetcher()
+        let successFixture = try makeFixture(subscriptionFetcher: successFetcher)
+        let beforeCount = successFixture.model.profiles.count
+        successFixture.model.prepareSubscription(
+            name: "New Provider",
+            url: URL(string: "https://example.com/subscription/test-token")!
+        )
+        await successFetcher.waitUntilStarted()
+        await successFetcher.complete(.updated)
+        try await waitForSubscriptionCompletion(successFixture.model)
+        XCTAssertNotNil(successFixture.model.pendingSubscriptionIntake)
+        XCTAssertEqual(try successFixture.store.listProfiles().count, beforeCount)
+        successFixture.model.confirmSubscriptionUpdate()
+        XCTAssertNil(successFixture.model.pendingSubscriptionIntake)
+        XCTAssertEqual(try successFixture.store.listProfiles().count, beforeCount + 1)
+        XCTAssertEqual(successFixture.model.selectedProfile?.name, "New Provider")
+        XCTAssertEqual(successFixture.model.selectedProfile?.validRevision, 1)
+    }
+
+    func testProfileSwitchCancelsInFlightSubscriptionAndRejectsStaleCandidate() async throws {
+        let fetcher = ControlledSubscriptionFetcher()
+        let fixture = try makeFixture(subscriptionFetcher: fetcher)
+        fixture.model.updateSubscription()
+        await fetcher.waitUntilStarted()
+        fixture.model.requestSelection(fixture.second.id)
+        await fetcher.waitUntilCancelled()
+        try await waitForSubscriptionCompletion(fixture.model)
+        XCTAssertEqual(fixture.model.selectedID, fixture.second.id)
+        XCTAssertNil(fixture.model.pendingSubscriptionIntake)
+        XCTAssertEqual(try fixture.store.selectedProfileID(), fixture.second.id)
+    }
+
     func testDiscardBeforeFailedSubscriptionApplyKeepsPersistedEditorClean() async throws {
         let fetcher = ControlledSubscriptionFetcher()
         let checker = SequenceInteractionChecker(results: [.success(()), .failure(.init(messageKey: "profile.validation.check-failed", line: nil, column: nil))])
@@ -601,8 +650,10 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
     }
 
     private func waitForSubscriptionCompletion(_ model: ProfileViewModel) async throws {
-        for _ in 0..<1_000 where model.isUpdatingSubscription {
-            await Task.yield()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while model.isUpdatingSubscription, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
         }
         XCTAssertFalse(model.isUpdatingSubscription)
     }

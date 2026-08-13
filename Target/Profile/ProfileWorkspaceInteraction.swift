@@ -78,12 +78,12 @@ enum ProfileWorkspaceLayout {
 /// carries data, not arbitrary deferred closures.
 enum ProfileWorkspaceOperation {
     case select(UUID)
-    case create(name: String, subscriptionURL: URL?)
+    case create(name: String)
     case duplicate(UUID)
     case delete(UUID)
     case restore(UUID)
     case importCandidate(ProfileImportCandidate, name: String)
-    case applySubscription(PendingSubscriptionUpdate)
+    case applySubscription(PendingSubscriptionIntake)
 }
 
 enum ProfileUnsavedChangesDecision {

@@ -21,6 +21,9 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         case dirtyEditor = "dirty-editor"
         case invalidDiagnostic = "invalid-diagnostic"
         case subscriptionBusy = "subscription-busy"
+        case subscriptionIntakeProgress = "subscription-intake-progress"
+        case subscriptionIntakeError = "subscription-intake-error"
+        case subscriptionIntakePreview = "subscription-intake-preview"
         case policyCatalogPopulated = "policy-catalog-populated"
         case policyCatalogEmpty = "policy-catalog-empty"
         case policyCatalogUnavailable = "policy-catalog-unavailable"
@@ -326,6 +329,45 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         XCTAssertEqual(integerState("presentation.readiness-generation", in: app), initialReadinessGeneration)
         XCTAssertEqual(state("presentation.pending-operation", in: app), "none")
         XCTAssertEqual(state("presentation.profile-count", in: app), "2")
+    }
+
+    func testGenericSubscriptionIntakeNormalProgressErrorPreviewAndConfirmationSources() {
+        do {
+            let app = launch(.subscriptionIntakePreview)
+            clickButton("profile.action.add-subscription", in: app)
+            assertExists(element("profile.subscription.intake-sheet", in: app), message: "Missing Add Subscription sheet")
+            clickButton("profile.subscription.intake-cancel", in: app)
+            assertDoesNotExist(element("profile.subscription.intake-sheet", in: app), message: "Cancel did not close intake sheet")
+            XCTAssertEqual(state("presentation.profile-count", in: app), "2")
+        }
+
+        do {
+            let app = launch(.subscriptionIntakeProgress)
+            beginSubscription(in: app)
+            assertExists(element("profile.subscription.progress", in: app), message: "Missing restrained intake progress")
+            XCTAssertEqual(state("presentation.subscription-source-presentation", in: app), "Remote Subscription")
+            clickButton("profile.subscription.intake-cancel", in: app)
+            XCTAssertEqual(state("presentation.profile-count", in: app), "2")
+        }
+
+        do {
+            let app = launch(.subscriptionIntakeError)
+            beginSubscription(in: app)
+            assertExists(element("profile.subscription.safe-error", in: app), message: "Missing credential-safe intake error")
+            XCTAssertEqual(state("presentation.subscription-intake-state", in: app), "safe-error")
+            XCTAssertEqual(state("presentation.profile-count", in: app), "2")
+        }
+
+        do {
+            let app = launch(.subscriptionIntakePreview)
+            beginSubscription(in: app)
+            assertExists(element("profile.subscription.preview", in: app), message: "Missing compatibility preview")
+            assertExists(element("profile.subscription.compatibility-summary", in: app), message: "Missing compatibility summary")
+            XCTAssertEqual(state("presentation.profile-count", in: app), "2")
+            clickButton("profile.subscription.confirm", in: app)
+            waitForState("presentation.profile-count", toEqual: "3", in: app)
+            XCTAssertEqual(state("presentation.selected-profile", in: app), "Presentation Subscription")
+        }
     }
 
     func testVisualWorkspaceStatesRemainReachableAtMinimumAndRegularWidths() {
@@ -723,6 +765,19 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         assertExists(second, message: "Missing second Profile row")
         activateIfNeeded(app)
         second.click()
+    }
+
+    private func beginSubscription(in app: XCUIApplication) {
+        clickButton("profile.action.add-subscription", in: app)
+        let name = app.textFields["profile.subscription.name"]
+        let url = app.textFields["profile.subscription.url"]
+        assertExists(name, message: "Missing subscription Profile name field")
+        assertExists(url, message: "Missing subscription URL field")
+        name.click()
+        name.typeText("Presentation Subscription")
+        url.click()
+        url.typeText("https://example.com/subscription/test-token")
+        clickButton("profile.subscription.continue", in: app)
     }
 
     private func assertUnsavedAlert(

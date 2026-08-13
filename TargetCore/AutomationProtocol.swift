@@ -32,6 +32,14 @@ public enum TargetCtlCommandParser {
            values[2] == "--file", values[4] == "--name" {
             return ("profile.import", ["file": values[3], "name": values[5]])
         }
+        if values.count == 6, values[0...1] == ["profile", "subscribe"],
+           values[2] == "--name", values[4] == "--url-stdin", values[5] == "--confirm" {
+            return ("profile.subscribe", ["name": values[3], "confirm": "true", "urlStdin": "true"])
+        }
+        if values.count == 5, values[0...1] == ["profile", "subscription-update"],
+           values[3] == "--confirm", values[2] == values[4] {
+            return ("profile.subscription-update", ["id": values[2], "confirm": values[4]])
+        }
         if values.count == 5, values[0...1] == ["profile", "delete"], values[3] == "--confirm" {
             return ("profile.delete", ["id": values[2], "confirm": values[4]])
         }
@@ -44,6 +52,23 @@ public enum TargetCtlCommandParser {
             return ("policy.probe", ["selector": values[3]])
         }
         throw AutomationSocketError.unavailable
+    }
+}
+
+public enum TargetCtlSubscriptionInput {
+    public static let maximumBytes = 8 * 1_024
+
+    public static func parse(_ data: Data) throws -> String {
+        guard !data.isEmpty, data.count <= maximumBytes,
+              let text = String(data: data, encoding: .utf8) else {
+            throw AutomationSocketError.unavailable
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains(where: { $0.isNewline }),
+              let url = URL(string: trimmed), url.absoluteString == trimmed else {
+            throw AutomationSocketError.unavailable
+        }
+        return trimmed
     }
 }
 

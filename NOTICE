@@ -1,3 +1,5 @@
 # Notice
 
-Target currently does not distribute third-party source code or binary components.
+Target includes Yams and its bundled libYAML sources for local YAML parsing.
+Their copyright notices and MIT license terms are reproduced in
+THIRD_PARTY_NOTICES.md.

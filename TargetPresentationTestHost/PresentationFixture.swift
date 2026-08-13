@@ -12,6 +12,9 @@ enum PresentationScenario: String, CaseIterable {
     case dirtyEditor = "dirty-editor"
     case invalidDiagnostic = "invalid-diagnostic"
     case subscriptionBusy = "subscription-busy"
+    case subscriptionIntakeProgress = "subscription-intake-progress"
+    case subscriptionIntakeError = "subscription-intake-error"
+    case subscriptionIntakePreview = "subscription-intake-preview"
     case policyCatalogPopulated = "policy-catalog-populated"
     case policyCatalogEmpty = "policy-catalog-empty"
     case policyCatalogUnavailable = "policy-catalog-unavailable"
@@ -50,7 +53,7 @@ final class PresentationFixture {
         let profileRoot = root.appending(path: "Profiles", directoryHint: .isDirectory)
         importURL = root.appending(path: "FixtureImport.json")
         let checker = PresentationFixtureChecker(results: [.success(())])
-        let fetcher = PresentationFixtureFetcher(remainsBusy: scenario == .subscriptionBusy)
+        let fetcher = PresentationFixtureFetcher(scenario: scenario)
         store = ProfileStore(
             rootDirectory: profileRoot,
             checker: checker,
@@ -74,6 +77,7 @@ final class PresentationFixture {
         try store.save(json: Self.persistedConfiguration, for: second.id)
         if [
             .localProfile, .remoteProfile, .subscriptionBusy,
+            .subscriptionIntakeProgress, .subscriptionIntakeError, .subscriptionIntakePreview,
             .policyCatalogPopulated, .policyCatalogEmpty, .policyCatalogUnavailable,
             .policyCatalogWarnings, .policyCatalogSecrets, .policyCatalogMismatch
         ].contains(scenario) {
@@ -124,6 +128,7 @@ final class PresentationFixture {
         case .subscriptionCandidateReturn:
             model.updateEditor(Self.dirtyConfiguration)
         case .localProfile, .remoteProfile, .subscriptionBusy,
+             .subscriptionIntakeProgress, .subscriptionIntakeError, .subscriptionIntakePreview,
              .policyCatalogPopulated, .policyCatalogEmpty, .policyCatalogUnavailable,
              .policyCatalogWarnings, .policyCatalogSecrets, .policyCatalogMismatch:
             break
@@ -207,7 +212,8 @@ final class PresentationFixture {
         case .importCandidateReturn, .subscriptionCandidateReturn: return [.success(()), failed]
         case .persistedReadDiscardFailure, .successfulDiscard, .emptyWorkspace,
              .localProfile, .remoteProfile, .dirtyEditor, .invalidDiagnostic,
-             .subscriptionBusy, .policyCatalogPopulated, .policyCatalogEmpty,
+             .subscriptionBusy, .subscriptionIntakeProgress, .subscriptionIntakeError, .subscriptionIntakePreview,
+             .policyCatalogPopulated, .policyCatalogEmpty,
              .policyCatalogUnavailable, .policyCatalogWarnings, .policyCatalogSecrets,
              .policyCatalogMismatch:
             return [.success(())]
@@ -237,12 +243,15 @@ private final class PresentationFixtureChecker: SingBoxConfigurationChecking, @u
 }
 
 private struct PresentationFixtureFetcher: ProfileSubscriptionFetching {
-    let remainsBusy: Bool
+    let scenario: PresentationScenario
 
     func fetch(subscription: RemoteSubscription) async throws -> SubscriptionResponse {
-        if remainsBusy {
+        if scenario == .subscriptionBusy || scenario == .subscriptionIntakeProgress {
             try await Task.sleep(for: .seconds(30))
             throw SubscriptionUpdateError.cancelled
+        }
+        if scenario == .subscriptionIntakeError {
+            throw SubscriptionUpdateError.transportFailure
         }
         return SubscriptionResponse(
             data: Data(("""

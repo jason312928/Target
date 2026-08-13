@@ -11,11 +11,20 @@ enum TargetCtl {
             emit(.failure(code: "invalid_arguments", message: "The command arguments are invalid."))
             return 2
         }
+        var requestArguments = parsed.arguments
+        do {
+            if parsed.action == "profile.subscribe" {
+                requestArguments = try subscriptionArguments(from: requestArguments)
+            }
+        } catch {
+            emit(.failure(code: "invalid_subscription_url", message: "A single UTF-8 subscription URL is required on stdin."))
+            return 2
+        }
         do {
             let request = AutomationRequest(
                 protocolVersion: AutomationProtocol.version,
                 action: parsed.action,
-                arguments: parsed.arguments
+                arguments: requestArguments
             )
             let data = try LocalAutomationClient.send(request)
             FileHandle.standardOutput.write(data)
@@ -31,6 +40,18 @@ enum TargetCtl {
     private static func emit(_ response: AutomationResponse) {
         FileHandle.standardOutput.write(AutomationProtocol.encodeResponse(response))
         FileHandle.standardOutput.write(Data([0x0A]))
+    }
+
+    private static func subscriptionArguments(from arguments: [String: String]) throws -> [String: String] {
+        guard arguments["urlStdin"] == "true" else { throw AutomationSocketError.unavailable }
+        guard let data = try FileHandle.standardInput.read(upToCount: TargetCtlSubscriptionInput.maximumBytes + 1) else {
+            throw AutomationSocketError.unavailable
+        }
+        let trimmed = try TargetCtlSubscriptionInput.parse(data)
+        var result = arguments
+        result.removeValue(forKey: "urlStdin")
+        result["url"] = trimmed
+        return result
     }
 }
 
