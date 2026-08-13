@@ -59,6 +59,36 @@ final class MenuBarPresentationTests: XCTestCase {
         XCTAssertFalse(presentation.statusKey.contains("endpoint"))
     }
 
+    func testWindowActivationSelectsTargetMainWindowInsteadOfAnotherTitledWindow() {
+        let decision = TargetMainWindowActivation.decision(for: [
+            NSUserInterfaceItemIdentifier("subscription-sheet"),
+            TargetMainWindowActivation.windowIdentifier,
+            NSUserInterfaceItemIdentifier("profile-editor")
+        ])
+
+        XCTAssertEqual(decision, .activateExistingMainWindow(index: 1))
+    }
+
+    func testWindowActivationDoesNotTreatAnotherTitledWindowAsTargetMainWindow() {
+        let decision = TargetMainWindowActivation.decision(for: [
+            NSUserInterfaceItemIdentifier("subscription-sheet"),
+            NSUserInterfaceItemIdentifier("profile-editor")
+        ])
+
+        XCTAssertEqual(decision, .openMainWindow)
+    }
+
+    func testWindowActivationRequestsOpenWindowWhenMainWindowDoesNotExist() {
+        XCTAssertEqual(TargetMainWindowActivation.decision(for: []), .openMainWindow)
+    }
+
+    func testRepeatedWindowActivationKeepsUsingExistingMainWindow() {
+        let windows: [NSUserInterfaceItemIdentifier?] = [TargetMainWindowActivation.windowIdentifier]
+
+        XCTAssertEqual(TargetMainWindowActivation.decision(for: windows), .activateExistingMainWindow(index: 0))
+        XCTAssertEqual(TargetMainWindowActivation.decision(for: windows), .activateExistingMainWindow(index: 0))
+    }
+
     private func makePresentation(
         status: BackendStatus = BackendStatus(
             serviceInstallation: .enabled,

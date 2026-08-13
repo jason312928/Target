@@ -88,16 +88,51 @@ struct MenuBarView: View {
     }
 }
 
-@MainActor
 enum TargetMainWindowActivation {
     static let windowID = "target-main-window"
+    static let windowIdentifier = NSUserInterfaceItemIdentifier(windowID)
 
+    enum Decision: Equatable {
+        case activateExistingMainWindow(index: Int)
+        case openMainWindow
+    }
+
+    static func decision(for windowIdentifiers: [NSUserInterfaceItemIdentifier?]) -> Decision {
+        guard let index = windowIdentifiers.firstIndex(of: windowIdentifier) else {
+            return .openMainWindow
+        }
+        return .activateExistingMainWindow(index: index)
+    }
+
+    @MainActor
     static func activateExistingWindow() -> Bool {
-        guard let window = NSApp.windows.first(where: { $0.isVisible && $0.styleMask.contains(.titled) }) else {
+        let windows = NSApp.windows
+        guard case let .activateExistingMainWindow(index) = decision(for: windows.map(\.identifier)),
+              windows.indices.contains(index) else {
             return false
         }
+
+        let window = windows[index]
         NSApp.activate(ignoringOtherApps: true)
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
         window.makeKeyAndOrderFront(nil)
         return true
+    }
+}
+
+struct TargetMainWindowMarker: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        TargetMainWindowMarkerView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+private final class TargetMainWindowMarkerView: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.identifier = TargetMainWindowActivation.windowIdentifier
     }
 }

@@ -63,9 +63,10 @@ struct TargetApp: App {
     }
 
     var body: some Scene {
-        WindowGroup(id: TargetMainWindowActivation.windowID) {
+        Window("Target", id: TargetMainWindowActivation.windowID) {
             AppShellView(lifecycle: lifecycle, profileModel: profileModel)
                 .onAppear { TargetApplicationDelegate.shared.lifecycle = lifecycle }
+                .background(TargetMainWindowMarker())
         }
 
         MenuBarExtra("Target", systemImage: MenuBarPresentation(
