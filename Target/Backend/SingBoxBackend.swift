@@ -1,12 +1,12 @@
 import Darwin
 import Foundation
 
-actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeObservationProviding {
+actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeObservationProviding, RuntimeConnectionProviding, RuntimeLogProviding {
     static let applicationSupportDirectoryName = "Target"
     static let engineDirectoryName = "sing-box"
 
     private var process: Process?
-    private var logHandle: FileHandle?
+    private let runtimeLogBuffer = RuntimeLogBuffer()
     private let portProbe: any LocalEnginePortProbing
     private let portSelector: any LocalEnginePortSelecting
     private let runtimeOwnership: EngineRuntimeOwnership
@@ -14,7 +14,6 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
     private let runtimeConfigurations: RuntimeConfigurationStore
     private let readinessTimeout: Duration
     private let executableURL: URL
-    private let logURL: URL
     private let runtimeControlClient: any RuntimeControlClient
 
     init(
@@ -38,7 +37,6 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         self.runtimeConfigurations = RuntimeConfigurationStore(directory: resolvedDirectory.appending(path: "runtime", directoryHint: .isDirectory))
         self.readinessTimeout = readinessTimeout
         self.executableURL = executableURL ?? resolvedDirectory.appending(path: "bin/sing-box")
-        self.logURL = resolvedDirectory.appending(path: "logs/sing-box.log")
         self.runtimeControlClient = runtimeControlClient
     }
 
@@ -56,8 +54,7 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
             runtimeConfigurations.remove(id: expiredRecord.runtimeConfigurationID)
             if process?.processIdentifier == expiredRecord.pid {
                 process = nil
-                try? logHandle?.close()
-                logHandle = nil
+                runtimeLogBuffer.clear()
             }
         }
         let ownedRecord: EngineRuntimeRecord?
@@ -229,6 +226,31 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         return try? await runtimeControlClient.connectionTotals(using: descriptor)
     }
 
+    func currentRuntimeConnections() async -> [RuntimeConnection]? {
+        guard let descriptor = await verifiedRuntimeControlDescriptor() else { return nil }
+        let snapshot = try? await runtimeControlClient.connections(using: descriptor)
+        return snapshot?.connections
+    }
+
+    func runtimeConnectionAvailability() async -> RuntimeObservationState {
+        await runtimeObservationAvailability()
+    }
+
+    func runtimeLogAvailability() async -> RuntimeObservationState {
+        guard let material = await verifiedRuntimeControlMaterial(),
+              runtimeConfigurations.exists(id: material.record.runtimeConfigurationID) else {
+            let disposition = try? await runtimeOwnership.recordDisposition()
+            if case .noRecord? = disposition { return .stopped }
+            if case .processExited? = disposition { return .stopped }
+            return .unavailable
+        }
+        return .available
+    }
+
+    func runtimeLogs() async -> [RuntimeLogEntry] { runtimeLogBuffer.snapshot() }
+
+    func clearRuntimeLogs() async { runtimeLogBuffer.clear() }
+
     func runtimeObservationAvailability() async -> RuntimeObservationState {
         if await verifiedRuntimeControlDescriptor() != nil { return .loading }
         let disposition = try? await runtimeOwnership.recordDisposition()
@@ -296,13 +318,11 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         try Task.checkCancellation()
         let temporary = try runtimeConfigurations.write(prepared.data)
         var launched: Process?
-        var handle: FileHandle?
         do {
             try checkConfiguration(at: temporary.url)
             try Task.checkCancellation()
-            let openedLogHandle = try openLog()
-            handle = openedLogHandle
-            let candidate = makeEngineProcess(configurationURL: temporary.url, logHandle: openedLogHandle)
+            runtimeLogBuffer.clear()
+            let candidate = makeEngineProcess(configurationURL: temporary.url, logBuffer: runtimeLogBuffer)
             try candidate.run()
             launched = candidate
             try Task.checkCancellation()
@@ -322,16 +342,15 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
             }
             try Task.checkCancellation()
             process = candidate
-            logHandle = openedLogHandle
             return try await queryStatus()
         } catch is CancellationError {
-            await cleanupFailedLaunch(process: launched, logHandle: handle, configurationID: temporary.id)
+            await cleanupFailedLaunch(process: launched, configurationID: temporary.id)
             throw CancellationError()
         } catch let error as BackendError {
-            await cleanupFailedLaunch(process: launched, logHandle: handle, configurationID: temporary.id)
+            await cleanupFailedLaunch(process: launched, configurationID: temporary.id)
             throw error
         } catch {
-            await cleanupFailedLaunch(process: launched, logHandle: handle, configurationID: temporary.id)
+            await cleanupFailedLaunch(process: launched, configurationID: temporary.id)
             throw BackendError.engineLaunchFailed
         }
     }
@@ -351,8 +370,7 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         self.process = nil
         runtimeOwnership.clearRecord()
         runtimeConfigurations.remove(id: record.runtimeConfigurationID)
-        try? logHandle?.close()
-        logHandle = nil
+        runtimeLogBuffer.clear()
         return try await queryStatus()
     }
 
@@ -386,37 +404,28 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         guard result.status == 0 else { throw BackendError.configurationCheckFailed }
     }
 
-    private func makeEngineProcess(configurationURL: URL, logHandle: FileHandle) -> Process {
+    private func makeEngineProcess(configurationURL: URL, logBuffer: RuntimeLogBuffer) -> Process {
         let launched = Process()
         launched.executableURL = executableURL
         launched.arguments = ["run", "-c", configurationURL.path]
         let pipe = Pipe()
         launched.standardOutput = pipe
         launched.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { [weak logHandle] handle in
+        pipe.fileHandleForReading.readabilityHandler = { [weak logBuffer] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            try? logHandle?.write(contentsOf: EngineLogRedactor.redact(data))
+            logBuffer?.append(data)
         }
         launched.terminationHandler = { _ in pipe.fileHandleForReading.readabilityHandler = nil }
         return launched
     }
 
-    private func openLog() throws -> FileHandle {
-        try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        _ = FileManager.default.createFile(atPath: logURL.path, contents: nil)
-        let handle = try FileHandle(forWritingTo: logURL)
-        try handle.seekToEnd()
-        return handle
-    }
-
-    private func cleanupFailedLaunch(process: Process?, logHandle: FileHandle?, configurationID: UUID) async {
+    private func cleanupFailedLaunch(process: Process?, configurationID: UUID) async {
         if let process { _ = await stopOwnedProcess(process) }
         runtimeOwnership.clearRecord()
         runtimeConfigurations.remove(id: configurationID)
-        try? logHandle?.close()
         self.process = nil
-        self.logHandle = nil
+        runtimeLogBuffer.clear()
     }
 
     private func installationStatus() -> EngineInstallationState {
@@ -502,7 +511,6 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
 
     deinit {
         if process?.isRunning == true { process?.terminate() }
-        try? logHandle?.close()
     }
 }
 
@@ -531,11 +539,13 @@ enum EngineLogRedactor {
     private static let credentialURL = try! NSRegularExpression(pattern: #"://[^\s/@:]+:[^\s/@]+@"#)
     private static let uuid = try! NSRegularExpression(pattern: #"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"#)
     private static let sensitiveJSON = try! NSRegularExpression(pattern: #"(?i)(\"(?:password|uuid|private_key|private-key|token|secret|subscription_url)\"\s*:\s*)\"[^\"]*\""#)
+    private static let bearerAuthorization = try! NSRegularExpression(pattern: #"(?i)(authorization:\s*bearer\s+)\S+"#)
+    private static let inlineSecret = try! NSRegularExpression(pattern: #"(?i)\b(secret|token|password)\s*=\s*[^\s]+"#)
     private static let absolutePath = try! NSRegularExpression(pattern: #"(?<!:)\B/(?:[^\s\"']+/)+[^\s\"']+"#)
 
     static func redact(_ data: Data) -> Data {
         var text = String(decoding: data, as: UTF8.self)
-        for (expression, replacement) in [(ipv4, "[redacted-ip]"), (ipv6, "[redacted-ip]"), (credentialURL, "://[redacted-credentials]@"), (uuid, "[redacted-uuid]"), (sensitiveJSON, "$1\"[redacted]\""), (userPath, "[redacted-path]"), (absolutePath, "[redacted-path]")] {
+        for (expression, replacement) in [(ipv4, "[redacted-ip]"), (ipv6, "[redacted-ip]"), (credentialURL, "://[redacted-credentials]@"), (uuid, "[redacted-uuid]"), (sensitiveJSON, "$1\"[redacted]\""), (bearerAuthorization, "$1[redacted]"), (inlineSecret, "$1=[redacted]"), (userPath, "[redacted-path]"), (absolutePath, "[redacted-path]")] {
             text = expression.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: replacement)
         }
         return Data(text.utf8)

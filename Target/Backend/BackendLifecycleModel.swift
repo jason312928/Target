@@ -12,8 +12,14 @@ final class BackendLifecycleModel {
     private let systemProxyOperations: any TargetSystemProxyOperating
     private let runtimeOperations: any TargetRuntimeOperating
     private let runtimeObservationOperations: any TargetRuntimeObserving
+    private let runtimeConnectionProvider: (any RuntimeConnectionProviding)?
+    private let runtimeLogProvider: (any RuntimeLogProviding)?
     private var operationTask: Task<Void, Never>?
     private var observationTask: Task<Void, Never>?
+    private var observationRuntimeGeneration: Int?
+    private var observesConnectionDetails = false
+    private var observesLogs = false
+    private var trafficHistoryModel = RuntimeTrafficHistory()
     private let hostNetworkSafetyMode: HostNetworkSafetyMode
     private let cancellationReconciliationTimeout = Duration.milliseconds(250)
 
@@ -25,6 +31,10 @@ final class BackendLifecycleModel {
     private(set) var pingResult: String?
     private(set) var systemProxyStatus = SystemProxyStatus.disabled
     private(set) var runtimeObservation = RuntimeObservation.stopped
+    private(set) var trafficHistory: [RuntimeTrafficSample] = []
+    private(set) var runtimeConnections = RuntimeConnectionObservation.stopped
+    private(set) var runtimeLogState: RuntimeObservationState = .stopped
+    private(set) var runtimeLogEntries: [RuntimeLogEntry] = []
     /// Changes only when the non-sensitive identity of the effective engine runtime changes.
     /// Profiles use this to discard transient observations made against a prior runtime.
     private(set) var runtimeChangeGeneration = 0
@@ -35,6 +45,8 @@ final class BackendLifecycleModel {
         systemProxyOperations: (any TargetSystemProxyOperating)? = nil,
         runtimeOperations: (any TargetRuntimeOperating)? = nil,
         runtimeObservationOperations: any TargetRuntimeObserving = UnavailableRuntimeObservationProvider(),
+        runtimeConnectionProvider: (any RuntimeConnectionProviding)? = nil,
+        runtimeLogProvider: (any RuntimeLogProviding)? = nil,
         hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode
     ) {
         self.backend = backend
@@ -51,6 +63,8 @@ final class BackendLifecycleModel {
             hostNetworkSafetyMode: hostNetworkSafetyMode
         )
         self.runtimeObservationOperations = runtimeObservationOperations
+        self.runtimeConnectionProvider = runtimeConnectionProvider ?? (backend as? any RuntimeConnectionProviding)
+        self.runtimeLogProvider = runtimeLogProvider ?? (backend as? any RuntimeLogProviding)
         self.hostNetworkSafetyMode = hostNetworkSafetyMode
         self.status = .mockDefault
         self.serviceInstallation = TargetServiceRegistration.status
@@ -395,6 +409,38 @@ final class BackendLifecycleModel {
         }
     }
 
+    func setConnectionObservationActive(_ active: Bool) {
+        observesConnectionDetails = active
+        if !active {
+            runtimeConnections = .stopped
+            return
+        }
+        runtimeConnections = status.engineState == .running ? .loading : .stopped
+        updateObservationLifecycle(for: status)
+    }
+
+    func setLogObservationActive(_ active: Bool) {
+        observesLogs = active
+        if !active {
+            runtimeLogState = .stopped
+            runtimeLogEntries = []
+            return
+        }
+        runtimeLogState = status.engineState == .running ? .loading : .stopped
+        updateObservationLifecycle(for: status)
+    }
+
+    func clearRuntimeLogs() {
+        guard let runtimeLogProvider else { return }
+        let generation = runtimeChangeGeneration
+        Task { [weak self] in
+            await runtimeLogProvider.clearRuntimeLogs()
+            let entries = await runtimeLogProvider.runtimeLogs()
+            guard !Task.isCancelled, self?.runtimeChangeGeneration == generation else { return }
+            self?.runtimeLogEntries = entries
+        }
+    }
+
     func applyAutomationEngineStatus(_ engineStatus: BackendStatus) {
         guard !isBusy else { return }
         applyAuthoritativeEngineStatus(engineStatus)
@@ -537,6 +583,10 @@ final class BackendLifecycleModel {
         status = updatedStatus
         if previousIdentity != updatedIdentity {
             runtimeChangeGeneration &+= 1
+            resetTrafficHistory()
+            runtimeConnections = updatedStatus.engineState == .running ? .loading : .stopped
+            runtimeLogEntries = []
+            runtimeLogState = updatedStatus.engineState == .running ? .loading : .stopped
         }
     }
 
@@ -597,24 +647,74 @@ final class BackendLifecycleModel {
         guard status.engineState == .running else {
             observationTask?.cancel()
             observationTask = nil
+            observationRuntimeGeneration = nil
             runtimeObservation = .stopped
+            resetTrafficHistory()
+            runtimeConnections = .stopped
+            runtimeLogEntries = []
+            runtimeLogState = .stopped
             return
+        }
+        let generation = runtimeChangeGeneration
+        if observationRuntimeGeneration != generation {
+            observationTask?.cancel()
+            observationTask = nil
+            observationRuntimeGeneration = generation
+            resetTrafficHistory()
+            runtimeConnections = observesConnectionDetails ? .loading : .stopped
+            runtimeLogEntries = []
+            runtimeLogState = observesLogs ? .loading : .stopped
         }
         guard observationTask == nil else { return }
         runtimeObservation = .loading
         let operations = runtimeObservationOperations
+        let connectionProvider = runtimeConnectionProvider
+        let logProvider = runtimeLogProvider
         observationTask = Task { [weak self] in
             while !Task.isCancelled {
                 let observation = await operations.read()
                 guard !Task.isCancelled else { return }
+                guard self?.runtimeChangeGeneration == generation else { return }
                 self?.runtimeObservation = observation
+                self?.appendTrafficSample(observation)
+                if self?.observesConnectionDetails == true, let connectionProvider {
+                    let availability = await connectionProvider.runtimeConnectionAvailability()
+                    guard !Task.isCancelled, self?.runtimeChangeGeneration == generation else { return }
+                    if availability != .loading {
+                        self?.runtimeConnections = availability == .stopped ? .stopped : .unavailable
+                    } else {
+                        let connections = await connectionProvider.currentRuntimeConnections()
+                        guard !Task.isCancelled, self?.runtimeChangeGeneration == generation else { return }
+                        self?.runtimeConnections = connections.map {
+                            .init(state: .available, connections: $0, observedAt: .now)
+                        } ?? .unavailable
+                    }
+                }
+                if self?.observesLogs == true, let logProvider {
+                    let availability = await logProvider.runtimeLogAvailability()
+                    let entries = availability == .available ? await logProvider.runtimeLogs() : []
+                    guard !Task.isCancelled, self?.runtimeChangeGeneration == generation else { return }
+                    self?.runtimeLogState = availability
+                    self?.runtimeLogEntries = entries
+                }
                 if observation.state == .stopped {
                     self?.observationTask = nil
+                    self?.observationRuntimeGeneration = nil
                     return
                 }
                 do { try await Task.sleep(for: .seconds(1)) }
                 catch { return }
             }
         }
+    }
+
+    private func appendTrafficSample(_ observation: RuntimeObservation) {
+        trafficHistoryModel.append(observation)
+        trafficHistory = trafficHistoryModel.samples
+    }
+
+    private func resetTrafficHistory() {
+        trafficHistoryModel.reset()
+        trafficHistory = []
     }
 }

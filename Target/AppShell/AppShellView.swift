@@ -87,6 +87,12 @@ struct AppShellView: View {
             DashboardView(lifecycle: lifecycle, onRoute: handle)
         case .profiles:
             ProfileWorkspaceView(lifecycle: lifecycle, model: profileModel)
+        case .connections:
+            RuntimeActivityDestinationView(destination: .connections, lifecycle: lifecycle)
+        case .traffic:
+            RuntimeActivityDestinationView(destination: .traffic, lifecycle: lifecycle)
+        case .logs:
+            RuntimeActivityDestinationView(destination: .logs, lifecycle: lifecycle)
         }
     }
 }

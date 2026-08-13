@@ -27,6 +27,9 @@ struct AppDestinationMetadata: Identifiable {
 enum AppDestination: String, CaseIterable, Hashable, Identifiable {
     case dashboard
     case profiles
+    case connections
+    case traffic
+    case logs
 
     static let defaultDestination: Self = .dashboard
 
@@ -46,6 +49,27 @@ enum AppDestination: String, CaseIterable, Hashable, Identifiable {
             sortOrder: 1,
             title: "profile.title",
             symbolName: "doc.text"
+        ),
+        AppDestinationMetadata(
+            destination: .connections,
+            section: .workspace,
+            sortOrder: 2,
+            title: "connections.title",
+            symbolName: "point.3.connected.trianglepath.dotted"
+        ),
+        AppDestinationMetadata(
+            destination: .traffic,
+            section: .workspace,
+            sortOrder: 3,
+            title: "traffic.title",
+            symbolName: "chart.xyaxis.line"
+        ),
+        AppDestinationMetadata(
+            destination: .logs,
+            section: .workspace,
+            sortOrder: 4,
+            title: "logs.title",
+            symbolName: "text.alignleft"
         ),
     ]
 

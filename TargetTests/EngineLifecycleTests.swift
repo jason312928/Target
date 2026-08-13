@@ -53,6 +53,64 @@ final class EngineLifecycleTests: XCTestCase {
         XCTAssertEqual(model.runtimeChangeGeneration, 4)
     }
 
+    func testStaleRuntimeObservationCannotOverwriteReplacementRuntime() async throws {
+        let provider = DelayedRuntimeObservationProvider()
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            runtimeObservationOperations: provider
+        )
+        let profile = UUID()
+        let first = BackendStatus(
+            serviceInstallation: .enabled,
+            engineState: .running,
+            engineInstallation: .installed,
+            hasSelectedValidProfile: true,
+            enginePort: 12_345,
+            runningProfileID: profile,
+            runningProfileRevision: 1
+        )
+        var replacement = first
+        replacement.enginePort = 12_346
+
+        model.applyAutomationEngineStatus(first)
+        try await waitForObservationRead(provider, count: 1)
+        model.applyAutomationEngineStatus(replacement)
+        try await waitForObservationRead(provider, count: 2)
+
+        await provider.resumeNext(with: .init(
+            state: .available, uploadTotalBytes: 99, downloadTotalBytes: 99,
+            uploadBytesPerSecond: 99, downloadBytesPerSecond: 99,
+            activeConnectionCount: 9, observedAt: .now
+        ))
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(model.runtimeObservation.state, .loading)
+
+        await provider.resumeNext(with: .init(
+            state: .available, uploadTotalBytes: 1, downloadTotalBytes: 2,
+            uploadBytesPerSecond: 1, downloadBytesPerSecond: 2,
+            activeConnectionCount: 1, observedAt: .now
+        ))
+        try await waitUntil { model.runtimeObservation.activeConnectionCount == 1 }
+        XCTAssertEqual(model.runtimeObservation.uploadTotalBytes, 1)
+    }
+
+    private func waitForObservationRead(
+        _ provider: DelayedRuntimeObservationProvider,
+        count: Int
+    ) async throws {
+        try await waitUntil { await provider.readCount() >= count }
+    }
+
+    private func waitUntil(
+        _ condition: @escaping @MainActor () async -> Bool
+    ) async throws {
+        for _ in 0..<50 {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for expected observation state")
+    }
+
     func testUnreadableRuntimePolicyEvidenceDoesNotAddRestartForProfileWithoutSelectors() async throws {
         let fixture = try EngineLifecycleFixture(mode: .listening)
         do {
@@ -609,6 +667,23 @@ final class EngineLifecycleTests: XCTestCase {
         }
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "Target/sing-box/bin/sing-box")
+    }
+}
+
+private actor DelayedRuntimeObservationProvider: TargetRuntimeObserving {
+    private var continuations: [CheckedContinuation<RuntimeObservation, Never>] = []
+
+    func read() async -> RuntimeObservation {
+        await withCheckedContinuation { continuation in
+            continuations.append(continuation)
+        }
+    }
+
+    func readCount() -> Int { continuations.count }
+
+    func resumeNext(with observation: RuntimeObservation) {
+        guard !continuations.isEmpty else { return }
+        continuations.removeFirst().resume(returning: observation)
     }
 }
 

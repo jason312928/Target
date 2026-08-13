@@ -38,10 +38,15 @@ protocol RuntimeControlClient: Sendable {
     func select(selector: String, outbound: String, using descriptor: RuntimeControlDescriptor) async throws
     func probeLatency(outbound: String, using descriptor: RuntimeControlDescriptor) async throws -> Int
     func connectionTotals(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionTotals
+    func connections(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionsSnapshot
 }
 
 extension RuntimeControlClient {
     func probeLatency(outbound: String, using descriptor: RuntimeControlDescriptor) async throws -> Int {
+        throw RuntimeControlError.unavailable
+    }
+
+    func connections(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionsSnapshot {
         throw RuntimeControlError.unavailable
     }
 }
@@ -110,18 +115,13 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
     }
 
     func connectionTotals(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionTotals {
+        let snapshot = try await connections(using: descriptor)
+        return snapshot.totals
+    }
+
+    func connections(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionsSnapshot {
         let data = try await request(path: "/connections", method: "GET", descriptor: descriptor, body: nil)
-        let decoded: ConnectionsResponse
-        do { decoded = try JSONDecoder().decode(ConnectionsResponse.self, from: data) }
-        catch { throw RuntimeControlError.malformedResponse }
-        guard decoded.uploadTotal >= 0, decoded.downloadTotal >= 0 else {
-            throw RuntimeControlError.malformedResponse
-        }
-        return RuntimeConnectionTotals(
-            uploadTotalBytes: decoded.uploadTotal,
-            downloadTotalBytes: decoded.downloadTotal,
-            activeConnectionCount: decoded.connections.count
-        )
+        return try RuntimeConnectionsParser.parse(data)
     }
 
     private func request(
@@ -217,12 +217,84 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
     private struct ProxyResponse: Decodable { let proxies: [String: Proxy] }
     private struct Proxy: Decodable { let now: String?; let all: [String]? }
     private struct DelayResponse: Decodable { let delay: Int }
-    private struct ConnectionsResponse: Decodable {
-        let uploadTotal: Int64
-        let downloadTotal: Int64
-        let connections: [Connection]
+}
+
+enum RuntimeConnectionsParser {
+    /// sing-box 1.13's Clash adapter serializes only this documented snapshot
+    /// shape. The product DTO intentionally drops source addresses, process paths,
+    /// memory values, and unknown controller data.
+    static func parse(_ data: Data) throws -> RuntimeConnectionsSnapshot {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let upload = nonNegativeInt64(root["uploadTotal"]),
+              let download = nonNegativeInt64(root["downloadTotal"]),
+              let rawConnections = root["connections"] as? [Any] else {
+            throw RuntimeControlError.malformedResponse
+        }
+        guard rawConnections.count <= 1_000 else { throw RuntimeControlError.malformedResponse }
+        let connections = rawConnections.compactMap(parseConnection)
+        return .init(
+            totals: .init(
+                uploadTotalBytes: upload,
+                downloadTotalBytes: download,
+                activeConnectionCount: rawConnections.count
+            ),
+            connections: connections
+        )
     }
-    private struct Connection: Decodable {}
+
+    private static func parseConnection(_ value: Any) -> RuntimeConnection? {
+        guard let dictionary = value as? [String: Any],
+              let id = nonEmptyString(dictionary["id"]) else { return nil }
+        let metadata = dictionary["metadata"] as? [String: Any] ?? [:]
+        let chain = (dictionary["chains"] as? [Any] ?? []).compactMap(nonEmptyString)
+        return .init(
+            id: id,
+            destinationHost: nonEmptyString(metadata["host"]),
+            destinationIP: nonEmptyString(metadata["destinationIP"]),
+            destinationPort: nonNegativeInt(metadata["destinationPort"]),
+            network: nonEmptyString(metadata["network"]),
+            inbound: nonEmptyString(metadata["type"]),
+            outboundChain: chain,
+            rule: nonEmptyString(dictionary["rule"]),
+            uploadBytes: nonNegativeInt64(dictionary["upload"]),
+            downloadBytes: nonNegativeInt64(dictionary["download"]),
+            startedAt: parseDate(dictionary["start"])
+        )
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let value = value as? String else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func nonNegativeInt(_ value: Any?) -> Int? {
+        guard let numeric = nonNegativeInt64(value), numeric <= Int64(Int.max) else { return nil }
+        return Int(numeric)
+    }
+
+    private static func nonNegativeInt64(_ value: Any?) -> Int64? {
+        if let number = value as? NSNumber {
+            guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+            let integer = number.int64Value
+            return number.doubleValue == Double(integer) && integer >= 0 ? integer : nil
+        }
+        switch value {
+        case let value as Int where value >= 0: return Int64(value)
+        case let value as Int64 where value >= 0: return value
+        case let value as String:
+            guard let number = Int64(value), number >= 0 else { return nil }
+            return number
+        default: return nil
+        }
+    }
+
+    private static func parseDate(_ value: Any?) -> Date? {
+        guard let raw = value as? String else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
+    }
 }
 
 final class RedirectRefusingDelegate: NSObject, URLSessionTaskDelegate {

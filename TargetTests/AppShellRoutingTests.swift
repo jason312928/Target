@@ -11,9 +11,9 @@ final class AppShellRoutingTests: XCTestCase {
         XCTAssertEqual(AppShellLayout.minimumWindowHeight, 460)
     }
 
-    func testDestinationSetContainsOnlyDashboardAndProfilesWithStableIdentity() {
-        XCTAssertEqual(AppDestination.allCases, [.dashboard, .profiles])
-        XCTAssertEqual(AppDestination.visibleDestinations, [.dashboard, .profiles])
+    func testDestinationSetContainsAllProductSurfacesWithStableIdentity() {
+        XCTAssertEqual(AppDestination.allCases, [.dashboard, .profiles, .connections, .traffic, .logs])
+        XCTAssertEqual(AppDestination.visibleDestinations, [.dashboard, .profiles, .connections, .traffic, .logs])
         XCTAssertEqual(AppDestination.dashboard.id, .dashboard)
         XCTAssertEqual(AppDestination.profiles.id, .profiles)
     }
@@ -22,7 +22,7 @@ final class AppShellRoutingTests: XCTestCase {
         XCTAssertEqual(AppNavigationSection.ordered, [.workspace])
         XCTAssertEqual(
             AppNavigationSection.ordered.flatMap { AppDestination.metadata(in: $0).map(\.destination) },
-            [.dashboard, .profiles]
+            [.dashboard, .profiles, .connections, .traffic, .logs]
         )
     }
 
@@ -38,7 +38,7 @@ final class AppShellRoutingTests: XCTestCase {
     func testNavigationMetadataContainsNoUnimplementedDestination() {
         XCTAssertEqual(
             Set(AppDestination.navigationMetadata.map(\.destination)),
-            Set([.dashboard, .profiles])
+            Set([.dashboard, .profiles, .connections, .traffic, .logs])
         )
     }
 
@@ -68,12 +68,15 @@ final class AppShellRoutingTests: XCTestCase {
     }
 
     func testInvalidOrOldPersistedSelectionFallsBackToDashboard() {
-        XCTAssertEqual(AppDestination.destination(for: "connections"), .dashboard)
+        XCTAssertEqual(AppDestination.destination(for: "retired-destination"), .dashboard)
         XCTAssertEqual(AppDestination.destination(for: ""), .dashboard)
     }
 
     func testValidPersistedSelectionRestoresDestination() {
         XCTAssertEqual(AppDestination.destination(for: "dashboard"), .dashboard)
         XCTAssertEqual(AppDestination.destination(for: "profiles"), .profiles)
+        XCTAssertEqual(AppDestination.destination(for: "connections"), .connections)
+        XCTAssertEqual(AppDestination.destination(for: "traffic"), .traffic)
+        XCTAssertEqual(AppDestination.destination(for: "logs"), .logs)
     }
 }

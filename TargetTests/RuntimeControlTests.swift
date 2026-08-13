@@ -135,6 +135,73 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(reset.downloadBytesPerSecond, 0)
     }
 
+    func testConnectionsParserKeepsOnlyBoundedProductFields() throws {
+        let snapshot = try RuntimeConnectionsParser.parse(Data(#"""
+        {"uploadTotal":42,"downloadTotal":84,"memory":123,"connections":[{
+          "id":"connection-1","metadata":{"network":"tcp","type":"mixed/local","sourceIP":"127.0.0.1","processPath":"/private/example","destinationIP":"198.51.100.10","destinationPort":"443","host":"example.test"},
+          "upload":4,"download":8,"start":"2026-01-02T03:04:05.123Z","chains":["proxy","node"],"rule":"final","unexpected":{"secret":"do-not-retain"}
+        }]}
+        """#.utf8))
+        XCTAssertEqual(snapshot.totals, .init(uploadTotalBytes: 42, downloadTotalBytes: 84, activeConnectionCount: 1))
+        let connection = try XCTUnwrap(snapshot.connections.first)
+        XCTAssertEqual(connection.id, "connection-1")
+        XCTAssertEqual(connection.destinationHost, "example.test")
+        XCTAssertEqual(connection.destinationIP, "198.51.100.10")
+        XCTAssertEqual(connection.destinationPort, 443)
+        XCTAssertEqual(connection.network, "tcp")
+        XCTAssertEqual(connection.inbound, "mixed/local")
+        XCTAssertEqual(connection.outboundChain, ["proxy", "node"])
+        XCTAssertEqual(connection.uploadBytes, 4)
+        XCTAssertEqual(connection.downloadBytes, 8)
+        XCTAssertNotNil(connection.startedAt)
+        XCTAssertFalse(Mirror(reflecting: connection).children.compactMap(\.label).contains("processPath"))
+        XCTAssertFalse(Mirror(reflecting: connection).children.compactMap(\.label).contains("unexpected"))
+    }
+
+    func testConnectionsParserRejectsInvalidTopLevelAndToleratesOptionalFields() throws {
+        XCTAssertThrowsError(try RuntimeConnectionsParser.parse(Data(#"{"uploadTotal":"not-a-number","downloadTotal":1,"connections":[]}"#.utf8)))
+        XCTAssertThrowsError(try RuntimeConnectionsParser.parse(Data(#"{"uploadTotal":true,"downloadTotal":1,"connections":[]}"#.utf8)))
+        XCTAssertThrowsError(try RuntimeConnectionsParser.parse(Data(#"[]"#.utf8)))
+        let snapshot = try RuntimeConnectionsParser.parse(Data(#"{"uploadTotal":0,"downloadTotal":0,"connections":[{"id":"stable"},{"metadata":{}}]}"#.utf8))
+        XCTAssertEqual(snapshot.totals.activeConnectionCount, 2)
+        XCTAssertEqual(snapshot.connections.map(\.id), ["stable"])
+        XCTAssertNil(snapshot.connections.first?.uploadBytes)
+        XCTAssertNil(snapshot.connections.first?.destinationHost)
+    }
+
+    func testTrafficHistoryIsBoundedAndResetsAtRuntimeBoundary() {
+        var history = RuntimeTrafficHistory()
+        for index in 0..<100 {
+            history.append(.init(
+                state: .available, uploadTotalBytes: 0, downloadTotalBytes: 0,
+                uploadBytesPerSecond: Double(index), downloadBytesPerSecond: Double(index + 1),
+                activeConnectionCount: 0, observedAt: Date(timeIntervalSince1970: Double(index))
+            ))
+        }
+        XCTAssertEqual(history.samples.count, RuntimeTrafficHistory.maximumSamples)
+        XCTAssertEqual(history.samples.first?.uploadBytesPerSecond, 10)
+        history.reset()
+        XCTAssertTrue(history.samples.isEmpty)
+    }
+
+    func testRuntimeLogBufferBoundsEntriesHandlesPartialUTF8AndRedacts() {
+        let buffer = RuntimeLogBuffer()
+        buffer.append(Data("INFO first".utf8), timestamp: Date(timeIntervalSince1970: 1))
+        buffer.append(Data(" entry\nERROR url=https://user:password@example.test/path Authorization: Bearer controller-secret\n".utf8), timestamp: Date(timeIntervalSince1970: 2))
+        XCTAssertEqual(buffer.snapshot().map(\.level), [.info, .error])
+        XCTAssertFalse(buffer.snapshot().contains { $0.message.contains("user:password") })
+        XCTAssertFalse(buffer.snapshot().contains { $0.message.contains("controller-secret") })
+        for index in 0...RuntimeLogBuffer.maximumEntries {
+            buffer.append(Data("DEBUG line-\(index)\n".utf8))
+        }
+        let entries = buffer.snapshot()
+        XCTAssertEqual(entries.count, RuntimeLogBuffer.maximumEntries)
+        XCTAssertEqual(entries.last?.level, .debug)
+        XCTAssertGreaterThan(entries.first?.id ?? 0, 1)
+        buffer.clear()
+        XCTAssertTrue(buffer.snapshot().isEmpty)
+    }
+
     func testPolicySelectPersistsThenHotAppliesAndRereadsAuthority() async throws {
         let store = try makeStore()
         let selected = try store.create(name: "Runtime")
