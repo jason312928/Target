@@ -6,6 +6,7 @@ import TargetCore
 struct TargetApp: App {
     @State private var lifecycle: BackendLifecycleModel
     @State private var profileModel: ProfileViewModel
+    @State private var preferences: ApplicationPreferencesModel
 
     init() {
         let profileStore: ProfileStore
@@ -42,6 +43,7 @@ struct TargetApp: App {
             store: profileStore,
             policyOperations: policyOperations
         ))
+        _preferences = State(initialValue: ApplicationPreferencesModel(loginItemManager: SMAppLoginItemManager()))
         let operations = TargetAutomationOperations(
             profileStore: profileStore,
             policyOperations: policyOperations,
@@ -64,9 +66,13 @@ struct TargetApp: App {
 
     var body: some Scene {
         Window("Target", id: TargetMainWindowActivation.windowID) {
-            AppShellView(lifecycle: lifecycle, profileModel: profileModel)
+            AppShellView(lifecycle: lifecycle, profileModel: profileModel, preferences: preferences)
                 .onAppear { TargetApplicationDelegate.shared.lifecycle = lifecycle }
                 .background(TargetMainWindowMarker())
+        }
+
+        Settings {
+            SettingsView(preferences: preferences)
         }
 
         MenuBarExtra("Target", systemImage: MenuBarPresentation(

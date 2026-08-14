@@ -100,9 +100,11 @@ enum AppDestination: String, CaseIterable, Hashable, Identifiable {
     }
 }
 
-enum DashboardRouteIntent: Equatable {
+enum AppRouteIntent: Equatable {
     case selectDestination(AppDestination)
 }
+
+typealias DashboardRouteIntent = AppRouteIntent
 
 enum DashboardActionRouter {
     static func route(for action: DashboardPrimaryAction) -> DashboardRouteIntent? {

@@ -89,6 +89,12 @@ final class MenuBarPresentationTests: XCTestCase {
         XCTAssertEqual(TargetMainWindowActivation.decision(for: windows), .activateExistingMainWindow(index: 0))
     }
 
+    func testMenuBarProvidesSeparateNativeSettingsNavigationAction() {
+        XCTAssertEqual(MenuBarNavigationAction.allCases, [.openTarget, .openSettings])
+        XCTAssertNotEqual(MenuBarNavigationAction.openTarget, .openSettings)
+        XCTAssertEqual(MenuBarNavigationAction.openSettings.titleKey, "menu-bar.settings")
+    }
+
     private func makePresentation(
         status: BackendStatus = BackendStatus(
             serviceInstallation: .enabled,

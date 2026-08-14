@@ -4,6 +4,7 @@ import SwiftUI
 struct MenuBarView: View {
     @Bindable var lifecycle: BackendLifecycleModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
     init(lifecycle: BackendLifecycleModel) {
         self.lifecycle = lifecycle
@@ -53,9 +54,17 @@ struct MenuBarView: View {
             .accessibilityLabel(Text("menu-bar.refresh"))
             .accessibilityIdentifier("menu-bar.refresh")
 
-        Button("menu-bar.open-target", action: openTargetWindow)
-            .accessibilityLabel(Text("menu-bar.open-target"))
+        Button(LocalizedStringKey(MenuBarNavigationAction.openTarget.titleKey)) {
+            performNavigation(.openTarget)
+        }
+            .accessibilityLabel(Text(MenuBarNavigationAction.openTarget.titleKey))
             .accessibilityIdentifier("menu-bar.open-target")
+
+        Button(LocalizedStringKey(MenuBarNavigationAction.openSettings.titleKey)) {
+            performNavigation(.openSettings)
+        }
+            .accessibilityLabel(Text(MenuBarNavigationAction.openSettings.titleKey))
+            .accessibilityIdentifier("menu-bar.settings")
 
         Divider()
 
@@ -84,6 +93,27 @@ struct MenuBarView: View {
     private func openTargetWindow() {
         if !TargetMainWindowActivation.activateExistingWindow() {
             openWindow(id: TargetMainWindowActivation.windowID)
+        }
+    }
+
+    private func performNavigation(_ action: MenuBarNavigationAction) {
+        switch action {
+        case .openTarget:
+            openTargetWindow()
+        case .openSettings:
+            openSettings()
+        }
+    }
+}
+
+enum MenuBarNavigationAction: CaseIterable, Equatable {
+    case openTarget
+    case openSettings
+
+    var titleKey: String {
+        switch self {
+        case .openTarget: "menu-bar.open-target"
+        case .openSettings: "menu-bar.settings"
         }
     }
 }

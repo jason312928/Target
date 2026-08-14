@@ -7,6 +7,7 @@ enum AppShellLayout {
 
 struct AppShellView: View {
     let lifecycle: BackendLifecycleModel
+    let preferences: ApplicationPreferencesModel
     @SceneStorage("app-shell.destination") private var persistedDestinationRawValue: String?
     @State private var profileModel: ProfileViewModel
     @State private var outerColumnVisibility: NavigationSplitViewVisibility = .all
@@ -18,10 +19,12 @@ struct AppShellView: View {
     init(
         lifecycle: BackendLifecycleModel,
         profileModel: ProfileViewModel? = nil,
+        preferences: ApplicationPreferencesModel,
         refreshOnTask: Bool = true,
         restoredDestination: AppDestination? = nil
     ) {
         self.lifecycle = lifecycle
+        self.preferences = preferences
         _profileModel = State(initialValue: profileModel ?? ProfileViewModel())
         self.refreshOnTask = refreshOnTask
         self.restoredDestination = restoredDestination
@@ -56,6 +59,14 @@ struct AppShellView: View {
                 lifecycle.refresh()
             }
         }
+        .sheet(isPresented: onboardingPresentationBinding) {
+            OnboardingView(
+                onComplete: preferences.completeOnboarding,
+                onOpenProfiles: {
+                    handle(OnboardingActionRouter.routeToProfiles())
+                }
+            )
+        }
     }
 
     private var destination: Binding<AppDestination> {
@@ -69,11 +80,22 @@ struct AppShellView: View {
         persistedDestinationRawValue = AppDestination.destination(for: persistedDestinationRawValue).rawValue
     }
 
-    private func handle(_ intent: DashboardRouteIntent) {
+    private func handle(_ intent: AppRouteIntent) {
         switch intent {
         case .selectDestination(let destination):
             persistedDestinationRawValue = destination.rawValue
         }
+    }
+
+    private var onboardingPresentationBinding: Binding<Bool> {
+        Binding(
+            get: { preferences.shouldPresentOnboarding },
+            set: { isPresented in
+                if !isPresented {
+                    preferences.dismissOnboarding()
+                }
+            }
+        )
     }
 
     private func toggleOuterSidebar() {

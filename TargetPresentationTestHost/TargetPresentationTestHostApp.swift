@@ -8,11 +8,16 @@ import SwiftUI
 struct TargetPresentationTestHostApp: App {
     @NSApplicationDelegateAdaptor(PresentationTestHostApplicationDelegate.self) private var appDelegate
     @State private var fixture: PresentationFixture
+    @State private var preferences: ApplicationPreferencesModel
 
     init() {
         do {
             PresentationShellState.resetDestinationIfRequested()
             _fixture = State(initialValue: try PresentationFixture(scenario: .fromLaunchArguments()))
+            _preferences = State(initialValue: ApplicationPreferencesModel(
+                onboardingPreferences: PresentationOnboardingPreferences(),
+                loginItemManager: PresentationLoginItemManager()
+            ))
         } catch {
             fatalError("Unable to create presentation fixture: \(error)")
         }
@@ -40,6 +45,7 @@ struct TargetPresentationTestHostApp: App {
             AppShellView(
                 lifecycle: fixture.lifecycle,
                 profileModel: fixture.model,
+                preferences: preferences,
                 refreshOnTask: false,
                 restoredDestination: PresentationShellState.restoredDestination
             )
@@ -47,6 +53,17 @@ struct TargetPresentationTestHostApp: App {
             ProfileWorkspaceView(lifecycle: nil, model: fixture.model)
         }
     }
+}
+
+@MainActor
+private final class PresentationLoginItemManager: LoginItemManaging {
+    func currentStatus() throws -> LoginItemRegistrationStatus { .disabled }
+    func register() throws {}
+    func unregister() throws {}
+}
+
+private final class PresentationOnboardingPreferences: OnboardingPersisting {
+    var hasCompletedOnboarding = true
 }
 
 private enum PresentationShellState {
