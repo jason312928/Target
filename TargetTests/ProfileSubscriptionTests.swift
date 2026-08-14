@@ -61,6 +61,89 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         }
     }
 
+    func testSubscriptionURLPolicyAllowsPublicAndFakeIPHostnameResolutions() throws {
+        for address in ["93.184.216.34", "198.18.0.1", "198.19.20.30"] {
+            let policy = SubscriptionURLPolicy(
+                allowsLocalHTTPForTesting: false,
+                resolver: FixedSubscriptionHostResolver(addresses: ["provider.example": [address]])
+            )
+            XCTAssertNoThrow(try policy.validate(try XCTUnwrap(URL(string: "https://provider.example/sub"))))
+        }
+
+        let failedResolution = SubscriptionURLPolicy(
+            allowsLocalHTTPForTesting: false,
+            resolver: FixedSubscriptionHostResolver(addresses: [:])
+        )
+        XCTAssertNoThrow(try failedResolution.validate(try XCTUnwrap(URL(string: "https://provider.example/sub"))))
+    }
+
+    func testSubscriptionURLPolicyRejectsSyntheticLiteralsAndPrivateHostnameResolutions() throws {
+        let noResolution = SubscriptionURLPolicy(
+            allowsLocalHTTPForTesting: false,
+            resolver: FixedSubscriptionHostResolver(addresses: [:])
+        )
+        for string in ["https://198.18.0.1/sub", "https://198.19.20.30/sub"] {
+            XCTAssertThrowsError(try noResolution.validate(try XCTUnwrap(URL(string: string)))) { error in
+                XCTAssertEqual(error as? SubscriptionUpdateError, .unsafeURL)
+            }
+        }
+
+        for address in ["127.0.0.1", "10.20.30.40", "172.16.20.30", "192.168.20.30", "169.254.20.30", "::1", "fd00::1", "fe80::1"] {
+            let policy = SubscriptionURLPolicy(
+                allowsLocalHTTPForTesting: false,
+                resolver: FixedSubscriptionHostResolver(addresses: ["provider.example": [address]])
+            )
+            XCTAssertThrowsError(try policy.validate(try XCTUnwrap(URL(string: "https://provider.example/sub")))) { error in
+                XCTAssertEqual(error as? SubscriptionUpdateError, .unsafeURL)
+            }
+        }
+
+        let mixed = SubscriptionURLPolicy(
+            allowsLocalHTTPForTesting: false,
+            resolver: FixedSubscriptionHostResolver(addresses: ["provider.example": ["198.18.0.1", "93.184.216.34", "10.0.0.1"]])
+        )
+        XCTAssertThrowsError(try mixed.validate(try XCTUnwrap(URL(string: "https://provider.example/sub")))) { error in
+            XCTAssertEqual(error as? SubscriptionUpdateError, .unsafeURL)
+        }
+    }
+
+    func testSubscriptionURLPolicyKeepsMalformedHTTPCredentialAndLocalHostRejections() throws {
+        let policy = SubscriptionURLPolicy(
+            allowsLocalHTTPForTesting: false,
+            resolver: FixedSubscriptionHostResolver(addresses: ["provider.example": ["93.184.216.34"]])
+        )
+        for string in [
+            "not-a-url",
+            "http://provider.example/sub",
+            "https://user:password@provider.example/sub",
+            "https://localhost/sub",
+            "https://service.localhost/sub",
+            "https://service.local/sub"
+        ] {
+            XCTAssertThrowsError(try policy.validate(try XCTUnwrap(URL(string: string)))) { error in
+                XCTAssertEqual(error as? SubscriptionUpdateError, .unsafeURL)
+            }
+        }
+    }
+
+    func testSubscriptionRedirectRejectsInjectedPrivateHostnameResolution() async throws {
+        let server = try MockHTTPServer(responses: [
+            .init(status: 302, headers: ["Location": "https://redirect.example/sub"], body: Data())
+        ])
+        defer { server.stop() }
+        let policy = SubscriptionURLPolicy(
+            allowsLocalHTTPForTesting: true,
+            resolver: FixedSubscriptionHostResolver(addresses: ["redirect.example": ["10.0.0.1"]])
+        )
+        let fetcher = SecureSubscriptionFetcher(policy: policy, timeout: 1, retryCount: 0)
+        do {
+            _ = try await fetcher.fetch(subscription: RemoteSubscription(url: server.url))
+            XCTFail("Expected redirect rejection")
+        } catch let error as SubscriptionUpdateError {
+            XCTAssertEqual(error, .unsafeRedirect)
+        }
+    }
+
     func testSubscriptionRejectsLargeResponseFromLocalMockServer() async throws {
         let server = try MockHTTPServer(responses: [.init(status: 200, headers: [:], body: Data(repeating: 65, count: 2048))])
         defer { server.stop() }
@@ -397,6 +480,14 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
     private struct ImmediateSubscriptionFetcher: ProfileSubscriptionFetching {
         let result: Result<SubscriptionResponse, Error>
         func fetch(subscription: RemoteSubscription) async throws -> SubscriptionResponse { try result.get() }
+    }
+
+    private struct FixedSubscriptionHostResolver: SubscriptionHostResolving {
+        let addresses: [String: [String]]
+
+        func addresses(for host: String) -> [String]? {
+            addresses[host]
+        }
     }
 
 private final class MockHTTPServer: @unchecked Sendable {

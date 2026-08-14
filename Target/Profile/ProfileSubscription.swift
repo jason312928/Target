@@ -42,14 +42,49 @@ protocol ProfileSubscriptionFetching: Sendable {
     func fetch(subscription: RemoteSubscription) async throws -> SubscriptionResponse
 }
 
+protocol SubscriptionHostResolving: Sendable {
+    /// Returns numeric addresses, or nil when the system resolver cannot produce
+    /// an answer. Resolution failure remains a transport concern.
+    func addresses(for host: String) -> [String]?
+}
+
+struct SystemSubscriptionHostResolver: SubscriptionHostResolving {
+    func addresses(for host: String) -> [String]? {
+        var hints = addrinfo(ai_flags: AI_ADDRCONFIG, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM, ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil)
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &result) == 0, let result else { return nil }
+        defer { freeaddrinfo(result) }
+
+        var addresses: [String] = []
+        var cursor: UnsafeMutablePointer<addrinfo>? = result
+        while let info = cursor?.pointee {
+            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(info.ai_addr, info.ai_addrlen, &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST) == 0 {
+                addresses.append(String(cString: buffer))
+            }
+            cursor = info.ai_next
+        }
+        return addresses
+    }
+}
+
 /// The production policy accepts only public HTTPS origins. The test-only switch
 /// exists so unit tests can exercise the HTTP state machine against an isolated
 /// loopback mock server without weakening the app's production path.
 struct SubscriptionURLPolicy: Sendable {
     let allowsLocalHTTPForTesting: Bool
+    private let resolver: any SubscriptionHostResolving
 
     static let production = SubscriptionURLPolicy(allowsLocalHTTPForTesting: false)
     static let localMockTesting = SubscriptionURLPolicy(allowsLocalHTTPForTesting: true)
+
+    init(
+        allowsLocalHTTPForTesting: Bool,
+        resolver: any SubscriptionHostResolving = SystemSubscriptionHostResolver()
+    ) {
+        self.allowsLocalHTTPForTesting = allowsLocalHTTPForTesting
+        self.resolver = resolver
+    }
 
     func validate(_ url: URL) throws {
         guard let scheme = url.scheme?.lowercased(), let host = url.host, !host.isEmpty else {
@@ -60,15 +95,26 @@ struct SubscriptionURLPolicy: Sendable {
            isLoopback(host) {
             return
         }
-        guard scheme == "https", url.user == nil, url.password == nil, !isLocalOrPrivateHost(host) else {
+        guard scheme == "https", url.user == nil, url.password == nil, isSafeHost(host) else {
             throw SubscriptionUpdateError.unsafeURL
         }
     }
 
-    private func isLocalOrPrivateHost(_ host: String) -> Bool {
+    private func isSafeHost(_ host: String) -> Bool {
         let lower = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-        if lower == "localhost" || lower.hasSuffix(".localhost") || lower.hasSuffix(".local") { return true }
-        return isPrivateIPv4(lower) || isPrivateIPv6(lower) || resolvesToPrivateAddress(lower)
+        if lower == "localhost" || lower.hasSuffix(".localhost") || lower.hasSuffix(".local") { return false }
+
+        if isIPv4Literal(lower) {
+            return !isUnsafeIPv4(lower, allowsSyntheticBenchmarkRange: false)
+        }
+        if isIPv6Literal(lower) {
+            return !isUnsafeIPv6(lower)
+        }
+
+        guard let addresses = resolver.addresses(for: lower) else { return true }
+        return !addresses.contains { address in
+            isUnsafeIPv4(address, allowsSyntheticBenchmarkRange: true) || isUnsafeIPv6(address)
+        }
     }
 
     private func isLoopback(_ host: String) -> Bool {
@@ -76,9 +122,18 @@ struct SubscriptionURLPolicy: Sendable {
         return lower == "localhost" || lower == "::1" || lower.hasPrefix("127.")
     }
 
-    private func isPrivateIPv4(_ host: String) -> Bool {
+    private func isIPv4Literal(_ host: String) -> Bool {
         var address = in_addr()
-        guard inet_pton(AF_INET, host, &address) == 1 else { return false }
+        return inet_pton(AF_INET, host, &address) == 1
+    }
+
+    private func isIPv6Literal(_ host: String) -> Bool {
+        var address = in6_addr()
+        return inet_pton(AF_INET6, host, &address) == 1
+    }
+
+    private func isUnsafeIPv4(_ host: String, allowsSyntheticBenchmarkRange: Bool) -> Bool {
+        guard isIPv4Literal(host) else { return false }
         let bytes = host.split(separator: ".").compactMap { UInt8($0) }
         guard bytes.count == 4 else { return false }
         let a = bytes[0], b = bytes[1]
@@ -87,35 +142,15 @@ struct SubscriptionURLPolicy: Sendable {
             || (a == 169 && b == 254)
             || (a == 172 && (16...31).contains(b))
             || (a == 192 && b == 168)
-            || (a == 198 && (18...19).contains(b))
+            || (!allowsSyntheticBenchmarkRange && a == 198 && (18...19).contains(b))
     }
 
-    private func isPrivateIPv6(_ host: String) -> Bool {
+    private func isUnsafeIPv6(_ host: String) -> Bool {
         var address = in6_addr()
         guard inet_pton(AF_INET6, host, &address) == 1 else { return false }
         let bytes = withUnsafeBytes(of: address) { Array($0) }
         return bytes.allSatisfy { $0 == 0 } || (bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1)
             || (bytes[0] & 0xfe) == 0xfc || (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80)
-    }
-
-    /// Resolve before connecting so a public-looking hostname cannot point at a
-    /// loopback or RFC1918 address. Failed resolution is left to URLSession as a
-    /// normal transport error; only an affirmative private result is rejected.
-    private func resolvesToPrivateAddress(_ host: String) -> Bool {
-        var hints = addrinfo(ai_flags: AI_ADDRCONFIG, ai_family: AF_UNSPEC, ai_socktype: SOCK_STREAM, ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil)
-        var result: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, nil, &hints, &result) == 0, let result else { return false }
-        defer { freeaddrinfo(result) }
-        var cursor: UnsafeMutablePointer<addrinfo>? = result
-        while let info = cursor?.pointee {
-            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            if getnameinfo(info.ai_addr, info.ai_addrlen, &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST) == 0 {
-                let address = String(cString: buffer)
-                if isPrivateIPv4(address) || isPrivateIPv6(address) { return true }
-            }
-            cursor = info.ai_next
-        }
-        return false
     }
 }
 
