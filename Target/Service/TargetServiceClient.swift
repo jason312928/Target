@@ -62,8 +62,36 @@ enum TargetServiceBundleLocation {
     }
 }
 
+struct TargetServiceXPCTimeouts: Equatable, Sendable {
+    static let production = TargetServiceXPCTimeouts(read: 2.5, mutation: 5)
+
+    let read: TimeInterval
+    let mutation: TimeInterval
+}
+
+protocol TargetServiceXPCConnecting: AnyObject {
+    var interruptionHandler: (() -> Void)? { get set }
+    var invalidationHandler: (() -> Void)? { get set }
+    func resume()
+    func invalidate()
+    func remoteObjectProxyWithErrorHandler(_ handler: @escaping (Error) -> Void) -> Any
+}
+
+extension NSXPCConnection: TargetServiceXPCConnecting {}
+
 final class TargetServiceXPCClient: SystemProxyClient, @unchecked Sendable {
-    func makeConnection() -> NSXPCConnection {
+    private let timeouts: TargetServiceXPCTimeouts
+    private let connectionFactory: () -> any TargetServiceXPCConnecting
+
+    init(
+        timeouts: TargetServiceXPCTimeouts = .production,
+        connectionFactory: (() -> any TargetServiceXPCConnecting)? = nil
+    ) {
+        self.timeouts = timeouts
+        self.connectionFactory = connectionFactory ?? Self.makeProductionConnection
+    }
+
+    private static func makeProductionConnection() -> any TargetServiceXPCConnecting {
         let connection = NSXPCConnection(
             machServiceName: TargetServiceIdentifiers.machService,
             options: .privileged
@@ -73,10 +101,11 @@ final class TargetServiceXPCClient: SystemProxyClient, @unchecked Sendable {
     }
 
     func ping() async throws -> String {
-        let connection = makeConnection()
+        let connection = connectionFactory()
         defer { connection.invalidate() }
         return try await withCheckedThrowingContinuation { continuation in
             let reply = XPCReplyOnce(continuation)
+            reply.armTimeout(after: timeouts.read) { connection.invalidate() }
             connection.interruptionHandler = { reply.fail() }
             connection.invalidationHandler = { reply.fail() }
             connection.resume()
@@ -90,10 +119,11 @@ final class TargetServiceXPCClient: SystemProxyClient, @unchecked Sendable {
     }
 
     func queryStatus() async throws -> BackendStatus {
-        let connection = makeConnection()
+        let connection = connectionFactory()
         defer { connection.invalidate() }
         return try await withCheckedThrowingContinuation { continuation in
             let reply = XPCReplyOnce(continuation)
+            reply.armTimeout(after: timeouts.read) { connection.invalidate() }
             connection.interruptionHandler = { reply.fail() }
             connection.invalidationHandler = { reply.fail() }
             connection.resume()
@@ -121,36 +151,38 @@ final class TargetServiceXPCClient: SystemProxyClient, @unchecked Sendable {
     }
 
     func querySystemProxyStatus() async throws -> SystemProxyStatus {
-        try await callSystemProxy { service, reply in
+        try await callSystemProxy(timeout: timeouts.read) { service, reply in
             service.querySystemProxyStatus(withReply: reply)
         }
     }
 
     func enableSystemProxy() async throws -> SystemProxyStatus {
-        try await callSystemProxy { service, reply in
+        try await callSystemProxy(timeout: timeouts.mutation) { service, reply in
             service.enableSystemProxy(withReply: reply)
         }
     }
 
     func disableSystemProxy() async throws -> SystemProxyStatus {
-        try await callSystemProxy { service, reply in
+        try await callSystemProxy(timeout: timeouts.mutation) { service, reply in
             service.disableSystemProxy(withReply: reply)
         }
     }
 
     func recoverSystemProxy() async throws -> SystemProxyStatus {
-        try await callSystemProxy { service, reply in
+        try await callSystemProxy(timeout: timeouts.mutation) { service, reply in
             service.recoverSystemProxy(withReply: reply)
         }
     }
 
     private func callSystemProxy(
+        timeout: TimeInterval,
         _ action: @escaping (TargetServiceXPCProtocol, @escaping (Data?, NSError?) -> Void) -> Void
     ) async throws -> SystemProxyStatus {
-        let connection = makeConnection()
+        let connection = connectionFactory()
         defer { connection.invalidate() }
         return try await withCheckedThrowingContinuation { continuation in
             let reply = XPCReplyOnce(continuation)
+            reply.armTimeout(after: timeout) { connection.invalidate() }
             connection.interruptionHandler = { reply.fail() }
             connection.invalidationHandler = { reply.fail() }
             connection.resume()
@@ -181,6 +213,7 @@ final class TargetServiceXPCClient: SystemProxyClient, @unchecked Sendable {
 private final class XPCReplyOnce<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, Error>?
+    private var timeoutWorkItem: DispatchWorkItem?
 
     init(_ continuation: CheckedContinuation<Value, Error>) {
         self.continuation = continuation
@@ -194,12 +227,35 @@ private final class XPCReplyOnce<Value>: @unchecked Sendable {
         finish(.failure(error))
     }
 
-    private func finish(_ result: Result<Value, Error>) {
+    func armTimeout(after interval: TimeInterval, invalidate: @escaping @Sendable () -> Void) {
+        let workItem = DispatchWorkItem { [weak self] in
+            guard self?.finish(.failure(BackendError.serviceUnavailable)) == true else { return }
+            invalidate()
+        }
+        lock.lock()
+        guard continuation != nil else {
+            lock.unlock()
+            return
+        }
+        timeoutWorkItem = workItem
+        lock.unlock()
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + max(0, interval),
+            execute: workItem
+        )
+    }
+
+    @discardableResult
+    private func finish(_ result: Result<Value, Error>) -> Bool {
         lock.lock()
         let continuation = continuation
         self.continuation = nil
+        let timeoutWorkItem = timeoutWorkItem
+        self.timeoutWorkItem = nil
         lock.unlock()
+        timeoutWorkItem?.cancel()
         continuation?.resume(with: result)
+        return continuation != nil
     }
 }
 

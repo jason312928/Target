@@ -511,21 +511,168 @@ final class BackendArchitectureTests: XCTestCase {
         }
     }
 
-    func testBuildPolicyMatchesCompilationMode() {
+    func testHostNetworkBuildPolicyMatrix() {
+        XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode(
+            buildChannel: .local, isDebugBuild: true, hasUTMValidationCondition: false
+        ), .safe)
+        XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode(
+            buildChannel: .local, isDebugBuild: false, hasUTMValidationCondition: false
+        ), .safe)
+        XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode(
+            buildChannel: TargetBuildChannel(bundleValue: "unknown"),
+            isDebugBuild: false,
+            hasUTMValidationCondition: false
+        ), .safe)
+        XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode(
+            buildChannel: .developmentPreview, isDebugBuild: false, hasUTMValidationCondition: false
+        ), .normalUser)
+        XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode(
+            buildChannel: .stable, isDebugBuild: false, hasUTMValidationCondition: false
+        ), .normalUser)
+        XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode(
+            buildChannel: .local, isDebugBuild: true, hasUTMValidationCondition: true
+        ), .authorizedNetworkTest)
+    }
+
+    func testCurrentLocalBuildChannelIsHostSafeInDebugAndReleaseTests() {
         let model = BackendLifecycleModel(backend: MockBackend())
 #if DEBUG && TARGET_UTM_VALIDATION
         XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode, .authorizedNetworkTest)
         XCTAssertFalse(TargetValidationPolicy.isHostSafeMode)
         XCTAssertFalse(model.isHostSafeMode)
-#elseif DEBUG
+#else
+        XCTAssertEqual(TargetValidationPolicy.buildChannel, .local)
         XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode, .safe)
         XCTAssertTrue(TargetValidationPolicy.isHostSafeMode)
         XCTAssertTrue(model.isHostSafeMode)
-#else
-        XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode, .normalUser)
-        XCTAssertFalse(TargetValidationPolicy.isHostSafeMode)
-        XCTAssertFalse(model.isHostSafeMode)
 #endif
+    }
+
+    func testNormalUserModeWritesOnlyAfterExplicitEnableAction() async throws {
+        let system = InMemorySystemProxySystem(serviceIDs: ["service-a"], settings: ["service-a": [:]])
+        let coordinator = testCoordinator(
+            system: system,
+            store: InMemoryRecoveryStore(),
+            probe: TogglePortProbe(available: true),
+            safetyMode: .normalUser
+        )
+
+        XCTAssertEqual(system.writeCount, 0)
+        _ = try await coordinator.enableSystemProxy()
+        XCTAssertEqual(system.writeCount, 1)
+    }
+
+    func testStartupRefreshSettlesWhenEnabledServicePingNeverReplies() async throws {
+        let service = FakeTargetService(pingDelay: nil)
+        let connection = FakeTargetServiceConnection(service: service)
+        let client = TargetServiceXPCClient(
+            timeouts: .init(read: 0.03, mutation: 0.05),
+            connectionFactory: { connection }
+        )
+        let proxyOperations = StartupSystemProxyOperation()
+        let backendStatus = BackendStatus(
+            serviceInstallation: .enabled,
+            engineState: .stopped,
+            engineInstallation: .installed,
+            hasSelectedValidProfile: true
+        )
+        let model = BackendLifecycleModel(
+            backend: MockBackend(initialStatus: backendStatus),
+            systemProxyClient: client,
+            systemProxyOperations: proxyOperations,
+            hostNetworkSafetyMode: .normalUser,
+            serviceRegistrationStatusProvider: { .enabled }
+        )
+
+        model.refresh()
+        try await waitUntil(timeout: .seconds(1)) { !model.isBusy }
+
+        XCTAssertEqual(model.xpcState, .unavailable)
+        XCTAssertTrue(model.canStart)
+        let startupEnableCount = await proxyOperations.enableCount
+        XCTAssertEqual(startupEnableCount, 0)
+        XCTAssertGreaterThanOrEqual(connection.invalidationCount, 1)
+    }
+
+    func testXPCReplyBeforeTimeoutSucceeds() async throws {
+        let service = FakeTargetService(pingDelay: 0, proxyDelay: 0)
+        let connection = FakeTargetServiceConnection(service: service)
+        let client = makeXPCClient(connection: connection)
+
+        let ping = try await client.ping()
+        let proxyStatus = try await client.querySystemProxyStatus()
+        XCTAssertEqual(ping, "target-service")
+        XCTAssertEqual(proxyStatus, .disabled)
+    }
+
+    func testXPCReadWithoutReplyFailsWithinBoundAndInvalidatesConnection() async {
+        let connection = FakeTargetServiceConnection(service: FakeTargetService(pingDelay: nil))
+        let client = makeXPCClient(connection: connection)
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        await XCTAssertThrowsErrorAsync(try await client.ping()) { error in
+            XCTAssertEqual(error as? BackendError, .serviceUnavailable)
+        }
+
+        XCTAssertLessThan(start.duration(to: clock.now), .seconds(1))
+        XCTAssertGreaterThanOrEqual(connection.invalidationCount, 1)
+    }
+
+    func testXPCStatusWithoutReplyFailsWithinBound() async {
+        let connection = FakeTargetServiceConnection(
+            service: FakeTargetService(statusDelay: nil)
+        )
+        let client = makeXPCClient(connection: connection)
+
+        await XCTAssertThrowsErrorAsync(try await client.queryStatus()) { error in
+            XCTAssertEqual(error as? BackendError, .serviceUnavailable)
+        }
+        XCTAssertGreaterThanOrEqual(connection.invalidationCount, 1)
+    }
+
+    func testXPCTimeoutThenLateReplyIsIgnored() async throws {
+        let service = FakeTargetService(pingDelay: 0.08)
+        let connection = FakeTargetServiceConnection(service: service)
+        let client = makeXPCClient(connection: connection)
+
+        await XCTAssertThrowsErrorAsync(try await client.ping()) { error in
+            XCTAssertEqual(error as? BackendError, .serviceUnavailable)
+        }
+        try await Task.sleep(for: .milliseconds(120))
+
+        XCTAssertEqual(service.pingReplyCount, 1)
+        XCTAssertGreaterThanOrEqual(connection.invalidationCount, 1)
+    }
+
+    func testXPCConnectionInvalidationFailsPendingCall() async {
+        let connection = FakeTargetServiceConnection(
+            service: FakeTargetService(pingDelay: nil),
+            invalidateOnResume: true
+        )
+        let client = makeXPCClient(connection: connection)
+
+        await XCTAssertThrowsErrorAsync(try await client.ping()) { error in
+            XCTAssertEqual(error as? BackendError, .serviceUnavailable)
+        }
+    }
+
+    func testAllSystemProxyCallsTimeoutAndSettle() async {
+        let connection = FakeTargetServiceConnection(service: FakeTargetService(proxyDelay: nil))
+        let client = makeXPCClient(connection: connection)
+        let actions: [() async throws -> SystemProxyStatus] = [
+            { try await client.querySystemProxyStatus() },
+            { try await client.enableSystemProxy() },
+            { try await client.disableSystemProxy() },
+            { try await client.recoverSystemProxy() }
+        ]
+
+        for action in actions {
+            await XCTAssertThrowsErrorAsync(try await action()) { error in
+                XCTAssertEqual(error as? BackendError, .serviceUnavailable)
+            }
+        }
+        XCTAssertGreaterThanOrEqual(connection.invalidationCount, actions.count)
     }
 
     func testModelPresentsStartErrorWhenDefaultServiceIsMissing() async throws {
@@ -635,15 +782,23 @@ final class BackendArchitectureTests: XCTestCase {
     private func testCoordinator(
         system: InMemorySystemProxySystem,
         store: InMemoryRecoveryStore,
-        probe: TogglePortProbe
+        probe: TogglePortProbe,
+        safetyMode: HostNetworkSafetyMode = .authorizedNetworkTest
     ) -> SystemProxyCoordinator {
         SystemProxyCoordinator(
             system: system,
             recoveryStore: store,
             portProbe: probe,
             environment: FixedHostEnvironment(proxyConfigured: false, proxyApplicationRunning: false),
-            safetyMode: .authorizedNetworkTest,
+            safetyMode: safetyMode,
             endpointProvider: { LocalEngineEndpoint(port: 51_234) }
+        )
+    }
+
+    private func makeXPCClient(connection: FakeTargetServiceConnection) -> TargetServiceXPCClient {
+        TargetServiceXPCClient(
+            timeouts: .init(read: 0.03, mutation: 0.04),
+            connectionFactory: { connection }
         )
     }
 
@@ -819,6 +974,133 @@ private struct FixedHostEnvironment: HostNetworkEnvironmentChecking {
             hasConfiguredSystemProxy: proxyConfigured,
             hasRunningProxyApplication: proxyApplicationRunning
         )
+    }
+}
+
+private actor StartupSystemProxyOperation: TargetSystemProxyOperating {
+    private(set) var enableCount = 0
+
+    func queryStatus() async throws -> SystemProxyStatus { .disabled }
+    func enable() async throws -> SystemProxyStatus {
+        enableCount += 1
+        return .disabled
+    }
+    func disable() async throws -> SystemProxyStatus { .disabled }
+    func recover() async throws -> SystemProxyStatus { .disabled }
+}
+
+private final class FakeTargetServiceConnection: TargetServiceXPCConnecting, @unchecked Sendable {
+    var interruptionHandler: (() -> Void)?
+    var invalidationHandler: (() -> Void)?
+
+    private let service: FakeTargetService
+    private let invalidateOnResume: Bool
+    private let lock = NSLock()
+    private var storedInvalidationCount = 0
+
+    init(service: FakeTargetService, invalidateOnResume: Bool = false) {
+        self.service = service
+        self.invalidateOnResume = invalidateOnResume
+    }
+
+    var invalidationCount: Int {
+        lock.withLock { storedInvalidationCount }
+    }
+
+    func resume() {
+        if invalidateOnResume {
+            invalidationHandler?()
+        }
+    }
+
+    func invalidate() {
+        lock.withLock { storedInvalidationCount += 1 }
+    }
+
+    func remoteObjectProxyWithErrorHandler(_ handler: @escaping (Error) -> Void) -> Any {
+        service
+    }
+}
+
+private final class FakeTargetService: NSObject, TargetServiceXPCProtocol, @unchecked Sendable {
+    private let pingDelay: TimeInterval?
+    private let statusDelay: TimeInterval?
+    private let proxyDelay: TimeInterval?
+    private let lock = NSLock()
+    private var storedPingReplyCount = 0
+
+    init(
+        pingDelay: TimeInterval? = 0,
+        statusDelay: TimeInterval? = 0,
+        proxyDelay: TimeInterval? = 0
+    ) {
+        self.pingDelay = pingDelay
+        self.statusDelay = statusDelay
+        self.proxyDelay = proxyDelay
+    }
+
+    var pingReplyCount: Int {
+        lock.withLock { storedPingReplyCount }
+    }
+
+    func ping(withReply reply: @escaping (String) -> Void) {
+        schedule(after: pingDelay) { [self] in
+            lock.withLock { storedPingReplyCount += 1 }
+            reply("target-service")
+        }
+    }
+
+    func queryStatus(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        schedule(after: statusDelay) {
+            let status = BackendStatus(serviceInstallation: .enabled, engineState: .stopped)
+            reply(try? XPCPayloadCodec.encodeStatus(status), nil)
+        }
+    }
+
+    func validateConfiguration(_ request: Data, withReply reply: @escaping (NSError?) -> Void) {
+        reply(nil)
+    }
+
+    func startEngine(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        queryStatus(withReply: reply)
+    }
+
+    func stopEngine(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        queryStatus(withReply: reply)
+    }
+
+    func querySystemProxyStatus(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        replyWithProxyStatus(after: proxyDelay, reply: reply)
+    }
+
+    func enableSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        replyWithProxyStatus(after: proxyDelay, reply: reply)
+    }
+
+    func disableSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        replyWithProxyStatus(after: proxyDelay, reply: reply)
+    }
+
+    func recoverSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        replyWithProxyStatus(after: proxyDelay, reply: reply)
+    }
+
+    private func replyWithProxyStatus(
+        after delay: TimeInterval?,
+        reply: @escaping (Data?, NSError?) -> Void
+    ) {
+        schedule(after: delay) {
+            reply(try? XPCPayloadCodec.encodeSystemProxyStatus(.disabled), nil)
+        }
+    }
+
+    private func schedule(after delay: TimeInterval?, action: @escaping () -> Void) {
+        guard let delay else { return }
+        if delay == 0 {
+            action()
+        } else {
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + delay, execute: action)
+        }
     }
 }
 

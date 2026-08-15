@@ -21,6 +21,7 @@ final class BackendLifecycleModel {
     private var observesLogs = false
     private var trafficHistoryModel = RuntimeTrafficHistory()
     private let hostNetworkSafetyMode: HostNetworkSafetyMode
+    private let serviceRegistrationStatusProvider: @Sendable () -> ServiceInstallationState
     private let cancellationReconciliationTimeout = Duration.milliseconds(250)
 
     private(set) var status: BackendStatus
@@ -47,7 +48,10 @@ final class BackendLifecycleModel {
         runtimeObservationOperations: any TargetRuntimeObserving = UnavailableRuntimeObservationProvider(),
         runtimeConnectionProvider: (any RuntimeConnectionProviding)? = nil,
         runtimeLogProvider: (any RuntimeLogProviding)? = nil,
-        hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode
+        hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode,
+        serviceRegistrationStatusProvider: @escaping @Sendable () -> ServiceInstallationState = {
+            TargetServiceRegistration.status
+        }
     ) {
         self.backend = backend
         self.engineInstaller = backend as? any EngineInstalling
@@ -66,8 +70,9 @@ final class BackendLifecycleModel {
         self.runtimeConnectionProvider = runtimeConnectionProvider ?? (backend as? any RuntimeConnectionProviding)
         self.runtimeLogProvider = runtimeLogProvider ?? (backend as? any RuntimeLogProviding)
         self.hostNetworkSafetyMode = hostNetworkSafetyMode
+        self.serviceRegistrationStatusProvider = serviceRegistrationStatusProvider
         self.status = .mockDefault
-        self.serviceInstallation = TargetServiceRegistration.status
+        self.serviceInstallation = serviceRegistrationStatusProvider()
         self.xpcState = .unknown
         self.lifecycleState = .stopped
         self.error = nil
@@ -630,7 +635,7 @@ final class BackendLifecycleModel {
     }
 
     private func refreshServiceStatus() async {
-        let installation = TargetServiceRegistration.status
+        let installation = serviceRegistrationStatusProvider()
         serviceInstallation = installation
         guard installation == .enabled else {
             xpcState = .unknown

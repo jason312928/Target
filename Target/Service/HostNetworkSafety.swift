@@ -1,6 +1,22 @@
 import AppKit
 import Foundation
 
+/// Pure build identity shared by updater presentation and host-network policy.
+/// Unknown or missing values deliberately resolve to `.local`.
+enum TargetBuildChannel: Equatable {
+    case local
+    case developmentPreview
+    case stable
+
+    init(bundleValue: String?) {
+        switch bundleValue?.lowercased() {
+        case "developmentpreview", "development-preview": self = .developmentPreview
+        case "stable", "release": self = .stable
+        default: self = .local
+        }
+    }
+}
+
 enum HostNetworkSafetyMode: Equatable, Sendable {
     /// Development-machine default. Network writes are never enabled by application
     /// state alone in this mode.
@@ -25,15 +41,43 @@ enum HostNetworkSafetyMode: Equatable, Sendable {
 
 enum TargetValidationPolicy {
 #if DEBUG && TARGET_UTM_VALIDATION
-    static let hostNetworkSafetyMode = HostNetworkSafetyMode.authorizedNetworkTest
+    private static let isDebugBuild = true
+    private static let hasUTMValidationCondition = true
     static let isUTMValidation = true
 #elseif DEBUG
-    static let hostNetworkSafetyMode = HostNetworkSafetyMode.safe
+    private static let isDebugBuild = true
+    private static let hasUTMValidationCondition = false
     static let isUTMValidation = false
 #else
-    static let hostNetworkSafetyMode = HostNetworkSafetyMode.normalUser
+    private static let isDebugBuild = false
+    private static let hasUTMValidationCondition = false
     static let isUTMValidation = false
 #endif
+
+    static let buildChannel = TargetBuildChannel(
+        bundleValue: Bundle.main.object(forInfoDictionaryKey: "TargetBuildChannel") as? String
+    )
+    static let hostNetworkSafetyMode = hostNetworkSafetyMode(
+        buildChannel: buildChannel,
+        isDebugBuild: isDebugBuild,
+        hasUTMValidationCondition: hasUTMValidationCondition
+    )
+
+    static func hostNetworkSafetyMode(
+        buildChannel: TargetBuildChannel,
+        isDebugBuild: Bool,
+        hasUTMValidationCondition: Bool
+    ) -> HostNetworkSafetyMode {
+        if isDebugBuild && hasUTMValidationCondition {
+            return .authorizedNetworkTest
+        }
+        switch buildChannel {
+        case .local:
+            return .safe
+        case .developmentPreview, .stable:
+            return .normalUser
+        }
+    }
 
     static var isHostSafeMode: Bool { !hostNetworkSafetyMode.permitsNetworkWrites }
 }

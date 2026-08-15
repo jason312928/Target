@@ -2,19 +2,7 @@ import Foundation
 import Observation
 import Sparkle
 
-enum TargetBuildChannel: Equatable {
-    case local
-    case developmentPreview
-    case stable
-
-    init(bundleValue: String?) {
-        switch bundleValue?.lowercased() {
-        case "developmentpreview", "development-preview": self = .developmentPreview
-        case "stable", "release": self = .stable
-        default: self = .local
-        }
-    }
-
+extension TargetBuildChannel {
     var localizedKey: String {
         switch self {
         case .local: "settings.software-update.channel.local"
