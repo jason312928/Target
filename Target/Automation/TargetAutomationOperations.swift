@@ -464,7 +464,7 @@ actor TargetAutomationOperations {
         case .protocolUnsupported:
             .failure(code: "subscription_protocol_unsupported", message: "The subscription contains an unsupported protocol.")
         case .variantUnsupported:
-            .failure(code: "subscription_protocol_unsupported", message: "The subscription contains an unsupported protocol variant.")
+            .failure(code: "subscription_variant_unsupported", message: "The subscription contains an unsupported protocol variant.")
         case .validationFailed:
             .failure(code: "subscription_validation_failed", message: "The normalized Profile failed sing-box validation.")
         case .emptyPayload, .invalidUTF8, .payloadInvalid, .complexityLimitExceeded:

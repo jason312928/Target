@@ -703,6 +703,25 @@ final class AutomationControlPlaneTests: XCTestCase {
         ))
         XCTAssertEqual(response.error?.code, "subscription_protocol_unsupported")
         XCTAssertFalse(String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self).contains(token))
+
+        let variantOperations = TargetAutomationOperations(
+            profileStore: ProfileStore(
+                rootDirectory: root.appending(path: "VariantProfiles"),
+                checker: AutomationPassingChecker(),
+                keyProvider: TestProfileKeyProvider()
+            ),
+            subscriptionFetcher: AutomationSubscriptionFetcher(response: .init(
+                data: Data("trojan://test-password@example.com:443?security=none".utf8),
+                cacheStatus: .updated, etag: nil, lastModified: nil
+            )),
+            backend: MockBackend()
+        )
+        let variant = await variantOperations.handle(.init(
+            protocolVersion: 1,
+            action: "profile.subscribe",
+            arguments: ["name": "Provider", "url": "https://example.com/variant", "confirm": "true"]
+        ))
+        XCTAssertEqual(variant.error?.code, "subscription_variant_unsupported")
     }
 
     func testProfileSubscriptionUpdateAutomationUsesStoredSourceAndConfirmation() async throws {
