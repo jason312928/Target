@@ -18,7 +18,13 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         let cached = RemoteSubscription(url: server.url, etag: first.etag, lastModified: first.lastModified)
         let second = try await fetcher.fetch(subscription: cached)
         XCTAssertEqual(second.cacheStatus, .notModified)
-        XCTAssertTrue(server.requests.contains { $0.contains("If-None-Match: v1") })
+        let requests = server.requests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertTrue(requests.allSatisfy { $0.method == "GET" })
+        XCTAssertTrue(requests.allSatisfy { $0.headers["user-agent"] == SecureSubscriptionFetcher.userAgent })
+        XCTAssertTrue(requests.allSatisfy { $0.headers["accept"] == SecureSubscriptionFetcher.accept })
+        XCTAssertEqual(requests[1].headers["if-none-match"], "v1")
+        XCTAssertEqual(requests[1].headers["if-modified-since"], "Wed, 01 Jan 2025 00:00:00 GMT")
     }
 
     func testSubscriptionTimeoutAndCancellationWithLocalMockServer() async throws {
@@ -31,8 +37,9 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         do {
             _ = try await slow.fetch(subscription: RemoteSubscription(url: server.url))
             XCTFail("Expected timeout")
-        } catch let error as SubscriptionUpdateError {
-            XCTAssertEqual(error, .timedOut)
+        } catch let failure as SubscriptionFetchFailure {
+            XCTAssertEqual(failure.cause, .timedOut)
+            XCTAssertEqual(failure.attempts, 1)
         }
 
         let task = Task { try await SecureSubscriptionFetcher(policy: .localMockTesting, timeout: 2, retryCount: 0).fetch(subscription: RemoteSubscription(url: server.url)) }
@@ -53,8 +60,8 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         do {
             _ = try await fetcher.fetch(subscription: RemoteSubscription(url: server.url))
             XCTFail("Expected redirect rejection")
-        } catch let error as SubscriptionUpdateError {
-            XCTAssertEqual(error, .unsafeRedirect)
+        } catch let failure as SubscriptionFetchFailure {
+            XCTAssertEqual(failure.cause, .unsafeRedirect)
         }
         for string in ["file:///tmp/sub.json", "http://example.com/sub", "https://localhost/sub", "https://127.0.0.1/sub", "https://10.0.0.1/sub", "https://[::1]/sub"] {
             XCTAssertThrowsError(try SubscriptionURLPolicy.production.validate(try XCTUnwrap(URL(string: string))))
@@ -139,8 +146,8 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         do {
             _ = try await fetcher.fetch(subscription: RemoteSubscription(url: server.url))
             XCTFail("Expected redirect rejection")
-        } catch let error as SubscriptionUpdateError {
-            XCTAssertEqual(error, .unsafeRedirect)
+        } catch let failure as SubscriptionFetchFailure {
+            XCTAssertEqual(failure.cause, .unsafeRedirect)
         }
     }
 
@@ -151,9 +158,260 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         do {
             _ = try await fetcher.fetch(subscription: RemoteSubscription(url: server.url))
             XCTFail("Expected response size rejection")
-        } catch let error as SubscriptionUpdateError {
-            XCTAssertEqual(error, .responseTooLarge)
+        } catch let failure as SubscriptionFetchFailure {
+            XCTAssertEqual(failure.cause, .responseTooLarge)
+            XCTAssertEqual(failure.response?.byteCount, 2_048)
         }
+    }
+
+    func testHTTPRetryPolicyUsesBoundedStatusAllowlist() async throws {
+        for status in [400, 401, 403, 404, 406, 409, 410] {
+            let server = try MockHTTPServer(responses: [
+                .init(status: status, headers: ["Content-Type": "text/plain"], body: Data())
+            ])
+            defer { server.stop() }
+            do {
+                _ = try await SecureSubscriptionFetcher(
+                    policy: .localMockTesting, timeout: 1, retryCount: 2
+                ).fetch(subscription: RemoteSubscription(url: server.url))
+                XCTFail("Expected HTTP \(status)")
+            } catch let failure as SubscriptionFetchFailure {
+                XCTAssertEqual(failure.cause, .httpStatus(status))
+                XCTAssertEqual(failure.attempts, 1)
+                XCTAssertEqual(failure.response?.contentType, "text/plain")
+            }
+            XCTAssertEqual(server.requests.count, 1, "HTTP \(status) must not be retried")
+        }
+
+        for status in [408, 429, 500, 502, 503, 504] {
+            let server = try MockHTTPServer(responses: [
+                .init(status: status, headers: [:], body: Data()),
+                .init(status: status, headers: [:], body: Data()),
+                .init(status: 200, headers: [:], body: Data("{}".utf8))
+            ])
+            defer { server.stop() }
+            let response = try await SecureSubscriptionFetcher(
+                policy: .localMockTesting, timeout: 1, retryCount: 2
+            ).fetch(subscription: RemoteSubscription(url: server.url))
+            XCTAssertEqual(response.cacheStatus, .updated)
+            XCTAssertEqual(server.requests.count, 3, "HTTP \(status) should use bounded retry")
+        }
+    }
+
+    func testCancellationStopsRetryBackoff() async throws {
+        let server = try MockHTTPServer(responses: [
+            .init(status: 503, headers: [:], body: Data()),
+            .init(status: 200, headers: [:], body: Data("{}".utf8))
+        ])
+        defer { server.stop() }
+        let task = Task {
+            try await SecureSubscriptionFetcher(
+                policy: .localMockTesting, timeout: 1, retryCount: 2
+            ).fetch(subscription: RemoteSubscription(url: server.url))
+        }
+        for _ in 0..<100 where server.requests.isEmpty {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation during backoff")
+        } catch let error as SubscriptionUpdateError {
+            XCTAssertEqual(error, .cancelled)
+        }
+        XCTAssertEqual(server.requests.count, 1)
+    }
+
+    func testRedirectCompatibilityAndLoopBound() async throws {
+        for status in [301, 302, 303, 307, 308] {
+            let server = try MockHTTPServer(responses: [
+                .init(status: status, headers: ["Location": "{{BASE_URL}}/redirected"], body: Data()),
+                .init(status: 200, headers: ["Content-Type": "application/octet-stream"], body: Data("{}".utf8))
+            ])
+            defer { server.stop() }
+            let response = try await SecureSubscriptionFetcher(
+                policy: .localMockTesting, timeout: 1, retryCount: 0
+            ).fetch(subscription: RemoteSubscription(url: server.url))
+            XCTAssertEqual(response.metadata.contentType, "application/octet-stream")
+            XCTAssertEqual(server.requests.map(\.method), ["GET", "GET"])
+            XCTAssertEqual(server.requests.last?.target, "/redirected")
+            XCTAssertTrue(server.requests.allSatisfy {
+                $0.headers["user-agent"] == SecureSubscriptionFetcher.userAgent
+                    && $0.headers["accept"] == SecureSubscriptionFetcher.accept
+            })
+        }
+
+        let loopServer = try MockHTTPServer(responses: (0..<25).map { _ in
+            .init(status: 302, headers: ["Location": "{{BASE_URL}}/loop"], body: Data())
+        })
+        defer { loopServer.stop() }
+        do {
+            _ = try await SecureSubscriptionFetcher(
+                policy: .localMockTesting, timeout: 2, retryCount: 0
+            ).fetch(subscription: RemoteSubscription(url: loopServer.url))
+            XCTFail("Expected bounded redirect-loop failure")
+        } catch let failure as SubscriptionFetchFailure {
+            guard case .transport(let transport) = failure.cause else {
+                return XCTFail("Unexpected failure: \(failure.cause)")
+            }
+            XCTAssertEqual(transport.category, .redirectFailed)
+        }
+        XCTAssertLessThanOrEqual(loopServer.requests.count, 25)
+    }
+
+    func testFoundationContentDecodingAndFinalDecodedSizeLimit() async throws {
+        let compressedJSON = try XCTUnwrap(Data(base64Encoded: "H4sIAAAAAAAC/6uuBQBDv6ajAgAAAA=="))
+        let server = try MockHTTPServer(responses: [
+            .init(status: 200, headers: [
+                "Content-Encoding": "gzip",
+                "Content-Type": "application/octet-stream"
+            ], body: compressedJSON)
+        ])
+        defer { server.stop() }
+        let response = try await SecureSubscriptionFetcher(
+            policy: .localMockTesting, maximumResponseBytes: 128, timeout: 1, retryCount: 0
+        ).fetch(subscription: RemoteSubscription(url: server.url))
+        XCTAssertEqual(response.data, Data("{}".utf8))
+        XCTAssertEqual(response.metadata.byteCount, 2)
+
+        let compressedExpansion = try XCTUnwrap(Data(base64Encoded: "H4sIAAAAAAAC/3N0HNkAABNbl0kAAQAA"))
+        let expansionServer = try MockHTTPServer(responses: [
+            .init(status: 200, headers: ["Content-Encoding": "gzip"], body: compressedExpansion)
+        ])
+        defer { expansionServer.stop() }
+        do {
+            _ = try await SecureSubscriptionFetcher(
+                policy: .localMockTesting, maximumResponseBytes: 128, timeout: 1, retryCount: 0
+            ).fetch(subscription: RemoteSubscription(url: expansionServer.url))
+            XCTFail("Expected decoded response limit")
+        } catch let failure as SubscriptionFetchFailure {
+            XCTAssertEqual(failure.cause, .responseTooLarge)
+            XCTAssertEqual(failure.response?.byteCount, 256)
+        }
+    }
+
+    func testChunkedResponseCannotBypassFinalSizeLimit() async throws {
+        let server = try MockHTTPServer(responses: [
+            .init(status: 200, headers: [:], body: Data(repeating: 65, count: 256), chunked: true)
+        ])
+        defer { server.stop() }
+        do {
+            _ = try await SecureSubscriptionFetcher(
+                policy: .localMockTesting, maximumResponseBytes: 128, timeout: 1, retryCount: 0
+            ).fetch(subscription: RemoteSubscription(url: server.url))
+            XCTFail("Expected final chunked response limit")
+        } catch let failure as SubscriptionFetchFailure {
+            XCTAssertEqual(failure.cause, .responseTooLarge)
+            XCTAssertEqual(failure.response?.byteCount, 256)
+        }
+    }
+
+    func testConnectionFailureAndInvalidHTTPMappingAreSafelyClassified() async throws {
+        let closedServer = try MockHTTPServer(responses: [])
+        let closedURL = closedServer.url
+        closedServer.stop()
+        try await Task.sleep(for: .milliseconds(30))
+        do {
+            _ = try await SecureSubscriptionFetcher(
+                policy: .localMockTesting, timeout: 1, retryCount: 0
+            ).fetch(subscription: RemoteSubscription(url: closedURL))
+            XCTFail("Expected connection failure")
+        } catch let failure as SubscriptionFetchFailure {
+            guard case .transport(let transport) = failure.cause else {
+                return XCTFail("Unexpected failure: \(failure.cause)")
+            }
+            XCTAssertEqual(transport.category, .cannotConnect)
+        }
+
+        let invalidResponse = SubscriptionTransportFailure(.cannotParseResponse)
+        XCTAssertEqual(invalidResponse.category, .invalidResponse)
+        let diagnostic = SubscriptionFailureDiagnostic(error: SubscriptionUpdateError.transport(invalidResponse))
+        XCTAssertEqual(diagnostic.stage, .httpResponse)
+        XCTAssertEqual(diagnostic.category, .invalidResponse)
+        XCTAssertEqual(diagnostic.transportErrorCode, URLError.Code.cannotParseResponse.rawValue)
+    }
+
+    func testHTMLClassificationRunsOnlyAfterPayloadDetectionFails() async throws {
+        let store = try makeStore()
+        let webResponse = SubscriptionResponse(
+            data: Data("<!doctype html><html><body>Sign in</body></html>".utf8),
+            cacheStatus: .updated, etag: nil, lastModified: nil, contentType: "text/html; charset=utf-8"
+        )
+        do {
+            _ = try await TargetSubscriptionOperations(
+                store: store,
+                fetcher: ImmediateSubscriptionFetcher(result: .success(webResponse))
+            ).prepareNew(name: "Web", url: URL(string: "https://example.com/sub")!)
+            XCTFail("Expected web page classification")
+        } catch let failure as SubscriptionIntakeFailure {
+            XCTAssertEqual(failure.cause, .webPageReturned)
+            XCTAssertEqual(failure.response.contentType, "text/html")
+            XCTAssertEqual(failure.response.byteCount, webResponse.data.count)
+        }
+
+        let validJSON = Data(#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#.utf8)
+        let validResponse = SubscriptionResponse(
+            data: validJSON, cacheStatus: .updated, etag: nil, lastModified: nil, contentType: "text/html"
+        )
+        let pending = try await TargetSubscriptionOperations(
+            store: store,
+            fetcher: ImmediateSubscriptionFetcher(result: .success(validResponse))
+        ).prepareNew(name: "Valid", url: URL(string: "https://example.com/sub")!)
+        XCTAssertEqual(pending.normalization.summary.format, .singBoxJSON)
+    }
+
+    func testDiagnosticsAreTypedCompleteAndSecretSafe() throws {
+        let http = SubscriptionFailureDiagnostic(error: SubscriptionUpdateError.httpStatus(403))
+        XCTAssertEqual(http.stage, .httpResponse)
+        XCTAssertEqual(http.category, .httpError)
+        XCTAssertEqual(http.httpStatus, 403)
+
+        let secretURL = "https://provider.example/sub?token=TOP-SECRET"
+        let tlsError = URLError(.secureConnectionFailed, userInfo: [
+            NSURLErrorFailingURLStringErrorKey: secretURL,
+            "Authorization": "Bearer SECRET",
+            "Cookie": "SESSION"
+        ])
+        let tls = SubscriptionFailureDiagnostic(error: tlsError)
+        XCTAssertEqual(tls.stage, .tls)
+        XCTAssertEqual(tls.category, .tlsFailure)
+        XCTAssertEqual(tls.transportErrorDomain, NSURLErrorDomain)
+        XCTAssertEqual(tls.transportErrorCode, URLError.Code.secureConnectionFailed.rawValue)
+
+        let cases: [(SubscriptionIntakeError, SubscriptionFailureStage, SubscriptionFailureCategory)] = [
+            (.formatUnsupported, .payloadDetection, .formatUnsupported),
+            (.protocolUnsupported, .normalization, .protocolUnsupported),
+            (.variantUnsupported, .normalization, .variantUnsupported),
+            (.validationFailed, .configurationValidation, .validationFailed)
+        ]
+        for (error, stage, category) in cases {
+            let diagnostic = SubscriptionFailureDiagnostic(error: error)
+            XCTAssertEqual(diagnostic.stage, stage)
+            XCTAssertEqual(diagnostic.category, category)
+        }
+
+        let suspiciousMetadata = SubscriptionResponseMetadata(
+            contentType: "text/plain; token=TOP-SECRET", byteCount: 0
+        )
+        XCTAssertEqual(
+            SubscriptionResponseMetadata(contentType: "application/TOP-SECRET", byteCount: 0).contentType,
+            "application/other"
+        )
+        let sanitized = SubscriptionFailureDiagnostic(error: SubscriptionFetchFailure(
+            cause: .httpStatus(403), attempts: 1, response: suspiciousMetadata
+        ))
+        let outputs = [
+            tls.description, tls.copyableDescription, tls.titleKey, tls.reasonKey,
+            sanitized.description, sanitized.copyableDescription, sanitized.titleKey, sanitized.reasonKey
+        ]
+        for output in outputs {
+            for secret in ["TOP-SECRET", "Bearer SECRET", "SECRET", "SESSION", secretURL] {
+                XCTAssertFalse(output.contains(secret), "Diagnostic leaked \(secret)")
+            }
+        }
+        XCTAssertEqual(sanitized.attemptCount, 1)
+        XCTAssertEqual(sanitized.contentType, "text/plain")
+        XCTAssertEqual(sanitized.responseBytes, 0)
     }
 
     func testInvalidSubscriptionPreviewDoesNotReplaceCurrentVersion() throws {
@@ -491,17 +749,37 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
     }
 
 private final class MockHTTPServer: @unchecked Sendable {
+    struct Request: Equatable {
+        let method: String
+        let target: String
+        let headers: [String: String]
+    }
+
     struct Response {
         let status: Int
         let headers: [String: String]
         let body: Data
         let delay: TimeInterval
+        let chunked: Bool
+        let declaredContentLength: Int?
+        let rawResponse: Data?
 
-        init(status: Int, headers: [String: String], body: Data, delay: TimeInterval = 0) {
+        init(
+            status: Int,
+            headers: [String: String],
+            body: Data,
+            delay: TimeInterval = 0,
+            chunked: Bool = false,
+            declaredContentLength: Int? = nil,
+            rawResponse: Data? = nil
+        ) {
             self.status = status
             self.headers = headers
             self.body = body
             self.delay = delay
+            self.chunked = chunked
+            self.declaredContentLength = declaredContentLength
+            self.rawResponse = rawResponse
         }
     }
 
@@ -509,7 +787,7 @@ private final class MockHTTPServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "TargetTests.MockHTTPServer")
     private let lock = NSLock()
     private var responses: [Response]
-    private(set) var requests: [String] = []
+    private var capturedRequests: [Request] = []
     private var port: UInt16 = 0
 
     init(responses: [Response]) throws {
@@ -532,24 +810,68 @@ private final class MockHTTPServer: @unchecked Sendable {
 
     var url: URL { URL(string: "http://127.0.0.1:\(port)/subscription")! }
 
+    var requests: [Request] {
+        lock.withLock { capturedRequests }
+    }
+
     func stop() { listener.cancel() }
 
     private func serve(_ connection: NWConnection) {
         connection.start(queue: queue)
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, _, _ in
             guard let self else { connection.cancel(); return }
-            let request = String(decoding: data ?? Data(), as: UTF8.self)
-            self.lock.lock()
-            self.requests.append(request)
-            let response = self.responses.isEmpty ? Response(status: 500, headers: [:], body: Data()) : self.responses.removeFirst()
-            self.lock.unlock()
+            let request = self.parseRequest(data ?? Data())
+            let response = self.lock.withLock {
+                self.capturedRequests.append(request)
+                return self.responses.isEmpty
+                    ? Response(status: 500, headers: [:], body: Data())
+                    : self.responses.removeFirst()
+            }
             self.queue.asyncAfter(deadline: .now() + response.delay) {
-                var header = "HTTP/1.1 \(response.status) Test\r\nContent-Length: \(response.body.count)\r\nConnection: close\r\n"
-                for (name, value) in response.headers { header += "\(name): \(value)\r\n" }
+                if let rawResponse = response.rawResponse {
+                    connection.send(content: rawResponse, completion: .contentProcessed { _ in connection.cancel() })
+                    return
+                }
+                var header = "HTTP/1.1 \(response.status) Test\r\nConnection: close\r\n"
+                header += response.chunked
+                    ? "Transfer-Encoding: chunked\r\n"
+                    : "Content-Length: \(response.declaredContentLength ?? response.body.count)\r\n"
+                for (name, value) in response.headers {
+                    let expanded = value.replacingOccurrences(
+                        of: "{{BASE_URL}}",
+                        with: "http://127.0.0.1:\(self.port)"
+                    )
+                    header += "\(name): \(expanded)\r\n"
+                }
                 header += "\r\n"
-                connection.send(content: Data(header.utf8) + response.body, completion: .contentProcessed { _ in connection.cancel() })
+                let payload: Data
+                if response.chunked {
+                    payload = Data(header.utf8)
+                        + Data(String(response.body.count, radix: 16).utf8)
+                        + Data("\r\n".utf8) + response.body + Data("\r\n0\r\n\r\n".utf8)
+                } else {
+                    payload = Data(header.utf8) + response.body
+                }
+                connection.send(content: payload, completion: .contentProcessed { _ in connection.cancel() })
             }
         }
+    }
+
+    private func parseRequest(_ data: Data) -> Request {
+        let lines = String(decoding: data, as: UTF8.self).components(separatedBy: "\r\n")
+        let requestLine = lines.first?.split(separator: " ") ?? []
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            guard let separator = line.firstIndex(of: ":") else { continue }
+            let name = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            headers[name] = value
+        }
+        return Request(
+            method: requestLine.first.map(String.init) ?? "",
+            target: requestLine.count > 1 ? String(requestLine[1]) : "",
+            headers: headers
+        )
     }
 }
 }

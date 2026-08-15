@@ -11,6 +11,7 @@ enum SubscriptionUpdateError: Error, Equatable, Sendable {
     case httpStatus(Int)
     case cancelled
     case transportFailure
+    case transport(SubscriptionTransportFailure)
 
     var messageKey: String {
         switch self {
@@ -18,17 +19,138 @@ enum SubscriptionUpdateError: Error, Equatable, Sendable {
         case .unsafeURL, .unsafeRedirect: "profile.subscription.error.unsafe-url"
         case .timedOut: "profile.subscription.error.timeout"
         case .responseTooLarge: "profile.subscription.error.too-large"
-        case .invalidResponse, .httpStatus, .transportFailure: "profile.subscription.error.download-failed"
+        case .invalidResponse, .transportFailure, .transport: "profile.subscription.error.download-failed"
+        case .httpStatus(let status): SubscriptionFailureDiagnostic.httpMessageKey(for: status)
         case .cancelled: "profile.subscription.error.cancelled"
         }
     }
 }
+
+enum SubscriptionTransportCategory: String, Equatable, Sendable {
+    case dnsResolutionFailed
+    case cannotConnect
+    case connectionLost
+    case tlsFailed
+    case certificateFailed
+    case networkUnavailable
+    case timedOut
+    case redirectFailed
+    case invalidResponse
+    case other
+}
+
+struct SubscriptionTransportFailure: Equatable, Sendable {
+    static let errorDomain = NSURLErrorDomain
+
+    let category: SubscriptionTransportCategory
+    let code: Int
+
+    init(_ code: URLError.Code) {
+        self.code = code.rawValue
+        switch code {
+        case .cannotFindHost, .dnsLookupFailed:
+            category = .dnsResolutionFailed
+        case .cannotConnectToHost:
+            category = .cannotConnect
+        case .networkConnectionLost:
+            category = .connectionLost
+        case .secureConnectionFailed:
+            category = .tlsFailed
+        case .serverCertificateHasBadDate, .serverCertificateUntrusted,
+             .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid,
+             .clientCertificateRejected, .clientCertificateRequired:
+            category = .certificateFailed
+        case .notConnectedToInternet, .dataNotAllowed, .internationalRoamingOff,
+             .callIsActive:
+            category = .networkUnavailable
+        case .timedOut:
+            category = .timedOut
+        case .httpTooManyRedirects, .redirectToNonExistentLocation:
+            category = .redirectFailed
+        case .cannotParseResponse, .badServerResponse:
+            category = .invalidResponse
+        default:
+            category = .other
+        }
+    }
+}
+
+struct SubscriptionResponseMetadata: Equatable, Sendable {
+    let contentType: String?
+    let byteCount: Int
+    let attemptCount: Int?
+
+    init(contentType: String?, byteCount: Int, attemptCount: Int? = nil) {
+        self.contentType = Self.safeContentType(contentType)
+        self.byteCount = max(0, byteCount)
+        self.attemptCount = attemptCount.map { max(1, $0) }
+    }
+
+    private static func safeContentType(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let mime = value.split(separator: ";", maxSplits: 1).first?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        guard !mime.isEmpty, mime.utf8.count <= 127,
+              mime.unicodeScalars.allSatisfy({ scalar in
+                  scalar.isASCII && (scalar.properties.isAlphabetic || scalar.properties.numericType != nil
+                      || "!#$&^_.+-/".unicodeScalars.contains(scalar))
+              }), let slash = mime.firstIndex(of: "/") else { return nil }
+        let known: Set<String> = [
+            "application/json", "application/yaml", "application/x-yaml",
+            "application/octet-stream", "application/x-subscription",
+            "application/xhtml+xml", "text/plain", "text/yaml", "text/x-yaml", "text/html"
+        ]
+        if known.contains(mime) { return mime }
+        let topLevel = String(mime[..<slash])
+        guard ["application", "text"].contains(topLevel) else { return nil }
+        return "\(topLevel)/other"
+    }
+}
+
+struct SubscriptionFetchFailure: Error, Equatable, Sendable {
+    let cause: SubscriptionUpdateError
+    let attempts: Int
+    let response: SubscriptionResponseMetadata?
+}
+
+struct SubscriptionPersistenceFailure: Error, Equatable, Sendable {}
 
 struct SubscriptionResponse: Sendable {
     let data: Data
     let cacheStatus: SubscriptionCacheStatus
     let etag: String?
     let lastModified: String?
+    let metadata: SubscriptionResponseMetadata
+
+    init(
+        data: Data,
+        cacheStatus: SubscriptionCacheStatus,
+        etag: String?,
+        lastModified: String?,
+        contentType: String? = nil,
+        attemptCount: Int = 1
+    ) {
+        self.data = data
+        self.cacheStatus = cacheStatus
+        self.etag = etag
+        self.lastModified = lastModified
+        metadata = SubscriptionResponseMetadata(
+            contentType: contentType,
+            byteCount: data.count,
+            attemptCount: attemptCount
+        )
+    }
+
+    func withAttemptCount(_ attemptCount: Int) -> SubscriptionResponse {
+        SubscriptionResponse(
+            data: data,
+            cacheStatus: cacheStatus,
+            etag: etag,
+            lastModified: lastModified,
+            contentType: metadata.contentType,
+            attemptCount: attemptCount
+        )
+    }
 }
 
 struct PendingSubscriptionUpdate: Sendable {
@@ -170,7 +292,10 @@ private final class SubscriptionRedirectDelegate: NSObject, URLSessionTaskDelega
         do {
             guard let url = request.url else { throw SubscriptionUpdateError.unsafeRedirect }
             try policy.validate(url)
-            completionHandler(request)
+            var compatibleRequest = request
+            compatibleRequest.setValue(SecureSubscriptionFetcher.userAgent, forHTTPHeaderField: "User-Agent")
+            compatibleRequest.setValue(SecureSubscriptionFetcher.accept, forHTTPHeaderField: "Accept")
+            completionHandler(compatibleRequest)
         } catch {
             rejectedRedirect = true
             completionHandler(nil)
@@ -184,6 +309,8 @@ final class SecureSubscriptionFetcher: ProfileSubscriptionFetching, @unchecked S
     static let defaultMaximumResponseBytes = 5 * 1024 * 1024
     static let defaultTimeout: TimeInterval = 20
     static let defaultRetryCount = 2
+    static let userAgent = "Target/1.0 Clash.Meta"
+    static let accept = "*/*"
 
     private let policy: SubscriptionURLPolicy
     private let maximumResponseBytes: Int
@@ -204,24 +331,40 @@ final class SecureSubscriptionFetcher: ProfileSubscriptionFetching, @unchecked S
 
     func fetch(subscription: RemoteSubscription) async throws -> SubscriptionResponse {
         try policy.validate(subscription.url)
-        var lastError: SubscriptionUpdateError = .transportFailure
         for attempt in 0...retryCount {
             do {
-                return try await fetchOnce(subscription: subscription)
+                return (try await fetchOnce(subscription: subscription)).withAttemptCount(attempt + 1)
             } catch is CancellationError {
                 throw SubscriptionUpdateError.cancelled
+            } catch let failure as SubscriptionFetchFailure {
+                if failure.cause == .cancelled { throw failure.cause }
+                guard attempt < retryCount, shouldRetry(failure.cause) else {
+                    throw SubscriptionFetchFailure(
+                        cause: failure.cause,
+                        attempts: attempt + 1,
+                        response: failure.response
+                    )
+                }
+                try await waitBeforeRetry(attempt: attempt)
             } catch let error as SubscriptionUpdateError {
                 if error == .cancelled { throw error }
-                lastError = error
-                guard attempt < retryCount, shouldRetry(error) else { throw error }
-                try await Task.sleep(for: .milliseconds(150 * (attempt + 1)))
+                guard attempt < retryCount, shouldRetry(error) else {
+                    throw SubscriptionFetchFailure(
+                        cause: error,
+                        attempts: attempt + 1,
+                        response: nil
+                    )
+                }
+                try await waitBeforeRetry(attempt: attempt)
             } catch {
-                lastError = .transportFailure
-                guard attempt < retryCount else { throw lastError }
-                try await Task.sleep(for: .milliseconds(150 * (attempt + 1)))
+                let failure = SubscriptionUpdateError.transportFailure
+                guard attempt < retryCount else {
+                    throw SubscriptionFetchFailure(cause: failure, attempts: attempt + 1, response: nil)
+                }
+                try await waitBeforeRetry(attempt: attempt)
             }
         }
-        throw lastError
+        throw SubscriptionFetchFailure(cause: .transportFailure, attempts: retryCount + 1, response: nil)
     }
 
     private func fetchOnce(subscription: RemoteSubscription) async throws -> SubscriptionResponse {
@@ -237,7 +380,8 @@ final class SecureSubscriptionFetcher: ProfileSubscriptionFetching, @unchecked S
         var request = URLRequest(url: subscription.url)
         request.httpMethod = "GET"
         request.timeoutInterval = timeout
-        request.setValue("application/json, application/yaml, text/yaml, text/plain;q=0.9, */*;q=0.1", forHTTPHeaderField: "Accept")
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(Self.accept, forHTTPHeaderField: "Accept")
         if let etag = subscription.etag { request.setValue(etag, forHTTPHeaderField: "If-None-Match") }
         if let lastModified = subscription.lastModified { request.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since") }
 
@@ -245,28 +389,350 @@ final class SecureSubscriptionFetcher: ProfileSubscriptionFetching, @unchecked S
             let (data, response) = try await session.data(for: request)
             if delegate.rejectedRedirect { throw SubscriptionUpdateError.unsafeRedirect }
             guard let http = response as? HTTPURLResponse else { throw SubscriptionUpdateError.invalidResponse }
+            let metadata = SubscriptionResponseMetadata(contentType: http.mimeType, byteCount: data.count)
             if http.statusCode == 304 {
-                return SubscriptionResponse(data: Data(), cacheStatus: .notModified, etag: http.value(forHTTPHeaderField: "ETag") ?? subscription.etag, lastModified: http.value(forHTTPHeaderField: "Last-Modified") ?? subscription.lastModified)
+                return SubscriptionResponse(
+                    data: Data(), cacheStatus: .notModified,
+                    etag: http.value(forHTTPHeaderField: "ETag") ?? subscription.etag,
+                    lastModified: http.value(forHTTPHeaderField: "Last-Modified") ?? subscription.lastModified,
+                    contentType: metadata.contentType
+                )
             }
-            guard (200...299).contains(http.statusCode) else { throw SubscriptionUpdateError.httpStatus(http.statusCode) }
             if http.expectedContentLength > Int64(maximumResponseBytes) || data.count > maximumResponseBytes {
-                throw SubscriptionUpdateError.responseTooLarge
+                throw SubscriptionFetchFailure(cause: .responseTooLarge, attempts: 1, response: metadata)
             }
-            return SubscriptionResponse(data: data, cacheStatus: .updated, etag: http.value(forHTTPHeaderField: "ETag"), lastModified: http.value(forHTTPHeaderField: "Last-Modified"))
+            guard (200...299).contains(http.statusCode) else {
+                throw SubscriptionFetchFailure(cause: .httpStatus(http.statusCode), attempts: 1, response: metadata)
+            }
+            return SubscriptionResponse(
+                data: data, cacheStatus: .updated,
+                etag: http.value(forHTTPHeaderField: "ETag"),
+                lastModified: http.value(forHTTPHeaderField: "Last-Modified"),
+                contentType: metadata.contentType
+            )
         } catch is CancellationError {
             throw SubscriptionUpdateError.cancelled
+        } catch let failure as SubscriptionFetchFailure {
+            throw failure
         } catch let error as URLError {
             if error.code == .timedOut { throw SubscriptionUpdateError.timedOut }
             if error.code == .cancelled { throw SubscriptionUpdateError.cancelled }
-            throw SubscriptionUpdateError.transportFailure
+            throw SubscriptionUpdateError.transport(SubscriptionTransportFailure(error.code))
         }
     }
 
     private func shouldRetry(_ error: SubscriptionUpdateError) -> Bool {
         switch error {
-        case .timedOut, .transportFailure, .httpStatus: true
+        case .timedOut, .transportFailure:
+            true
+        case .httpStatus(let status):
+            [408, 429, 500, 502, 503, 504].contains(status)
+        case .transport(let failure):
+            [.dnsResolutionFailed, .cannotConnect, .connectionLost, .timedOut].contains(failure.category)
         default: false
         }
+    }
+
+    private func waitBeforeRetry(attempt: Int) async throws {
+        do {
+            try await Task.sleep(for: .milliseconds(150 * (attempt + 1)))
+        } catch is CancellationError {
+            throw SubscriptionUpdateError.cancelled
+        }
+    }
+}
+
+enum SubscriptionFailureStage: String, Equatable, Sendable {
+    case urlSafety = "URL Safety"
+    case resolving = "Resolving"
+    case connecting = "Connecting"
+    case tls = "TLS"
+    case httpRequest = "HTTP Request"
+    case redirect = "Redirect"
+    case httpResponse = "HTTP Response"
+    case downloading = "Downloading"
+    case payloadDetection = "Payload Detection"
+    case normalization = "Normalization"
+    case configurationValidation = "Configuration Validation"
+    case persistence = "Persistence"
+
+    var titleKey: String {
+        switch self {
+        case .urlSafety: "profile.subscription.diagnostic.stage.urlSafety"
+        case .resolving: "profile.subscription.diagnostic.stage.resolving"
+        case .connecting: "profile.subscription.diagnostic.stage.connecting"
+        case .tls: "profile.subscription.diagnostic.stage.tls"
+        case .httpRequest: "profile.subscription.diagnostic.stage.httpRequest"
+        case .redirect: "profile.subscription.diagnostic.stage.redirect"
+        case .httpResponse: "profile.subscription.diagnostic.stage.httpResponse"
+        case .downloading: "profile.subscription.diagnostic.stage.downloading"
+        case .payloadDetection: "profile.subscription.diagnostic.stage.payloadDetection"
+        case .normalization: "profile.subscription.diagnostic.stage.normalization"
+        case .configurationValidation: "profile.subscription.diagnostic.stage.configurationValidation"
+        case .persistence: "profile.subscription.diagnostic.stage.persistence"
+        }
+    }
+}
+
+enum SubscriptionFailureCategory: String, Equatable, Sendable {
+    case missingSource = "Missing Source"
+    case unsafeURL = "Unsafe URL"
+    case redirectRejected = "Redirect Rejected"
+    case httpError = "HTTP Error"
+    case dnsFailure = "DNS Failure"
+    case connectionFailure = "Connection Failure"
+    case connectionLost = "Connection Lost"
+    case tlsFailure = "TLS Failure"
+    case certificateFailure = "Certificate Failure"
+    case networkUnavailable = "Network Unavailable"
+    case timeout = "Timeout"
+    case invalidResponse = "Invalid HTTP Response"
+    case transportFailure = "Transport Failure"
+    case responseTooLarge = "Response Too Large"
+    case webPageReturned = "Web Page Returned"
+    case formatUnsupported = "Format Unsupported"
+    case payloadInvalid = "Payload Invalid"
+    case protocolUnsupported = "Protocol Unsupported"
+    case variantUnsupported = "Variant Unsupported"
+    case complexityLimitExceeded = "Complexity Limit Exceeded"
+    case validationFailed = "Configuration Validation Failed"
+    case persistenceFailed = "Persistence Failed"
+    case cancelled = "Cancelled"
+}
+
+struct SubscriptionFailureDiagnostic: Equatable, Sendable, CustomStringConvertible {
+    static let supportedFormats = "sing-box JSON; URI list; Base64 URI list; Clash YAML"
+
+    let titleKey: String
+    let stage: SubscriptionFailureStage
+    let category: SubscriptionFailureCategory
+    let reasonKey: String
+    let httpStatus: Int?
+    let transportErrorDomain: String?
+    let transportErrorCode: Int?
+    let attemptCount: Int?
+    let contentType: String?
+    let responseBytes: Int?
+    let isRetryable: Bool?
+    let showsSupportedFormats: Bool
+
+    private init(
+        titleKey: String,
+        stage: SubscriptionFailureStage,
+        category: SubscriptionFailureCategory,
+        reasonKey: String,
+        httpStatus: Int?,
+        transportErrorDomain: String?,
+        transportErrorCode: Int?,
+        attemptCount: Int?,
+        contentType: String?,
+        responseBytes: Int?,
+        isRetryable: Bool?,
+        showsSupportedFormats: Bool
+    ) {
+        self.titleKey = titleKey
+        self.stage = stage
+        self.category = category
+        self.reasonKey = reasonKey
+        self.httpStatus = httpStatus
+        self.transportErrorDomain = transportErrorDomain
+        self.transportErrorCode = transportErrorCode
+        self.attemptCount = attemptCount
+        self.contentType = contentType
+        self.responseBytes = responseBytes
+        self.isRetryable = isRetryable
+        self.showsSupportedFormats = showsSupportedFormats
+    }
+
+    init(error: Error) {
+        if let failure = error as? SubscriptionFetchFailure {
+            self = Self.update(
+                failure.cause,
+                attempts: failure.attempts,
+                response: failure.response
+            )
+        } else if let failure = error as? SubscriptionIntakeFailure {
+            self = Self.intake(failure.cause, response: failure.response)
+        } else if let error = error as? SubscriptionUpdateError {
+            self = Self.update(error, attempts: nil, response: nil)
+        } else if let error = error as? SubscriptionIntakeError {
+            self = Self.intake(error, response: nil)
+        } else if error is SubscriptionPersistenceFailure {
+            self = Self.make(
+                title: "profile.subscription.diagnostic.title.content",
+                stage: .persistence,
+                category: .persistenceFailed,
+                reason: "profile.subscription.error.persistence-failed",
+                common: (nil, nil, nil),
+                retryable: false
+            )
+        } else if let error = error as? URLError {
+            self = Self.update(
+                .transport(SubscriptionTransportFailure(error.code)),
+                attempts: nil,
+                response: nil
+            )
+        } else if let error = error as? ProfileStoreError, case .validationFailed = error {
+            self = Self.intake(.validationFailed, response: nil)
+        } else {
+            self = Self.update(.transportFailure, attempts: nil, response: nil)
+        }
+    }
+
+    var description: String { copyableDescription }
+
+    var copyableDescription: String {
+        var lines = [
+            "Target Subscription Diagnostic",
+            "Stage: \(stage.rawValue)",
+            "Category: \(category.rawValue)"
+        ]
+        if let httpStatus { lines.append("HTTP Status: \(httpStatus)") }
+        if let transportErrorDomain, let transportErrorCode {
+            lines.append("Error Code: \(transportErrorDomain) \(transportErrorCode)")
+        }
+        if let attemptCount { lines.append("Attempts: \(attemptCount)") }
+        if let contentType { lines.append("Content-Type: \(contentType)") }
+        if let responseBytes { lines.append("Response Bytes: \(responseBytes)") }
+        if showsSupportedFormats { lines.append("Supported Formats: \(Self.supportedFormats)") }
+        if let isRetryable { lines.append("Retryable: \(isRetryable ? "Yes" : "No")") }
+        return lines.joined(separator: "\n")
+    }
+
+    static func httpMessageKey(for status: Int) -> String {
+        switch status {
+        case 401, 403: "profile.subscription.error.http-rejected"
+        case 404, 410: "profile.subscription.error.http-unavailable"
+        case 406: "profile.subscription.error.http-negotiation"
+        case 408: "profile.subscription.error.timeout"
+        case 429: "profile.subscription.error.http-rate-limited"
+        case 500...599: "profile.subscription.error.http-temporary"
+        default: "profile.subscription.error.http"
+        }
+    }
+
+    private static func update(
+        _ error: SubscriptionUpdateError,
+        attempts: Int?,
+        response: SubscriptionResponseMetadata?
+    ) -> Self {
+        let common = (
+            attempts: attempts,
+            contentType: response?.contentType,
+            responseBytes: response?.byteCount
+        )
+        switch error {
+        case .noSubscription:
+            return Self.make(title: "profile.subscription.diagnostic.title.download", stage: .urlSafety,
+                             category: .missingSource, reason: error.messageKey, common: common, retryable: false)
+        case .unsafeURL:
+            return Self.make(title: "profile.subscription.diagnostic.title.download", stage: .urlSafety,
+                             category: .unsafeURL, reason: error.messageKey, common: common, retryable: false)
+        case .unsafeRedirect:
+            return Self.make(title: "profile.subscription.diagnostic.title.download", stage: .redirect,
+                             category: .redirectRejected, reason: "profile.subscription.error.redirect-rejected",
+                             common: common, retryable: false)
+        case .timedOut:
+            return Self.make(title: "profile.subscription.diagnostic.title.download", stage: .downloading,
+                             category: .timeout, reason: error.messageKey, common: common, retryable: true,
+                             domain: SubscriptionTransportFailure.errorDomain,
+                             code: URLError.Code.timedOut.rawValue)
+        case .responseTooLarge:
+            return Self.make(title: "profile.subscription.diagnostic.title.content", stage: .downloading,
+                             category: .responseTooLarge, reason: error.messageKey, common: common, retryable: false)
+        case .invalidResponse:
+            return Self.make(title: "profile.subscription.diagnostic.title.download", stage: .httpResponse,
+                             category: .invalidResponse, reason: "profile.subscription.error.invalid-response",
+                             common: common, retryable: false)
+        case .httpStatus(let status):
+            return Self.make(title: "profile.subscription.diagnostic.title.download", stage: .httpResponse,
+                             category: .httpError, reason: httpMessageKey(for: status), common: common,
+                             retryable: [408, 429, 500, 502, 503, 504].contains(status), status: status)
+        case .cancelled:
+            return Self.make(title: "profile.subscription.diagnostic.title.download", stage: .downloading,
+                             category: .cancelled, reason: error.messageKey, common: common, retryable: false)
+        case .transportFailure:
+            return Self.make(title: "profile.subscription.diagnostic.title.download", stage: .connecting,
+                             category: .transportFailure, reason: error.messageKey, common: common, retryable: true)
+        case .transport(let failure):
+            let mapping: (SubscriptionFailureStage, SubscriptionFailureCategory, String, Bool)
+            switch failure.category {
+            case .dnsResolutionFailed:
+                mapping = (.resolving, .dnsFailure, "profile.subscription.error.dns", true)
+            case .cannotConnect:
+                mapping = (.connecting, .connectionFailure, "profile.subscription.error.connect", true)
+            case .connectionLost:
+                mapping = (.downloading, .connectionLost, "profile.subscription.error.connection-lost", true)
+            case .tlsFailed:
+                mapping = (.tls, .tlsFailure, "profile.subscription.error.tls", false)
+            case .certificateFailed:
+                mapping = (.tls, .certificateFailure, "profile.subscription.error.certificate", false)
+            case .networkUnavailable:
+                mapping = (.connecting, .networkUnavailable, "profile.subscription.error.network-unavailable", false)
+            case .timedOut:
+                mapping = (.downloading, .timeout, "profile.subscription.error.timeout", true)
+            case .redirectFailed:
+                mapping = (.redirect, .redirectRejected, "profile.subscription.error.redirect-rejected", false)
+            case .invalidResponse:
+                mapping = (.httpResponse, .invalidResponse, "profile.subscription.error.invalid-response", false)
+            case .other:
+                mapping = (.connecting, .transportFailure, "profile.subscription.error.download-failed", false)
+            }
+            return Self.make(title: "profile.subscription.diagnostic.title.download", stage: mapping.0,
+                             category: mapping.1, reason: mapping.2, common: common, retryable: mapping.3,
+                             domain: SubscriptionTransportFailure.errorDomain, code: failure.code)
+        }
+    }
+
+    private static func intake(
+        _ error: SubscriptionIntakeError,
+        response: SubscriptionResponseMetadata?
+    ) -> Self {
+        let common = (attempts: response?.attemptCount, contentType: response?.contentType,
+                      responseBytes: response?.byteCount)
+        switch error {
+        case .formatUnsupported:
+            return make(title: "profile.subscription.diagnostic.title.content", stage: .payloadDetection,
+                        category: .formatUnsupported, reason: error.messageKey, common: common,
+                        retryable: false, formats: true)
+        case .webPageReturned:
+            return make(title: "profile.subscription.diagnostic.title.content", stage: .payloadDetection,
+                        category: .webPageReturned, reason: error.messageKey, common: common, retryable: false)
+        case .emptyPayload, .invalidUTF8, .payloadInvalid:
+            return make(title: "profile.subscription.diagnostic.title.content", stage: .payloadDetection,
+                        category: .payloadInvalid, reason: error.messageKey, common: common, retryable: false)
+        case .protocolUnsupported:
+            return make(title: "profile.subscription.diagnostic.title.content", stage: .normalization,
+                        category: .protocolUnsupported, reason: error.messageKey, common: common, retryable: false)
+        case .variantUnsupported:
+            return make(title: "profile.subscription.diagnostic.title.content", stage: .normalization,
+                        category: .variantUnsupported, reason: error.messageKey, common: common, retryable: false)
+        case .complexityLimitExceeded:
+            return make(title: "profile.subscription.diagnostic.title.content", stage: .normalization,
+                        category: .complexityLimitExceeded, reason: error.messageKey, common: common, retryable: false)
+        case .validationFailed:
+            return make(title: "profile.subscription.diagnostic.title.content", stage: .configurationValidation,
+                        category: .validationFailed, reason: error.messageKey, common: common, retryable: false)
+        }
+    }
+
+    private static func make(
+        title: String,
+        stage: SubscriptionFailureStage,
+        category: SubscriptionFailureCategory,
+        reason: String,
+        common: (attempts: Int?, contentType: String?, responseBytes: Int?),
+        retryable: Bool?,
+        status: Int? = nil,
+        domain: String? = nil,
+        code: Int? = nil,
+        formats: Bool = false
+    ) -> Self {
+        Self(titleKey: title, stage: stage, category: category, reasonKey: reason,
+             httpStatus: status, transportErrorDomain: domain, transportErrorCode: code,
+             attemptCount: common.attempts, contentType: common.contentType,
+             responseBytes: common.responseBytes, isRetryable: retryable,
+             showsSupportedFormats: formats)
     }
 }
 

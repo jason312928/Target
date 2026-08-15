@@ -5,6 +5,75 @@ import XCTest
 
 final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
     @MainActor
+    func testSubscriptionDiagnosticLifecycleIsTypedAndProfileScoped() async throws {
+        let store = try makeStore()
+        let first = try store.create(
+            name: "First",
+            subscriptionURL: URL(string: "https://provider.example/sub?token=TOP-SECRET")!
+        )
+        let second = try store.create(name: "Second")
+        try store.select(first.id)
+        let failure = SubscriptionFetchFailure(
+            cause: .httpStatus(403), attempts: 1,
+            response: SubscriptionResponseMetadata(contentType: "text/plain", byteCount: 0)
+        )
+        let model = ProfileViewModel(
+            store: store,
+            subscriptionFetcher: ViewModelSubscriptionFetcher(result: .failure(failure))
+        )
+
+        model.updateSubscription()
+        try await waitForSubscriptionCompletion(model)
+        let diagnostic = try XCTUnwrap(model.subscriptionFailureDiagnostic)
+        XCTAssertEqual(diagnostic.stage, .httpResponse)
+        XCTAssertEqual(diagnostic.httpStatus, 403)
+        XCTAssertEqual(diagnostic.attemptCount, 1)
+        XCTAssertEqual(model.messageKey, "profile.subscription.error.http-rejected")
+        XCTAssertFalse(diagnostic.copyableDescription.contains("TOP-SECRET"))
+
+        model.prepareSubscription(
+            name: "Retry",
+            url: URL(string: "https://provider.example/another?token=TOP-SECRET")!
+        )
+        XCTAssertNil(model.subscriptionFailureDiagnostic, "A new operation must clear stale diagnostics")
+        model.cancelSubscriptionIntake()
+        XCTAssertNil(model.subscriptionFailureDiagnostic)
+        XCTAssertEqual(model.messageKey, "profile.subscription.error.cancelled")
+
+        model.updateSubscription()
+        try await waitForSubscriptionCompletion(model)
+        XCTAssertNotNil(model.subscriptionFailureDiagnostic)
+        model.requestSelection(second.id)
+        XCTAssertNil(model.subscriptionFailureDiagnostic, "A Profile switch must not retain the previous failure")
+    }
+
+    @MainActor
+    func testStaleNotModifiedResultIsReportedAsPersistenceFailure() async throws {
+        let store = try makeStore()
+        let profile = try store.create(
+            name: "Provider",
+            subscriptionURL: URL(string: "https://provider.example/sub")!
+        )
+        try store.select(profile.id)
+        let fetcher = ViewModelSubscriptionGateFetcher()
+        let model = ProfileViewModel(store: store, subscriptionFetcher: fetcher)
+
+        model.updateSubscription()
+        await fetcher.waitUntilStarted()
+        try store.save(
+            json: #"{"inbounds":[],"outbounds":[],"route":{},"concurrent":true}"#,
+            for: profile.id
+        )
+        await fetcher.completeNotModified()
+        try await waitForSubscriptionCompletion(model)
+
+        XCTAssertEqual(model.messageKey, "profile.subscription.error.persistence-failed")
+        XCTAssertEqual(model.subscriptionFailureDiagnostic?.stage, .persistence)
+        XCTAssertEqual(model.subscriptionFailureDiagnostic?.category, .persistenceFailed)
+        XCTAssertNotEqual(model.selectedProfile?.subscription?.cacheStatus, .notModified)
+    }
+
+    @MainActor
     func testViewModelDisablesExportForUnsavedEditorChanges() throws {
         let root = try temporaryDirectory()
         let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
@@ -235,6 +304,50 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
                 PolicyCatalogMember(identity: 1, tag: "direct", type: "direct", status: .available)
             ]
         )
+    }
+
+    @MainActor
+    private func waitForSubscriptionCompletion(_ model: ProfileViewModel) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while model.isUpdatingSubscription, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertFalse(model.isUpdatingSubscription)
+    }
+}
+
+private struct ViewModelSubscriptionFetcher: ProfileSubscriptionFetching {
+    let result: Result<SubscriptionResponse, Error>
+
+    func fetch(subscription: RemoteSubscription) async throws -> SubscriptionResponse {
+        try result.get()
+    }
+}
+
+private actor ViewModelSubscriptionGateFetcher: ProfileSubscriptionFetching {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var responseContinuation: CheckedContinuation<SubscriptionResponse, Error>?
+
+    func fetch(subscription: RemoteSubscription) async throws -> SubscriptionResponse {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        return try await withCheckedThrowingContinuation { responseContinuation = $0 }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func completeNotModified() {
+        responseContinuation?.resume(returning: SubscriptionResponse(
+            data: Data(), cacheStatus: .notModified, etag: "same", lastModified: nil
+        ))
+        responseContinuation = nil
     }
 }
 

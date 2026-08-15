@@ -637,6 +637,8 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(fixture.model.editorText, persistedText)
         XCTAssertFalse(fixture.model.isDirty)
         XCTAssertEqual(fixture.model.diagnostic?.messageKey, "profile.validation.check-failed")
+        XCTAssertEqual(fixture.model.subscriptionFailureDiagnostic?.stage, .configurationValidation)
+        XCTAssertEqual(fixture.model.subscriptionFailureDiagnostic?.category, .validationFailed)
         XCTAssertNotNil(fixture.model.pendingSubscriptionUpdate)
     }
 

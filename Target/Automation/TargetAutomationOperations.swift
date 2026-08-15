@@ -86,8 +86,12 @@ actor TargetAutomationOperations {
             }
         } catch let error as ProfileTransferError {
             return profileTransferFailure(error)
+        } catch let error as SubscriptionFetchFailure {
+            return subscriptionFailure(error.cause)
         } catch let error as SubscriptionUpdateError {
             return subscriptionFailure(error)
+        } catch let error as SubscriptionIntakeFailure {
+            return subscriptionIntakeFailure(error.cause)
         } catch let error as SubscriptionIntakeError {
             return subscriptionIntakeFailure(error)
         } catch let error as TargetPolicyOperationError {
@@ -442,7 +446,7 @@ actor TargetAutomationOperations {
             .failure(code: "subscription_payload_invalid", message: "The subscription response exceeds the safe limit.")
         case .cancelled:
             .failure(code: "subscription_fetch_failed", message: "The subscription request was cancelled.")
-        case .timedOut, .invalidResponse, .httpStatus, .transportFailure:
+        case .timedOut, .invalidResponse, .httpStatus, .transportFailure, .transport:
             .failure(code: "subscription_fetch_failed", message: "The subscription could not be downloaded safely.")
         }
     }
@@ -451,8 +455,12 @@ actor TargetAutomationOperations {
         switch error {
         case .formatUnsupported:
             .failure(code: "subscription_format_unsupported", message: "The subscription format is not supported.")
-        case .protocolUnsupported, .variantUnsupported:
-            .failure(code: "subscription_protocol_unsupported", message: "The subscription contains an unsupported protocol or variant.")
+        case .webPageReturned:
+            .failure(code: "subscription_web_page_returned", message: "The server returned a web page instead of a subscription.")
+        case .protocolUnsupported:
+            .failure(code: "subscription_protocol_unsupported", message: "The subscription contains an unsupported protocol.")
+        case .variantUnsupported:
+            .failure(code: "subscription_protocol_unsupported", message: "The subscription contains an unsupported protocol variant.")
         case .validationFailed:
             .failure(code: "subscription_validation_failed", message: "The normalized Profile failed sing-box validation.")
         case .emptyPayload, .invalidUTF8, .payloadInvalid, .complexityLimitExceeded:

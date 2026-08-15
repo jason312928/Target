@@ -370,7 +370,11 @@ private struct ProfileOverviewView: View {
                 }
                 TargetSectionTitle("profile.overview.policy", systemImage: "point.3.connected.trianglepath.dotted")
                 policySummary
-                ProfileFeedback(diagnostic: model.diagnostic, messageKey: model.messageKey)
+                ProfileFeedback(
+                    diagnostic: model.diagnostic,
+                    subscriptionFailure: model.subscriptionFailureDiagnostic,
+                    messageKey: model.messageKey
+                )
                 Divider()
                 ProfileOverviewActions(
                     profile: profile,
@@ -502,7 +506,11 @@ private struct ProfileConfigurationView: View {
             }
             .frame(maxWidth: .infinity, minHeight: ProfileWorkspaceLayout.minimumEditorHeight, idealHeight: ProfileWorkspaceLayout.preferredEditorHeight, maxHeight: .infinity)
             .layoutPriority(1)
-            ProfileFeedback(diagnostic: model.diagnostic, messageKey: model.messageKey)
+            ProfileFeedback(
+                diagnostic: model.diagnostic,
+                subscriptionFailure: model.subscriptionFailureDiagnostic,
+                messageKey: model.messageKey
+            )
             Divider()
             ProfileEditorActions(
                 profile: profile,
@@ -641,11 +649,14 @@ private struct ProfileSubscriptionStatus: View {
 
 private struct ProfileFeedback: View {
     let diagnostic: ConfigurationDiagnostic?
+    let subscriptionFailure: SubscriptionFailureDiagnostic?
     let messageKey: String?
 
     var body: some View {
         Group {
-            if let diagnostic {
+            if let subscriptionFailure {
+                SubscriptionFailureView(diagnostic: subscriptionFailure)
+            } else if let diagnostic {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                     VStack(alignment: .leading, spacing: 2) {
@@ -662,6 +673,73 @@ private struct ProfileFeedback: View {
                 TargetNotice(level: .neutral, messageKey: messageKey)
                     .accessibilityIdentifier("profile.feedback.message")
             }
+        }
+    }
+}
+
+private struct SubscriptionFailureView: View {
+    let diagnostic: SubscriptionFailureDiagnostic
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(LocalizedStringKey(diagnostic.titleKey), systemImage: "exclamationmark.triangle.fill")
+                .font(.headline)
+                .foregroundStyle(.red)
+            Text(LocalizedStringKey(diagnostic.reasonKey))
+                .font(.callout)
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
+                row("profile.subscription.diagnostic.stage", LocalizedStringKey(diagnostic.stage.titleKey))
+                row("profile.subscription.diagnostic.category", LocalizedStringKey(diagnostic.reasonKey))
+                if let status = diagnostic.httpStatus {
+                    row("profile.subscription.diagnostic.http-status", Text("\(status)"))
+                }
+                if let domain = diagnostic.transportErrorDomain, let code = diagnostic.transportErrorCode {
+                    row("profile.subscription.diagnostic.error-code", Text("\(domain) \(code)"))
+                }
+                if let attempts = diagnostic.attemptCount {
+                    row("profile.subscription.diagnostic.attempts", Text("\(attempts)"))
+                }
+                if let contentType = diagnostic.contentType {
+                    row("profile.subscription.diagnostic.content-type", Text(contentType))
+                }
+                if let bytes = diagnostic.responseBytes {
+                    row("profile.subscription.diagnostic.response-bytes", Text("\(bytes)"))
+                }
+                if diagnostic.showsSupportedFormats {
+                    row("profile.subscription.diagnostic.supported-formats",
+                        LocalizedStringKey("profile.subscription.diagnostic.supported-formats.value"))
+                }
+                if let retryable = diagnostic.isRetryable {
+                    row("profile.subscription.diagnostic.retry",
+                        LocalizedStringKey(retryable
+                            ? "profile.subscription.diagnostic.retry.yes"
+                            : "profile.subscription.diagnostic.retry.no"))
+                }
+            }
+            .font(.caption)
+            Button("profile.subscription.diagnostic.copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(diagnostic.copyableDescription, forType: .string)
+            }
+            .controlSize(.small)
+            .accessibilityIdentifier("profile.subscription.diagnostic.copy")
+        }
+        .padding(12)
+        .background(.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("profile.subscription.failure-diagnostic")
+    }
+
+    @ViewBuilder
+    private func row(_ titleKey: LocalizedStringKey, _ value: LocalizedStringKey) -> some View {
+        row(titleKey, Text(value))
+    }
+
+    @ViewBuilder
+    private func row(_ titleKey: LocalizedStringKey, _ value: Text) -> some View {
+        GridRow {
+            Text(titleKey).foregroundStyle(.secondary)
+            value.textSelection(.enabled)
         }
     }
 }
@@ -992,7 +1070,10 @@ private struct ProfileSubscriptionSheet: View {
                 ProgressView("profile.subscription.preparing")
                     .accessibilityIdentifier("profile.subscription.progress")
             }
-            if submitted, let messageKey = model.messageKey, !model.isUpdatingSubscription {
+            if submitted, let diagnostic = model.subscriptionFailureDiagnostic, !model.isUpdatingSubscription {
+                SubscriptionFailureView(diagnostic: diagnostic)
+                    .accessibilityIdentifier("profile.subscription.safe-error")
+            } else if submitted, let messageKey = model.messageKey, !model.isUpdatingSubscription {
                 Label(LocalizedStringKey(messageKey), systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
                     .accessibilityIdentifier("profile.subscription.safe-error")

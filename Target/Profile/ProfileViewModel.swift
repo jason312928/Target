@@ -25,6 +25,7 @@ final class ProfileViewModel {
     private(set) var isDirty = false
     private(set) var isConfigurationLoaded = false
     private(set) var messageKey: String?
+    private(set) var subscriptionFailureDiagnostic: SubscriptionFailureDiagnostic?
     private(set) var pendingSubscriptionIntake: PendingSubscriptionIntake?
     private(set) var isUpdatingSubscription = false
     private(set) var pendingImportCandidate: ProfileImportCandidate?
@@ -92,6 +93,7 @@ final class ProfileViewModel {
         subscriptionGeneration &+= 1
         let generation = subscriptionGeneration
         messageKey = nil
+        subscriptionFailureDiagnostic = nil
         isUpdatingSubscription = true
         let operations = subscriptionOperations
         subscriptionTask = Task { [weak self] in
@@ -383,6 +385,7 @@ final class ProfileViewModel {
 
     func updateEditor(_ text: String) {
         guard canEditConfiguration else { return }
+        subscriptionFailureDiagnostic = nil
         editorText = text
         isDirty = true
         diagnostic = JSONSyntaxChecker.validate(text)
@@ -440,6 +443,7 @@ final class ProfileViewModel {
         subscriptionGeneration &+= 1
         let generation = subscriptionGeneration
         messageKey = nil
+        subscriptionFailureDiagnostic = nil
         pendingSubscriptionIntake = nil
         isUpdatingSubscription = true
         let profileID = profile.id
@@ -457,7 +461,11 @@ final class ProfileViewModel {
                 guard let self, !Task.isCancelled, self.subscriptionGeneration == generation,
                       self.selectedID == profileID else { return }
                 if prepared.candidate == nil {
-                    _ = try operations.commitNotModified(prepared)
+                    do {
+                        _ = try operations.commitNotModified(prepared)
+                    } catch {
+                        throw SubscriptionPersistenceFailure()
+                    }
                 }
                 self.pendingSubscriptionIntake = prepared.candidate
                 self.refreshMetadataPreservingEditor()
@@ -467,6 +475,7 @@ final class ProfileViewModel {
                 if Task.isCancelled || (error as? SubscriptionUpdateError) == .cancelled {
                     try? store.recordSubscriptionCancellation(for: profileID)
                     self.messageKey = SubscriptionUpdateError.cancelled.messageKey
+                    self.subscriptionFailureDiagnostic = nil
                 } else {
                     let key = self.subscriptionMessageKey(for: error)
                     try? store.recordSubscriptionFailure(for: profileID, messageKey: key)
@@ -478,12 +487,18 @@ final class ProfileViewModel {
     }
 
     func cancelSubscriptionUpdate() {
+        let profileID = selectedProfile?.id
         cancelSubscriptionOperation(clearCandidate: false)
+        if let profileID { try? store.recordSubscriptionCancellation(for: profileID) }
+        subscriptionFailureDiagnostic = nil
+        messageKey = SubscriptionUpdateError.cancelled.messageKey
+        refreshMetadataPreservingEditor()
     }
 
     func cancelSubscriptionIntake() {
         cancelSubscriptionOperation(clearCandidate: true)
         messageKey = "profile.subscription.error.cancelled"
+        subscriptionFailureDiagnostic = nil
     }
 
     func confirmSubscriptionUpdate() {
@@ -494,6 +509,7 @@ final class ProfileViewModel {
     func discardSubscriptionPreview() {
         pendingSubscriptionIntake = nil
         messageKey = "profile.subscription.preview-dismissed"
+        subscriptionFailureDiagnostic = nil
     }
 
     private func cancelSubscriptionOperation(clearCandidate: Bool) {
@@ -505,8 +521,11 @@ final class ProfileViewModel {
     }
 
     private func subscriptionMessageKey(for error: Error) -> String {
+        if let error = error as? SubscriptionFetchFailure { return error.cause.messageKey }
         if let error = error as? SubscriptionUpdateError { return error.messageKey }
+        if let error = error as? SubscriptionIntakeFailure { return error.cause.messageKey }
         if let error = error as? SubscriptionIntakeError { return error.messageKey }
+        if error is SubscriptionPersistenceFailure { return "profile.subscription.error.persistence-failed" }
         if let storeError = error as? ProfileStoreError {
             if case .validationFailed = storeError {
                 return SubscriptionIntakeError.validationFailed.messageKey
@@ -517,6 +536,7 @@ final class ProfileViewModel {
 
     private func presentSubscriptionError(_ error: Error) {
         messageKey = subscriptionMessageKey(for: error)
+        subscriptionFailureDiagnostic = SubscriptionFailureDiagnostic(error: error)
     }
 
     private func request(_ operation: ProfileWorkspaceOperation) {
@@ -536,29 +556,35 @@ final class ProfileViewModel {
             switch operation {
             case .select(let id):
                 cancelSubscriptionOperation(clearCandidate: true)
+                subscriptionFailureDiagnostic = nil
                 try store.select(id)
                 selectedID = id
                 cancelPreparedImport()
                 loadSelectedText()
                 markReadinessChanged()
             case .create(let name):
+                subscriptionFailureDiagnostic = nil
                 let profile = try store.create(name: name)
                 try selectAndActivate(profile.id)
                 markReadinessChanged()
             case .duplicate(let id):
+                subscriptionFailureDiagnostic = nil
                 let profile = try store.duplicate(id)
                 try selectAndActivate(profile.id)
                 markReadinessChanged()
             case .delete(let id):
+                subscriptionFailureDiagnostic = nil
                 try store.delete(id)
                 activate(try store.selectedProfileID() ?? profiles.first(where: { $0.id != id })?.id)
                 markReadinessChanged()
             case .restore(let id):
+                subscriptionFailureDiagnostic = nil
                 try store.restorePreviousValidVersion(for: id)
                 activate(id)
                 messageKey = "profile.message.restored"
                 markReadinessChanged()
             case .importCandidate(let candidate, let name):
+                subscriptionFailureDiagnostic = nil
                 isCommittingImport = true
                 defer { isCommittingImport = false }
                 let profile = try store.importCandidate(candidate, name: name)
@@ -569,6 +595,7 @@ final class ProfileViewModel {
             case .applySubscription(let pending):
                 let profile = try subscriptionOperations.commit(pending)
                 pendingSubscriptionIntake = nil
+                subscriptionFailureDiagnostic = nil
                 activate(profile.id)
                 messageKey = {
                     if case .newProfile = pending.destination { return "profile.subscription.added" }
@@ -577,7 +604,19 @@ final class ProfileViewModel {
                 markReadinessChanged()
             }
         } catch let error as ProfileStoreError {
-            present(error)
+            if case .applySubscription(let pending) = operation {
+                if case .validationFailed(let configurationDiagnostic) = error {
+                    diagnostic = configurationDiagnostic
+                    presentSubscriptionError(SubscriptionIntakeFailure(
+                        cause: .validationFailed,
+                        response: pending.response.metadata
+                    ))
+                } else {
+                    presentSubscriptionError(SubscriptionPersistenceFailure())
+                }
+            } else {
+                present(error)
+            }
         } catch {
             messageKey = "profile.message.operation-failed"
         }
@@ -635,6 +674,7 @@ final class ProfileViewModel {
             diagnostic = nil
             isDirty = false
             isConfigurationLoaded = false
+            subscriptionFailureDiagnostic = nil
             policyCatalog = nil
             isPolicyCatalogUnavailable = false
             return

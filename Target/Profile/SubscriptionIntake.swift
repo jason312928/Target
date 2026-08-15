@@ -45,6 +45,7 @@ enum SubscriptionIntakeError: Error, Equatable, Sendable {
     case emptyPayload
     case invalidUTF8
     case formatUnsupported
+    case webPageReturned
     case payloadInvalid
     case protocolUnsupported
     case variantUnsupported
@@ -57,14 +58,23 @@ enum SubscriptionIntakeError: Error, Equatable, Sendable {
             "profile.subscription.error.payload-invalid"
         case .formatUnsupported:
             "profile.subscription.error.format-unsupported"
-        case .protocolUnsupported, .variantUnsupported:
+        case .webPageReturned:
+            "profile.subscription.error.web-page"
+        case .protocolUnsupported:
             "profile.subscription.error.protocol-unsupported"
+        case .variantUnsupported:
+            "profile.subscription.error.variant-unsupported"
         case .complexityLimitExceeded:
             "profile.subscription.error.too-complex"
         case .validationFailed:
             "profile.subscription.error.validation-failed"
         }
     }
+}
+
+struct SubscriptionIntakeFailure: Error, Equatable, Sendable {
+    let cause: SubscriptionIntakeError
+    let response: SubscriptionResponseMetadata
 }
 
 /// Pure, deterministic conversion of provider payloads into a Target-owned
@@ -578,7 +588,7 @@ struct TargetSubscriptionOperations: @unchecked Sendable {
         let source = RemoteSubscription(url: url)
         let response = try await fetcher.fetch(subscription: source)
         guard response.cacheStatus == .updated else { throw SubscriptionIntakeError.payloadInvalid }
-        let normalization = try validate(normalizer.normalize(response.data))
+        let normalization = try normalizeAndValidate(response)
         return PendingSubscriptionIntake(
             destination: .newProfile(name: name, source: source),
             normalization: normalization,
@@ -600,7 +610,7 @@ struct TargetSubscriptionOperations: @unchecked Sendable {
                 response: response, candidate: nil
             )
         }
-        let normalization = try validate(normalizer.normalize(response.data))
+        let normalization = try normalizeAndValidate(response)
         let current = try store.validVersion(for: profileID, revision: expectedRevision).data
         let candidate = PendingSubscriptionIntake(
             destination: .existingProfile(profileID: profileID, expectedRevision: expectedRevision),
@@ -651,5 +661,30 @@ struct TargetSubscriptionOperations: @unchecked Sendable {
         let check = try store.checkSubscriptionCandidate(result.data)
         guard case .success = check else { throw SubscriptionIntakeError.validationFailed }
         return result
+    }
+
+    private func normalizeAndValidate(_ response: SubscriptionResponse) throws -> SubscriptionNormalizationResult {
+        do {
+            return try validate(normalizer.normalize(response.data))
+        } catch let error as SubscriptionIntakeError {
+            let cause: SubscriptionIntakeError
+            if error == .formatUnsupported, isLikelyWebPage(response) {
+                cause = .webPageReturned
+            } else {
+                cause = error
+            }
+            throw SubscriptionIntakeFailure(cause: cause, response: response.metadata)
+        }
+    }
+
+    private func isLikelyWebPage(_ response: SubscriptionResponse) -> Bool {
+        if response.metadata.contentType == "text/html" || response.metadata.contentType == "application/xhtml+xml" {
+            return true
+        }
+        let prefix = response.data.prefix(4_096)
+        guard let text = String(data: prefix, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else { return false }
+        return text.hasPrefix("<!doctype html") || text.hasPrefix("<html")
+            || text.hasPrefix("<head") || text.hasPrefix("<body")
     }
 }
