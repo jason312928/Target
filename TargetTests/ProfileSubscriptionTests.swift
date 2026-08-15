@@ -21,6 +21,7 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         let requests = server.requests
         XCTAssertEqual(requests.count, 2)
         XCTAssertTrue(requests.allSatisfy { $0.method == "GET" })
+        XCTAssertEqual(SecureSubscriptionFetcher.userAgent, "Target/1.0 Clash.Meta")
         XCTAssertTrue(requests.allSatisfy { $0.headers["user-agent"] == SecureSubscriptionFetcher.userAgent })
         XCTAssertTrue(requests.allSatisfy { $0.headers["accept"] == SecureSubscriptionFetcher.accept })
         XCTAssertEqual(requests[1].headers["if-none-match"], "v1")
@@ -231,13 +232,17 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
             defer { server.stop() }
             let response = try await SecureSubscriptionFetcher(
                 policy: .localMockTesting, timeout: 1, retryCount: 0
-            ).fetch(subscription: RemoteSubscription(url: server.url))
+            ).fetch(subscription: RemoteSubscription(
+                url: server.url, etag: "redirect-etag", lastModified: "Wed, 01 Jan 2025 00:00:00 GMT"
+            ))
             XCTAssertEqual(response.metadata.contentType, "application/octet-stream")
             XCTAssertEqual(server.requests.map(\.method), ["GET", "GET"])
             XCTAssertEqual(server.requests.last?.target, "/redirected")
             XCTAssertTrue(server.requests.allSatisfy {
                 $0.headers["user-agent"] == SecureSubscriptionFetcher.userAgent
                     && $0.headers["accept"] == SecureSubscriptionFetcher.accept
+                    && $0.headers["if-none-match"] == "redirect-etag"
+                    && $0.headers["if-modified-since"] == "Wed, 01 Jan 2025 00:00:00 GMT"
             })
         }
 
@@ -334,7 +339,7 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
     func testHTMLClassificationRunsOnlyAfterPayloadDetectionFails() async throws {
         let store = try makeStore()
         let webResponse = SubscriptionResponse(
-            data: Data("<!doctype html><html><body>Sign in</body></html>".utf8),
+            data: Data("<!doctype html><html><body><a href=\"https://example.com\">Sign in</a></body></html>".utf8),
             cacheStatus: .updated, etag: nil, lastModified: nil, contentType: "text/html; charset=utf-8"
         )
         do {
@@ -349,15 +354,18 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
             XCTAssertEqual(failure.response.byteCount, webResponse.data.count)
         }
 
-        let validJSON = Data(#"{"outbounds":[{"type":"direct","tag":"direct"}]}"#.utf8)
+        let validYAML = Data("""
+        proxies:
+          - {name: Safe, type: ss, server: example.com, port: 8388, cipher: aes-128-gcm, password: test-password}
+        """.utf8)
         let validResponse = SubscriptionResponse(
-            data: validJSON, cacheStatus: .updated, etag: nil, lastModified: nil, contentType: "text/html"
+            data: validYAML, cacheStatus: .updated, etag: nil, lastModified: nil, contentType: "text/html"
         )
         let pending = try await TargetSubscriptionOperations(
             store: store,
             fetcher: ImmediateSubscriptionFetcher(result: .success(validResponse))
         ).prepareNew(name: "Valid", url: URL(string: "https://example.com/sub")!)
-        XCTAssertEqual(pending.normalization.summary.format, .singBoxJSON)
+        XCTAssertEqual(pending.normalization.summary.format, .clashYAML)
     }
 
     func testDiagnosticsAreTypedCompleteAndSecretSafe() throws {
@@ -482,12 +490,30 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(plain.data, wrapped.data)
     }
 
-    func testURIListRejectsMixedMalformedAndUnsupportedEntriesWithoutPartialImport() throws {
+    func testURIListPartiallyImportsRecognizedUnsupportedProtocolsButRejectsMalformedSupportedEntries() throws {
         let ss = try shadowsocksURI(name: "One")
         assertIntakeError(.payloadInvalid, ss + "\nnot-a-node")
-        assertIntakeError(.protocolUnsupported, ss + "\nhysteria2://fixture")
+        let partial = try SubscriptionNormalizer().normalize(Data((ss + "\nhysteria2://fixture").utf8))
+        XCTAssertEqual(partial.summary.nodeCount, 1)
+        XCTAssertEqual(partial.summary.totalNodeCount, 2)
+        XCTAssertEqual(partial.summary.skippedNodeCount, 1)
+        XCTAssertEqual(partial.summary.skippedProtocols, [.hysteria2])
+        XCTAssertEqual(partial.summary.warnings, [.unsupportedNodesSkipped])
+        assertIntakeError(.protocolUnsupported, "hysteria2://fixture")
         assertIntakeError(.payloadInvalid, "vless://not-a-uuid@example.com:443?security=tls")
         assertIntakeError(.payloadInvalid, "trojan://test-password@example.com:70000")
+    }
+
+    func testBase64URIListReportsRecognizedUnsupportedProtocolSkips() throws {
+        let ss = try shadowsocksURI(name: "One")
+        let encoded = Data((ss + "\nhysteria2://fixture").utf8).base64EncodedString()
+        let result = try SubscriptionNormalizer().normalize(Data(encoded.utf8))
+        XCTAssertEqual(result.summary.format, .base64URIList)
+        XCTAssertEqual(result.summary.nodeCount, 1)
+        XCTAssertEqual(result.summary.totalNodeCount, 2)
+        XCTAssertEqual(result.summary.skippedNodeCount, 1)
+        XCTAssertEqual(result.summary.skippedProtocols, [.hysteria2])
+        XCTAssertEqual(result.summary.warnings, [.unsupportedNodesSkipped])
     }
 
     func testShadowsocksSIP002AndDuplicateNamesHaveStableTags() throws {
@@ -571,10 +597,20 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         }
     }
 
-    func testClashFailsClosedForMalformedMissingAndUnsupportedProxy() throws {
+    func testClashPartiallyImportsRecognizedUnsupportedProtocolsButFailsClosedForMalformedSupportedProxy() throws {
         assertIntakeError(.payloadInvalid, "proxies:\n  - name: [unterminated")
         assertIntakeError(.payloadInvalid, "proxies: []")
         assertIntakeError(.protocolUnsupported, "proxies:\n  - {name: Extra, type: hysteria2, server: example.com, port: 443}")
+        let partial = try SubscriptionNormalizer().normalize(Data("""
+        proxies:
+          - {name: VLESS, type: vless, server: example.com, port: 443, uuid: 11111111-1111-4111-8111-111111111111, tls: true}
+          - {name: Unsupported, type: hysteria2, server: example.com, port: 443}
+        """.utf8))
+        XCTAssertEqual(partial.summary.nodeCount, 1)
+        XCTAssertEqual(partial.summary.totalNodeCount, 2)
+        XCTAssertEqual(partial.summary.skippedNodeCount, 1)
+        XCTAssertEqual(partial.summary.skippedProtocols, [.hysteria2])
+        XCTAssertEqual(partial.summary.warnings, [.unsupportedNodesSkipped])
         assertIntakeError(.variantUnsupported, "proxies:\n  - {name: SS, type: ss, server: example.com, port: 8388, cipher: aes-128-gcm, password: test-password, plugin: obfs}")
     }
 

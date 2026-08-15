@@ -278,9 +278,13 @@ struct SubscriptionURLPolicy: Sendable {
 
 private final class SubscriptionRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     let policy: SubscriptionURLPolicy
+    let conditionalHeaders: [String: String]
     private(set) var rejectedRedirect = false
 
-    init(policy: SubscriptionURLPolicy) { self.policy = policy }
+    init(policy: SubscriptionURLPolicy, conditionalHeaders: [String: String]) {
+        self.policy = policy
+        self.conditionalHeaders = conditionalHeaders
+    }
 
     func urlSession(
         _ session: URLSession,
@@ -295,6 +299,9 @@ private final class SubscriptionRedirectDelegate: NSObject, URLSessionTaskDelega
             var compatibleRequest = request
             compatibleRequest.setValue(SecureSubscriptionFetcher.userAgent, forHTTPHeaderField: "User-Agent")
             compatibleRequest.setValue(SecureSubscriptionFetcher.accept, forHTTPHeaderField: "Accept")
+            for (field, value) in conditionalHeaders {
+                compatibleRequest.setValue(value, forHTTPHeaderField: field)
+            }
             completionHandler(compatibleRequest)
         } catch {
             rejectedRedirect = true
@@ -368,7 +375,10 @@ final class SecureSubscriptionFetcher: ProfileSubscriptionFetching, @unchecked S
     }
 
     private func fetchOnce(subscription: RemoteSubscription) async throws -> SubscriptionResponse {
-        let delegate = SubscriptionRedirectDelegate(policy: policy)
+        var conditionalHeaders: [String: String] = [:]
+        if let etag = subscription.etag { conditionalHeaders["If-None-Match"] = etag }
+        if let lastModified = subscription.lastModified { conditionalHeaders["If-Modified-Since"] = lastModified }
+        let delegate = SubscriptionRedirectDelegate(policy: policy, conditionalHeaders: conditionalHeaders)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = timeout
@@ -382,8 +392,7 @@ final class SecureSubscriptionFetcher: ProfileSubscriptionFetching, @unchecked S
         request.timeoutInterval = timeout
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue(Self.accept, forHTTPHeaderField: "Accept")
-        if let etag = subscription.etag { request.setValue(etag, forHTTPHeaderField: "If-None-Match") }
-        if let lastModified = subscription.lastModified { request.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since") }
+        for (field, value) in conditionalHeaders { request.setValue(value, forHTTPHeaderField: field) }
 
         do {
             let (data, response) = try await session.data(for: request)

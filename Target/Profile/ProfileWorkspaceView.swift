@@ -868,8 +868,18 @@ private struct SubscriptionIntakePreview: View {
                     Text(LocalizedStringKey(summary.format.titleKey))
                 }
                 GridRow {
-                    Text("profile.subscription.preview.nodes").foregroundStyle(.secondary)
+                    Text("profile.subscription.preview.imported-nodes").foregroundStyle(.secondary)
                     Text("\(summary.nodeCount)")
+                }
+                if summary.skippedNodeCount > 0 {
+                    GridRow {
+                        Text("profile.subscription.preview.skipped-nodes").foregroundStyle(.secondary)
+                        Text("\(summary.skippedNodeCount) / \(summary.totalNodeCount)")
+                    }
+                    GridRow {
+                        Text("profile.subscription.preview.skipped-protocols").foregroundStyle(.secondary)
+                        Text(summary.skippedProtocols.map(\.rawValue).joined(separator: ", "))
+                    }
                 }
                 GridRow {
                     Text("profile.subscription.preview.protocols").foregroundStyle(.secondary)
@@ -883,6 +893,12 @@ private struct SubscriptionIntakePreview: View {
                     .font(.callout)
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("profile.subscription.compatibility-warning")
+            }
+            if summary.warnings.contains(.unsupportedNodesSkipped) {
+                Label("profile.subscription.warning.unsupported-nodes", systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("profile.subscription.compatibility-warning.unsupported-nodes")
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {

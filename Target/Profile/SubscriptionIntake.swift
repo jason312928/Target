@@ -26,11 +26,21 @@ enum SubscriptionProxyProtocol: String, CaseIterable, Equatable, Sendable {
 
 enum SubscriptionCompatibilityWarning: String, Equatable, Sendable {
     case providerSemanticsNotImported = "provider_semantics_not_imported"
+    case unsupportedNodesSkipped = "unsupported_nodes_skipped"
+}
+
+enum SubscriptionSkippedProtocol: String, Equatable, Sendable {
+    case hysteria2
 }
 
 struct SubscriptionCompatibilitySummary: Equatable, Sendable {
     let format: SubscriptionPayloadFormat
+    /// Number of nodes that were converted into the Target-owned configuration.
     let nodeCount: Int
+    /// Number of recognized provider nodes before compatibility filtering.
+    let totalNodeCount: Int
+    let skippedNodeCount: Int
+    let skippedProtocols: [SubscriptionSkippedProtocol]
     let protocols: [SubscriptionProxyProtocol]
     let warnings: [SubscriptionCompatibilityWarning]
     let isPassThrough: Bool
@@ -39,6 +49,16 @@ struct SubscriptionCompatibilitySummary: Equatable, Sendable {
 struct SubscriptionNormalizationResult: Sendable {
     let data: Data
     let summary: SubscriptionCompatibilitySummary
+}
+
+private struct ParsedProviderNodes {
+    let nodes: [ProviderNode]
+    let totalNodeCount: Int
+    let skippedProtocols: [SubscriptionSkippedProtocol]
+
+    var warnings: [SubscriptionCompatibilityWarning] {
+        skippedProtocols.isEmpty ? [] : [.unsupportedNodesSkipped]
+    }
 }
 
 enum SubscriptionIntakeError: Error, Equatable, Sendable {
@@ -85,6 +105,12 @@ struct SubscriptionNormalizer: Sendable {
     static let maximumLineBytes = 16 * 1_024
 
     private static let supportedSchemes = Set(SubscriptionProxyProtocol.allCases.map(\.rawValue) + ["ss"])
+    /// These are explicitly recognized provider protocols which Target does not
+    /// yet convert. They may be skipped only when a subscription also contains
+    /// at least one fully valid supported node.
+    private static let skippableUnsupportedSchemes: [String: SubscriptionSkippedProtocol] = [
+        "hysteria2": .hysteria2
+    ]
     private static let shadowsocksMethods: Set<String> = [
         "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305",
         "aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305"
@@ -101,12 +127,18 @@ struct SubscriptionNormalizer: Sendable {
         if trimmed.first == "{" || trimmed.first == "[" {
             return try normalizeJSONCandidate(data, text: trimmed)
         }
-        if let nodes = try parseURIListIfRecognized(trimmed) {
-            return try generatedResult(nodes: nodes, format: .uriList, warnings: [])
+        if let parsed = try parseURIListIfRecognized(trimmed) {
+            return try generatedResult(
+                nodes: parsed.nodes, format: .uriList, warnings: parsed.warnings,
+                totalNodeCount: parsed.totalNodeCount, skippedProtocols: parsed.skippedProtocols
+            )
         }
         if let decoded = strictBase64Decode(trimmed), let decodedText = String(data: decoded, encoding: .utf8),
-           let nodes = try parseURIListIfRecognized(decodedText.trimmingCharacters(in: .whitespacesAndNewlines)) {
-            return try generatedResult(nodes: nodes, format: .base64URIList, warnings: [])
+           let parsed = try parseURIListIfRecognized(decodedText.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return try generatedResult(
+                nodes: parsed.nodes, format: .base64URIList, warnings: parsed.warnings,
+                totalNodeCount: parsed.totalNodeCount, skippedProtocols: parsed.skippedProtocols
+            )
         }
         if looksLikeClashYAML(trimmed) {
             return try normalizeClashYAML(trimmed)
@@ -134,6 +166,12 @@ struct SubscriptionNormalizer: Sendable {
                     guard let type = item["type"] as? String else { return false }
                     return ["shadowsocks", "vmess", "vless", "trojan"].contains(type)
                 }.count,
+                totalNodeCount: outbounds.filter { item in
+                    guard let type = item["type"] as? String else { return false }
+                    return ["shadowsocks", "vmess", "vless", "trojan"].contains(type)
+                }.count,
+                skippedNodeCount: 0,
+                skippedProtocols: [],
                 protocols: protocols,
                 warnings: [],
                 isPassThrough: true
@@ -141,7 +179,7 @@ struct SubscriptionNormalizer: Sendable {
         )
     }
 
-    private func parseURIListIfRecognized(_ text: String) throws -> [ProviderNode]? {
+    private func parseURIListIfRecognized(_ text: String) throws -> ParsedProviderNodes? {
         let rawLines = text.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline })
         var entries: [String] = []
         for rawLine in rawLines {
@@ -153,9 +191,19 @@ struct SubscriptionNormalizer: Sendable {
         guard !entries.isEmpty else { return nil }
         guard entries.count <= Self.maximumNodeCount else { throw SubscriptionIntakeError.complexityLimitExceeded }
 
-        let recognizedCount = entries.reduce(into: 0) { count, entry in
-            if let scheme = entry.split(separator: ":", maxSplits: 1).first?.lowercased(), Self.supportedSchemes.contains(scheme) {
-                count += 1
+        var nodes: [ProviderNode] = []
+        var skippedProtocols: [SubscriptionSkippedProtocol] = []
+        var recognizedCount = 0
+        for entry in entries {
+            guard let scheme = entry.split(separator: ":", maxSplits: 1).first?.lowercased() else {
+                throw SubscriptionIntakeError.payloadInvalid
+            }
+            if Self.supportedSchemes.contains(scheme) {
+                recognizedCount += 1
+                nodes.append(try parseURI(entry))
+            } else if let skippedProtocol = Self.skippableUnsupportedSchemes[scheme] {
+                recognizedCount += 1
+                skippedProtocols.append(skippedProtocol)
             }
         }
         guard recognizedCount > 0 else {
@@ -170,7 +218,8 @@ struct SubscriptionNormalizer: Sendable {
             if unrecognized.contains(where: { $0.contains("://") }) { throw SubscriptionIntakeError.protocolUnsupported }
             throw SubscriptionIntakeError.payloadInvalid
         }
-        return try entries.map(parseURI)
+        guard !nodes.isEmpty else { throw SubscriptionIntakeError.protocolUnsupported }
+        return ParsedProviderNodes(nodes: nodes, totalNodeCount: entries.count, skippedProtocols: skippedProtocols)
     }
 
     private func parseURI(_ value: String) throws -> ProviderNode {
@@ -294,22 +343,31 @@ struct SubscriptionNormalizer: Sendable {
             throw SubscriptionIntakeError.payloadInvalid
         }
         guard rawProxies.count <= Self.maximumNodeCount else { throw SubscriptionIntakeError.complexityLimitExceeded }
-        let nodes = try rawProxies.map { raw -> ProviderNode in
+        var nodes: [ProviderNode] = []
+        var skippedProtocols: [SubscriptionSkippedProtocol] = []
+        for raw in rawProxies {
             guard let proxy = stringDictionary(raw), let type = nonemptyString(proxy["type"])?.lowercased() else {
                 throw SubscriptionIntakeError.payloadInvalid
             }
             switch type {
-            case "ss": return try clashShadowsocks(proxy)
-            case "vmess": return try clashVMess(proxy)
-            case "vless": return try clashVLESS(proxy)
-            case "trojan": return try clashTrojan(proxy)
+            case "ss": nodes.append(try clashShadowsocks(proxy))
+            case "vmess": nodes.append(try clashVMess(proxy))
+            case "vless": nodes.append(try clashVLESS(proxy))
+            case "trojan": nodes.append(try clashTrojan(proxy))
+            case let type where Self.skippableUnsupportedSchemes[type] != nil:
+                skippedProtocols.append(Self.skippableUnsupportedSchemes[type]!)
             default: throw SubscriptionIntakeError.protocolUnsupported
             }
         }
+        guard !nodes.isEmpty else { throw SubscriptionIntakeError.protocolUnsupported }
         let semanticKeys: Set<String> = ["proxy-groups", "rules", "rule-providers", "proxy-providers", "dns", "tun", "script"]
-        let warnings: [SubscriptionCompatibilityWarning] = root.keys.contains(where: semanticKeys.contains)
+        var warnings: [SubscriptionCompatibilityWarning] = root.keys.contains(where: semanticKeys.contains)
             ? [.providerSemanticsNotImported] : []
-        return try generatedResult(nodes: nodes, format: .clashYAML, warnings: warnings)
+        if !skippedProtocols.isEmpty { warnings.append(.unsupportedNodesSkipped) }
+        return try generatedResult(
+            nodes: nodes, format: .clashYAML, warnings: warnings,
+            totalNodeCount: rawProxies.count, skippedProtocols: skippedProtocols
+        )
     }
 
     private func clashShadowsocks(_ proxy: [String: Any]) throws -> ProviderNode {
@@ -383,7 +441,8 @@ struct SubscriptionNormalizer: Sendable {
 
     private func generatedResult(
         nodes: [ProviderNode], format: SubscriptionPayloadFormat,
-        warnings: [SubscriptionCompatibilityWarning]
+        warnings: [SubscriptionCompatibilityWarning], totalNodeCount: Int? = nil,
+        skippedProtocols: [SubscriptionSkippedProtocol] = []
     ) throws -> SubscriptionNormalizationResult {
         guard !nodes.isEmpty else { throw SubscriptionIntakeError.payloadInvalid }
         var usedTags = Set<String>(["Proxy", "direct", "target-mixed"])
@@ -413,6 +472,9 @@ struct SubscriptionNormalizer: Sendable {
             summary: SubscriptionCompatibilitySummary(
                 format: format,
                 nodeCount: nodes.count,
+                totalNodeCount: totalNodeCount ?? nodes.count,
+                skippedNodeCount: skippedProtocols.count,
+                skippedProtocols: Array(Set(skippedProtocols)).sorted { $0.rawValue < $1.rawValue },
                 protocols: Set(nodes.map(\.protocolKind)).sorted { $0.rawValue < $1.rawValue },
                 warnings: warnings,
                 isPassThrough: false
@@ -667,20 +729,16 @@ struct TargetSubscriptionOperations: @unchecked Sendable {
         do {
             return try validate(normalizer.normalize(response.data))
         } catch let error as SubscriptionIntakeError {
-            let cause: SubscriptionIntakeError
-            if error == .formatUnsupported, isLikelyWebPage(response) {
-                cause = .webPageReturned
-            } else {
-                cause = error
-            }
+            // A valid subscription is accepted before this point regardless of its
+            // MIME type. Only a bounded structural HTML signature can replace a
+            // real parsing error, so HTML containing URI-looking links is not
+            // reported as an unsupported proxy protocol.
+            let cause: SubscriptionIntakeError = isLikelyWebPage(response) ? .webPageReturned : error
             throw SubscriptionIntakeFailure(cause: cause, response: response.metadata)
         }
     }
 
     private func isLikelyWebPage(_ response: SubscriptionResponse) -> Bool {
-        if response.metadata.contentType == "text/html" || response.metadata.contentType == "application/xhtml+xml" {
-            return true
-        }
         let prefix = response.data.prefix(4_096)
         guard let text = String(data: prefix, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else { return false }
