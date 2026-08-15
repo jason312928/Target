@@ -210,6 +210,7 @@ actor TargetAutomationOperations {
             "nodeCount": .integer(summary.nodeCount),
             "totalNodeCount": .integer(summary.totalNodeCount),
             "skippedNodeCount": .integer(summary.skippedNodeCount),
+            "skippedTLSVerificationNodeCount": .integer(summary.skippedTLSVerificationNodeCount),
             "skippedProtocols": .array(summary.skippedProtocols.map { .string($0.rawValue) }),
             "protocols": .array(summary.protocols.map { .string($0.rawValue) }),
             "compatibilityWarnings": .array(summary.warnings.map { .string($0.rawValue) }),

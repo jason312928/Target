@@ -543,6 +543,26 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         let ws = "vless://11111111-1111-4111-8111-111111111111@example.com:443?encryption=none&security=tls&type=ws&host=cdn.example.com&path=%2Fws&sni=example.com#VLESS%20WS"
         let result = try SubscriptionNormalizer().normalize(Data((tcp + "\n" + ws).utf8))
         XCTAssertEqual(result.summary.protocols, [.vless])
+        let reality = """
+        proxies:
+          - name: VLESS Reality
+            type: vless
+            server: example.com
+            port: 443
+            uuid: 11111111-1111-4111-8111-111111111111
+            tls: true
+            flow: xtls-rprx-vision
+            client-fingerprint: firefox
+            reality-opts:
+              public-key: dGVzdC1wdWJsaWMta2V5
+              short-id: a1b2c3d4
+        """
+        let realityResult = try SubscriptionNormalizer().normalize(Data(reality.utf8))
+        let realityOutbound = try generatedOutbounds(realityResult.data)[1]
+        XCTAssertEqual(realityOutbound["flow"] as? String, "xtls-rprx-vision")
+        let realityTLS = try XCTUnwrap(realityOutbound["tls"] as? [String: Any])
+        XCTAssertEqual((realityTLS["utls"] as? [String: Any])?["fingerprint"] as? String, "firefox")
+        XCTAssertEqual((realityTLS["reality"] as? [String: Any])?["enabled"] as? Bool, true)
         assertIntakeError(.variantUnsupported, tcp.replacingOccurrences(of: "#", with: "&flow=xtls-rprx-vision#"))
         assertIntakeError(.variantUnsupported, tcp.replacingOccurrences(of: "security=tls", with: "security=reality"))
     }
@@ -611,6 +631,18 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(partial.summary.skippedNodeCount, 1)
         XCTAssertEqual(partial.summary.skippedProtocols, [.hysteria2])
         XCTAssertEqual(partial.summary.warnings, [.unsupportedNodesSkipped])
+        let tlsSkipped = try SubscriptionNormalizer().normalize(Data("""
+        proxies:
+          - {name: Trojan, type: trojan, server: example.com, port: 443, password: test-password, tls: true}
+          - {name: VLESS insecure, type: vless, server: example.com, port: 443, uuid: 11111111-1111-4111-8111-111111111111, tls: true, skip-cert-verify: true}
+          - {name: Unsupported, type: hysteria2, server: example.com, port: 443}
+        """.utf8))
+        XCTAssertEqual(tlsSkipped.summary.nodeCount, 1)
+        XCTAssertEqual(tlsSkipped.summary.totalNodeCount, 3)
+        XCTAssertEqual(tlsSkipped.summary.skippedNodeCount, 2)
+        XCTAssertEqual(tlsSkipped.summary.skippedTLSVerificationNodeCount, 1)
+        XCTAssertEqual(tlsSkipped.summary.skippedProtocols, [.hysteria2, .vless])
+        XCTAssertEqual(tlsSkipped.summary.warnings, [.unsupportedNodesSkipped, .tlsVerificationRequired])
         assertIntakeError(.variantUnsupported, "proxies:\n  - {name: SS, type: ss, server: example.com, port: 8388, cipher: aes-128-gcm, password: test-password, plugin: obfs}")
     }
 

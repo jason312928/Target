@@ -27,10 +27,13 @@ enum SubscriptionProxyProtocol: String, CaseIterable, Equatable, Sendable {
 enum SubscriptionCompatibilityWarning: String, Equatable, Sendable {
     case providerSemanticsNotImported = "provider_semantics_not_imported"
     case unsupportedNodesSkipped = "unsupported_nodes_skipped"
+    case tlsVerificationRequired = "tls_verification_required"
 }
 
 enum SubscriptionSkippedProtocol: String, Equatable, Sendable {
     case hysteria2
+    case vless
+    case trojan
 }
 
 struct SubscriptionCompatibilitySummary: Equatable, Sendable {
@@ -40,6 +43,7 @@ struct SubscriptionCompatibilitySummary: Equatable, Sendable {
     /// Number of recognized provider nodes before compatibility filtering.
     let totalNodeCount: Int
     let skippedNodeCount: Int
+    let skippedTLSVerificationNodeCount: Int
     let skippedProtocols: [SubscriptionSkippedProtocol]
     let protocols: [SubscriptionProxyProtocol]
     let warnings: [SubscriptionCompatibilityWarning]
@@ -171,6 +175,7 @@ struct SubscriptionNormalizer: Sendable {
                     return ["shadowsocks", "vmess", "vless", "trojan"].contains(type)
                 }.count,
                 skippedNodeCount: 0,
+                skippedTLSVerificationNodeCount: 0,
                 skippedProtocols: [],
                 protocols: protocols,
                 warnings: [],
@@ -345,9 +350,18 @@ struct SubscriptionNormalizer: Sendable {
         guard rawProxies.count <= Self.maximumNodeCount else { throw SubscriptionIntakeError.complexityLimitExceeded }
         var nodes: [ProviderNode] = []
         var skippedProtocols: [SubscriptionSkippedProtocol] = []
+        var skippedTLSVerificationNodeCount = 0
         for raw in rawProxies {
             guard let proxy = stringDictionary(raw), let type = nonemptyString(proxy["type"])?.lowercased() else {
                 throw SubscriptionIntakeError.payloadInvalid
+            }
+            if requiresDisabledTLSVerification(proxy) {
+                guard let protocolKind = SubscriptionSkippedProtocol(rawValue: type) else {
+                    throw SubscriptionIntakeError.variantUnsupported
+                }
+                skippedProtocols.append(protocolKind)
+                skippedTLSVerificationNodeCount += 1
+                continue
             }
             switch type {
             case "ss": nodes.append(try clashShadowsocks(proxy))
@@ -364,9 +378,11 @@ struct SubscriptionNormalizer: Sendable {
         var warnings: [SubscriptionCompatibilityWarning] = root.keys.contains(where: semanticKeys.contains)
             ? [.providerSemanticsNotImported] : []
         if !skippedProtocols.isEmpty { warnings.append(.unsupportedNodesSkipped) }
+        if skippedTLSVerificationNodeCount > 0 { warnings.append(.tlsVerificationRequired) }
         return try generatedResult(
             nodes: nodes, format: .clashYAML, warnings: warnings,
-            totalNodeCount: rawProxies.count, skippedProtocols: skippedProtocols
+            totalNodeCount: rawProxies.count, skippedProtocols: skippedProtocols,
+            skippedTLSVerificationNodeCount: skippedTLSVerificationNodeCount
         )
     }
 
@@ -398,12 +414,30 @@ struct SubscriptionNormalizer: Sendable {
 
     private func clashVLESS(_ proxy: [String: Any]) throws -> ProviderNode {
         let common = try clashCommon(proxy)
-        guard let uuid = nonemptyString(proxy["uuid"]), UUID(uuidString: uuid) != nil,
-              proxy["flow"] == nil, proxy["reality-opts"] == nil else { throw SubscriptionIntakeError.variantUnsupported }
+        guard let uuid = nonemptyString(proxy["uuid"]), UUID(uuidString: uuid) != nil else {
+            throw SubscriptionIntakeError.payloadInvalid
+        }
+        let flow = nonemptyString(proxy["flow"])
+        guard flow == nil || flow == "xtls-rprx-vision" else { throw SubscriptionIntakeError.variantUnsupported }
         var outbound: [String: Any] = [
             "type": "vless", "server": common.server, "server_port": common.port, "uuid": uuid
         ]
         try applyClashNetworkAndTLS(proxy, server: common.server, tlsRequired: false, to: &outbound)
+        if let reality = stringDictionary(proxy["reality-opts"] as Any) {
+            guard flow == "xtls-rprx-vision", boolean(proxy["tls"]) == true,
+                  let publicKey = nonemptyString(reality["public-key"]), validRealityPublicKey(publicKey),
+                  let shortID = nonemptyString(reality["short-id"]), validRealityShortID(shortID),
+                  nonemptyString(proxy["client-fingerprint"]) == "firefox",
+                  var tls = outbound["tls"] as? [String: Any] else {
+                throw SubscriptionIntakeError.variantUnsupported
+            }
+            tls["utls"] = ["enabled": true, "fingerprint": "firefox"]
+            tls["reality"] = ["enabled": true, "public_key": publicKey, "short_id": shortID]
+            outbound["tls"] = tls
+            outbound["flow"] = flow
+        } else if flow != nil {
+            throw SubscriptionIntakeError.variantUnsupported
+        }
         return ProviderNode(name: common.name, protocolKind: .vless, outbound: outbound)
     }
 
@@ -439,10 +473,14 @@ struct SubscriptionNormalizer: Sendable {
         if tls { outbound["tls"] = tlsObject(serverName: nonemptyString(proxy["servername"] ?? proxy["sni"]) ?? server) }
     }
 
+    private func requiresDisabledTLSVerification(_ proxy: [String: Any]) -> Bool {
+        boolean(proxy["skip-cert-verify"]) == true
+    }
+
     private func generatedResult(
         nodes: [ProviderNode], format: SubscriptionPayloadFormat,
         warnings: [SubscriptionCompatibilityWarning], totalNodeCount: Int? = nil,
-        skippedProtocols: [SubscriptionSkippedProtocol] = []
+        skippedProtocols: [SubscriptionSkippedProtocol] = [], skippedTLSVerificationNodeCount: Int = 0
     ) throws -> SubscriptionNormalizationResult {
         guard !nodes.isEmpty else { throw SubscriptionIntakeError.payloadInvalid }
         var usedTags = Set<String>(["Proxy", "direct", "target-mixed"])
@@ -474,6 +512,7 @@ struct SubscriptionNormalizer: Sendable {
                 nodeCount: nodes.count,
                 totalNodeCount: totalNodeCount ?? nodes.count,
                 skippedNodeCount: skippedProtocols.count,
+                skippedTLSVerificationNodeCount: skippedTLSVerificationNodeCount,
                 skippedProtocols: Array(Set(skippedProtocols)).sorted { $0.rawValue < $1.rawValue },
                 protocols: Set(nodes.map(\.protocolKind)).sorted { $0.rawValue < $1.rawValue },
                 warnings: warnings,
@@ -576,6 +615,14 @@ struct SubscriptionNormalizer: Sendable {
     }
 
     private func validPort(_ port: Int) -> Bool { (1...65_535).contains(port) }
+
+    private func validRealityPublicKey(_ value: String) -> Bool {
+        value.utf8.count <= 256 && value.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "-_=".contains($0)) }
+    }
+
+    private func validRealityShortID(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 16 && value.allSatisfy { $0.isHexDigit }
+    }
 
     private func decoded(_ value: String?) -> String? {
         value?.removingPercentEncoding
