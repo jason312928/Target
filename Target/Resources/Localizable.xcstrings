@@ -456,7 +456,22 @@
     "xpc.label.status" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "XPC" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "XPC" } } } },
     "xpc.status.unknown" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Not checked" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "未检查" } } } },
     "xpc.status.connected" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Connected" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已连接" } } } },
-    "xpc.status.unavailable" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Unavailable" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不可用" } } } }
+    "xpc.status.unavailable" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Unavailable" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不可用" } } } },
+    "settings.software-update" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Software Update" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "软件更新" } } } },
+    "settings.software-update.current-version" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Current Version" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前版本" } } } },
+    "settings.software-update.current-build" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Current Build" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前 Build" } } } },
+    "settings.software-update.channel" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Update Channel" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "更新通道" } } } },
+    "settings.software-update.channel.local" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Local" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "本地" } } } },
+    "settings.software-update.channel.development-preview" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Development Preview" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "开发预览" } } } },
+    "settings.software-update.channel.stable" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stable" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "稳定版" } } } },
+    "settings.software-update.check" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Check for Updates…" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "检查更新…" } } } },
+    "settings.software-update.automatic-checks" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Automatically Check for Updates" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "自动检查更新" } } } },
+    "settings.software-update.automatic-downloads" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Automatically Download Updates" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "自动下载更新" } } } },
+    "settings.software-update.status.checking" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Checking for updates…" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在检查更新…" } } } },
+    "settings.software-update.status.up-to-date" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Target is up to date." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已是最新版本" } } } },
+    "settings.software-update.status.available" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "A new version is available." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发现新版本" } } } },
+    "settings.software-update.status.failed" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Update check failed." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "更新检查失败" } } } },
+    "settings.software-update.stop-proxy-before-install" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stop the proxy before installing the update." } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "停止代理后再安装更新" } } } }
   },
   "version" : "1.0"
 }

@@ -4,6 +4,42 @@ import XCTest
 @testable import Target
 
 final class ProfileStorePersistenceTests: XCTestCase, ProfileTestCaseSupport {
+    func testAppBundleUpgradePreservesDefaultRootKeyIdentitySelectionAndConfiguration() throws {
+        let expectedDefaultRoot = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appending(path: "Target/Profiles", directoryHint: .isDirectory)
+            .standardizedFileURL
+        XCTAssertEqual(ProfileStore.defaultRootDirectory(), expectedDefaultRoot)
+        XCTAssertEqual(KeychainProfileEncryptionKeyProvider.service, "com.jason312928.Target.profile-storage.v1")
+        XCTAssertEqual(KeychainProfileEncryptionKeyProvider.account, "master-key-v1")
+
+        let root = try temporaryDirectory()
+        let keyProvider = TestProfileKeyProvider(key: Data(repeating: 0x4D, count: 32))
+        let expectedConfiguration = #"{"inbounds":[],"outbounds":[{"type":"direct","tag":"upgrade-preservation"}],"route":{"final":"upgrade-preservation"}}"#
+        let profileID: UUID
+
+        do {
+            let preUpdateStore = ProfileStore(
+                rootDirectory: root,
+                checker: TestChecker(result: .success(())),
+                keyProvider: keyProvider
+            )
+            let profile = try preUpdateStore.create(name: "Updater Preservation Fixture")
+            try preUpdateStore.save(json: expectedConfiguration, for: profile.id)
+            try preUpdateStore.select(profile.id)
+            profileID = profile.id
+        }
+
+        let postUpdateStore = ProfileStore(
+            rootDirectory: root,
+            checker: TestChecker(result: .success(())),
+            keyProvider: keyProvider
+        )
+        XCTAssertEqual(try postUpdateStore.listProfiles().map(\.id), [profileID])
+        XCTAssertEqual(try postUpdateStore.selectedProfileID(), profileID)
+        XCTAssertEqual(try postUpdateStore.configurationText(for: profileID), expectedConfiguration)
+        XCTAssertEqual(keyProvider.createCount, 0)
+    }
+
     func testConcurrentInitialStoreReadWaitsForAuthenticatedManifestAndSelection() throws {
         let root = try temporaryDirectory()
         let faults = BlockingInitialManifestWriteFault()

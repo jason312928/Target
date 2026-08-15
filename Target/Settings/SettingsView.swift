@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Bindable var preferences: ApplicationPreferencesModel
+    @Bindable var updateController: TargetUpdateController
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -28,6 +29,32 @@ struct SettingsView: View {
                 }
             }
 
+            Section("settings.software-update") {
+                LabeledContent("settings.software-update.current-version") {
+                    Text(updateController.presentation.version)
+                }
+                LabeledContent("settings.software-update.current-build") {
+                    Text(updateController.presentation.build)
+                }
+                LabeledContent("settings.software-update.channel") {
+                    Text(LocalizedStringKey(updateController.presentation.channel.localizedKey))
+                }
+
+                Button("settings.software-update.check", action: updateController.checkForUpdates)
+                    .disabled(!updateController.canCheckForUpdates)
+                    .accessibilityIdentifier("settings.software-update.check")
+
+                Toggle("settings.software-update.automatic-checks", isOn: automaticChecksBinding)
+                    .accessibilityIdentifier("settings.software-update.automatic-checks")
+
+                if let statusKey = updateController.status.localizedKey {
+                    Text(LocalizedStringKey(statusKey))
+                        .font(.footnote)
+                        .foregroundStyle(updateController.status == .failed ? .red : .secondary)
+                        .accessibilityIdentifier("settings.software-update.status")
+                }
+            }
+
             Section("settings.onboarding") {
                 Button("settings.reopen-onboarding", action: reopenOnboarding)
                     .accessibilityIdentifier("settings.reopen-onboarding")
@@ -35,7 +62,17 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 460)
-        .task { preferences.refreshLaunchAtLoginStatus() }
+        .task {
+            preferences.refreshLaunchAtLoginStatus()
+            updateController.refreshPreferences()
+        }
+    }
+
+    private var automaticChecksBinding: Binding<Bool> {
+        Binding(
+            get: { updateController.automaticallyChecksForUpdates },
+            set: updateController.setAutomaticallyChecksForUpdates
+        )
     }
 
     private var launchAtLoginBinding: Binding<Bool> {

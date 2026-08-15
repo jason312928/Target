@@ -20,6 +20,20 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
+    <key>SUAllowsAutomaticUpdates</key>
+    <false/>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUEnableSystemProfiling</key>
+    <false/>
+    <key>SUFeedURL</key>
+    <string>https://raw.githubusercontent.com/Jason312928/Target/main/Updates/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>KFYe1MGjoJohjYcERu9Wqf5Jcc3lbxdKZfM+2aHx7JI=</string>
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
     <key>TargetBuildChannel</key>
     <string>$(TARGET_BUILD_CHANNEL)</string>
     <key>TargetSourceCommit</key>

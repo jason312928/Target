@@ -400,12 +400,34 @@ final class BackendLifecycleModel {
         operationTask?.cancel()
     }
 
-    func stopOnApplicationTermination() {
+    func prepareForApplicationTermination() async -> Bool {
         observationTask?.cancel()
         observationTask = nil
-        guard status.engineState == .running else { return }
-        Task { [runtimeOperations] in
-            _ = try? await runtimeOperations.stopEngineSafely()
+        operationTask?.cancel()
+        if let operationTask {
+            await operationTask.value
+            self.operationTask = nil
+        }
+
+        guard status.engineState == .running
+                || systemProxyStatus.state != .disabled
+                || systemProxyStatus.hasRecoverySnapshot else { return true }
+        do {
+            let result = try await runtimeOperations.stopEngineSafely()
+            applyAuthoritativeEngineStatus(result.engineStatus)
+            if let proxyStatus = result.systemProxyStatus {
+                systemProxyStatus = proxyStatus
+            }
+            lifecycleState = .settled(from: result.engineStatus)
+            return result.engineStatus.engineState == .stopped
+                && systemProxyStatus.state == .disabled
+                && !systemProxyStatus.hasRecoverySnapshot
+        } catch let backendError as BackendError {
+            error = backendError
+            return false
+        } catch {
+            self.error = .serviceUnavailable
+            return false
         }
     }
 

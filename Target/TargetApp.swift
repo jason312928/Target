@@ -7,6 +7,7 @@ struct TargetApp: App {
     @State private var lifecycle: BackendLifecycleModel
     @State private var profileModel: ProfileViewModel
     @State private var preferences: ApplicationPreferencesModel
+    @State private var updateController: TargetUpdateController
 
     init() {
         let profileStore: ProfileStore
@@ -44,6 +45,7 @@ struct TargetApp: App {
             policyOperations: policyOperations
         ))
         _preferences = State(initialValue: ApplicationPreferencesModel(loginItemManager: SMAppLoginItemManager()))
+        _updateController = State(initialValue: TargetUpdateController())
         let operations = TargetAutomationOperations(
             profileStore: profileStore,
             policyOperations: policyOperations,
@@ -72,7 +74,15 @@ struct TargetApp: App {
         }
 
         Settings {
-            SettingsView(preferences: preferences)
+            SettingsView(preferences: preferences, updateController: updateController)
+        }
+
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("settings.software-update.check", action: updateController.checkForUpdates)
+                    .keyboardShortcut("u", modifiers: [.command])
+                    .disabled(!updateController.canCheckForUpdates)
+            }
         }
 
         MenuBarExtra("Target", systemImage: MenuBarPresentation(
@@ -106,6 +116,7 @@ final class TargetApplicationDelegate: NSObject, NSApplicationDelegate {
     weak var lifecycle: BackendLifecycleModel?
     private var automationOperations: TargetAutomationOperations?
     private var automationServer: LocalAutomationServer?
+    private var terminationTask: Task<Void, Never>?
 
     func configure(lifecycle: BackendLifecycleModel, automationOperations: TargetAutomationOperations) {
         self.lifecycle = lifecycle
@@ -132,6 +143,15 @@ final class TargetApplicationDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         automationServer?.stop()
-        lifecycle?.stopOnApplicationTermination()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard terminationTask == nil, let lifecycle else { return .terminateNow }
+        terminationTask = Task { [weak self] in
+            let shouldTerminate = await lifecycle.prepareForApplicationTermination()
+            self?.terminationTask = nil
+            sender.reply(toApplicationShouldTerminate: shouldTerminate)
+        }
+        return .terminateLater
     }
 }

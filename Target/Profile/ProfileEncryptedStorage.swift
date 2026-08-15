@@ -16,8 +16,8 @@ enum ProfileEncryptionKeyProviderError: Error, Equatable {
 }
 
 final class KeychainProfileEncryptionKeyProvider: ProfileEncryptionKeyProviding {
-    private static let service = "com.jason312928.Target.profile-storage.v1"
-    private static let account = "master-key-v1"
+    static let service = "com.jason312928.Target.profile-storage.v1"
+    static let account = "master-key-v1"
 
     func loadMasterKey() throws -> Data? {
         let query: [CFString: Any] = [
