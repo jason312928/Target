@@ -563,6 +563,13 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         let realityTLS = try XCTUnwrap(realityOutbound["tls"] as? [String: Any])
         XCTAssertEqual((realityTLS["utls"] as? [String: Any])?["fingerprint"] as? String, "firefox")
         XCTAssertEqual((realityTLS["reality"] as? [String: Any])?["enabled"] as? Bool, true)
+        let realityCheck = try makeStore().checkSubscriptionCandidate(realityResult.data)
+        if case .failure(let diagnostic) = realityCheck {
+            if diagnostic.messageKey == "profile.validation.engine-unavailable" {
+                throw XCTSkip("sing-box is not installed for generated configuration validation.")
+            }
+            XCTFail("Generated Reality configuration failed sing-box validation: \(diagnostic.messageKey), line \(diagnostic.line ?? 0)")
+        }
         assertIntakeError(.variantUnsupported, tcp.replacingOccurrences(of: "#", with: "&flow=xtls-rprx-vision#"))
         assertIntakeError(.variantUnsupported, tcp.replacingOccurrences(of: "security=tls", with: "security=reality"))
     }
