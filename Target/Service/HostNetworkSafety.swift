@@ -2,20 +2,36 @@ import AppKit
 import Foundation
 
 enum HostNetworkSafetyMode: Equatable, Sendable {
-    /// The only production default. Network writes require a separate, explicitly
-    /// authorized test environment and are never enabled by application state alone.
+    /// Development-machine default. Network writes are never enabled by application
+    /// state alone in this mode.
     case safe
+    /// Normal-user operation. Network writes remain gated by an explicit user action
+    /// and the existing ownership/environment checks.
+    case normalUser
+    /// Explicitly authorized VM validation. This is only selected by the dedicated
+    /// debug compilation condition and is never the normal-user default.
     case authorizedNetworkTest
 
-    var permitsNetworkWrites: Bool { self == .authorizedNetworkTest }
+    var permitsNetworkWrites: Bool { self != .safe }
+
+    var automationValue: String {
+        switch self {
+        case .safe: "safe"
+        case .normalUser: "normalUser"
+        case .authorizedNetworkTest: "authorizedValidation"
+        }
+    }
 }
 
 enum TargetValidationPolicy {
 #if DEBUG && TARGET_UTM_VALIDATION
     static let hostNetworkSafetyMode = HostNetworkSafetyMode.authorizedNetworkTest
     static let isUTMValidation = true
-#else
+#elseif DEBUG
     static let hostNetworkSafetyMode = HostNetworkSafetyMode.safe
+    static let isUTMValidation = false
+#else
+    static let hostNetworkSafetyMode = HostNetworkSafetyMode.normalUser
     static let isUTMValidation = false
 #endif
 

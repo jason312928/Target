@@ -486,8 +486,59 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(plain.summary.format, .uriList)
         XCTAssertEqual(wrapped.summary.format, .base64URIList)
         XCTAssertEqual(plain.summary.nodeCount, 4)
-        XCTAssertEqual(plain.summary.protocols, SubscriptionProxyProtocol.allCases.sorted { $0.rawValue < $1.rawValue })
+        XCTAssertEqual(plain.summary.protocols, [.shadowsocks, .trojan, .vless, .vmess])
         XCTAssertEqual(plain.data, wrapped.data)
+    }
+
+    func testAnyTLSURIAndClashNodesNormalizeWithVerifiedTLS() throws {
+        let uri = "anytls://fixture-password@example.com:443?security=tls&sni=proxy.example.com&alpn=h2%2Chttp%2F1.1&fp=chrome#AnyTLS%20URI"
+        let uriResult = try SubscriptionNormalizer().normalize(Data(uri.utf8))
+        XCTAssertEqual(uriResult.summary.protocols, [.anytls])
+        let uriOutbound = try generatedOutbounds(uriResult.data)[1]
+        XCTAssertEqual(uriOutbound["type"] as? String, "anytls")
+        XCTAssertEqual(uriOutbound["password"] as? String, "fixture-password")
+        let uriTLS = try XCTUnwrap(uriOutbound["tls"] as? [String: Any])
+        XCTAssertEqual(uriTLS["server_name"] as? String, "proxy.example.com")
+        XCTAssertEqual(uriTLS["insecure"] as? Bool, false)
+        XCTAssertEqual(uriTLS["alpn"] as? [String], ["h2", "http/1.1"])
+
+        let clash = try SubscriptionNormalizer().normalize(Data("""
+        proxies:
+          - name: AnyTLS Clash
+            type: anytls
+            server: example.com
+            port: 443
+            password: fixture-password
+            sni: proxy.example.com
+            alpn: [h2, http/1.1]
+            client-fingerprint: chrome
+            skip-cert-verify: false
+        """.utf8))
+        XCTAssertEqual(clash.summary.protocols, [.anytls])
+        let clashOutbound = try generatedOutbounds(clash.data)[1]
+        XCTAssertEqual(clashOutbound["type"] as? String, "anytls")
+        XCTAssertEqual((clashOutbound["tls"] as? [String: Any])?["server_name"] as? String, "proxy.example.com")
+
+        if FileManager.default.isExecutableFile(atPath: singBoxExecutable.path) {
+            let check = SingBoxConfigurationChecker(executableURL: singBoxExecutable).check(configurationURL: try writeCandidate(uriResult.data))
+            if case .failure(let diagnostic) = check {
+                XCTFail("Generated AnyTLS configuration failed sing-box validation: \(diagnostic.messageKey)")
+            }
+        }
+        assertIntakeError(.variantUnsupported, "anytls://fixture-password@example.com:443?security=tls&insecure=1#AnyTLS")
+    }
+
+    func testMixedAnyTLSAndUnsupportedProtocolsSkipOnlyUnsupportedNodes() throws {
+        let ss = try shadowsocksURI(name: "SS")
+        let anytls = "anytls://fixture-password@example.com:443?security=tls#AnyTLS"
+        let result = try SubscriptionNormalizer().normalize(Data((ss + "\n" + anytls + "\nssr://fixture\nhy2://fixture\ntuic://fixture").utf8))
+        XCTAssertEqual(result.summary.nodeCount, 2)
+        XCTAssertEqual(result.summary.totalNodeCount, 5)
+        XCTAssertEqual(result.summary.skippedNodeCount, 3)
+        XCTAssertEqual(result.summary.skippedProtocols, [.hysteria2, .ssr, .tuic])
+        XCTAssertEqual(result.summary.protocols, [.anytls, .shadowsocks])
+        XCTAssertEqual(result.summary.warnings, [.unsupportedNodesSkipped])
+        assertIntakeError(.protocolUnsupported, "ssr://fixture")
     }
 
     func testURIListPartiallyImportsRecognizedUnsupportedProtocolsButRejectsMalformedSupportedEntries() throws {
@@ -808,6 +859,13 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
     private func generatedOutbounds(_ data: Data) throws -> [[String: Any]] {
         let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         return try XCTUnwrap(root["outbounds"] as? [[String: Any]])
+    }
+
+    private func writeCandidate(_ data: Data) throws -> URL {
+        let root = try temporaryDirectory()
+        let url = root.appending(path: "candidate.json")
+        try data.write(to: url)
+        return url
     }
 
     private struct ImmediateSubscriptionFetcher: ProfileSubscriptionFetching {

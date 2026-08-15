@@ -22,6 +22,7 @@ enum SubscriptionProxyProtocol: String, CaseIterable, Equatable, Sendable {
     case vmess
     case vless
     case trojan
+    case anytls
 }
 
 enum SubscriptionCompatibilityWarning: String, Equatable, Sendable {
@@ -32,8 +33,11 @@ enum SubscriptionCompatibilityWarning: String, Equatable, Sendable {
 
 enum SubscriptionSkippedProtocol: String, Equatable, Sendable {
     case hysteria2
+    case tuic
+    case ssr
     case vless
     case trojan
+    case anytls
 }
 
 struct SubscriptionCompatibilitySummary: Equatable, Sendable {
@@ -113,13 +117,20 @@ struct SubscriptionNormalizer: Sendable {
     /// yet convert. They may be skipped only when a subscription also contains
     /// at least one fully valid supported node.
     private static let skippableUnsupportedSchemes: [String: SubscriptionSkippedProtocol] = [
-        "hysteria2": .hysteria2
+        "hysteria2": .hysteria2,
+        "hy2": .hysteria2,
+        "tuic": .tuic,
+        "ssr": .ssr
     ]
     private static let shadowsocksMethods: Set<String> = [
         "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305",
         "aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305"
     ]
     private static let vmessSecurity: Set<String> = ["auto", "none", "zero", "aes-128-gcm", "chacha20-poly1305"]
+    private static let anyTLSFingerprints: Set<String> = [
+        "chrome", "firefox", "safari", "edge", "360", "qq", "ios", "android",
+        "random", "randomized"
+    ]
 
     func normalize(_ data: Data) throws -> SubscriptionNormalizationResult {
         guard !data.isEmpty else { throw SubscriptionIntakeError.emptyPayload }
@@ -168,11 +179,11 @@ struct SubscriptionNormalizer: Sendable {
                 format: .singBoxJSON,
                 nodeCount: outbounds.filter { item in
                     guard let type = item["type"] as? String else { return false }
-                    return ["shadowsocks", "vmess", "vless", "trojan"].contains(type)
+                    return SubscriptionProxyProtocol(rawValue: type) != nil
                 }.count,
                 totalNodeCount: outbounds.filter { item in
                     guard let type = item["type"] as? String else { return false }
-                    return ["shadowsocks", "vmess", "vless", "trojan"].contains(type)
+                    return SubscriptionProxyProtocol(rawValue: type) != nil
                 }.count,
                 skippedNodeCount: 0,
                 skippedTLSVerificationNodeCount: 0,
@@ -234,6 +245,7 @@ struct SubscriptionNormalizer: Sendable {
         case "vmess": return try parseVMess(value)
         case "vless": return try parseVLESS(value)
         case "trojan": return try parseTrojan(value)
+        case "anytls": return try parseAnyTLS(value)
         default: throw SubscriptionIntakeError.protocolUnsupported
         }
     }
@@ -340,6 +352,30 @@ struct SubscriptionNormalizer: Sendable {
         return ProviderNode(name: safeName(decoded(components.fragment), fallback: "Trojan"), protocolKind: .trojan, outbound: outbound)
     }
 
+    private func parseAnyTLS(_ value: String) throws -> ProviderNode {
+        let components = try anyTLSComponents(value)
+        let query = queryMap(components)
+        let security = (query["security"] ?? "tls").lowercased()
+        guard security == "tls", safeAnyTLSQuery(query) else {
+            throw SubscriptionIntakeError.variantUnsupported
+        }
+        let password = [components.password, components.user, query["password"]]
+            .compactMap { $0?.removingPercentEncoding }
+            .first { !$0.isEmpty }
+        guard let password else { throw SubscriptionIntakeError.payloadInvalid }
+
+        let outbound: [String: Any] = [
+            "type": "anytls", "server": components.host!, "server_port": components.port!,
+            "password": password,
+            "tls": anyTLSTLSObject(serverName: query["sni"] ?? query["servername"] ?? components.host!, query: query)
+        ]
+        return ProviderNode(
+            name: safeName(decoded(components.fragment), fallback: "AnyTLS"),
+            protocolKind: .anytls,
+            outbound: outbound
+        )
+    }
+
     private func normalizeClashYAML(_ text: String) throws -> SubscriptionNormalizationResult {
         let loaded: Any
         do { loaded = try Yams.load(yaml: text) as Any }
@@ -368,6 +404,7 @@ struct SubscriptionNormalizer: Sendable {
             case "vmess": nodes.append(try clashVMess(proxy))
             case "vless": nodes.append(try clashVLESS(proxy))
             case "trojan": nodes.append(try clashTrojan(proxy))
+            case "anytls": nodes.append(try clashAnyTLS(proxy))
             case let type where Self.skippableUnsupportedSchemes[type] != nil:
                 skippedProtocols.append(Self.skippableUnsupportedSchemes[type]!)
             default: throw SubscriptionIntakeError.protocolUnsupported
@@ -449,6 +486,28 @@ struct SubscriptionNormalizer: Sendable {
         ]
         try applyClashNetworkAndTLS(proxy, server: common.server, tlsRequired: true, to: &outbound)
         return ProviderNode(name: common.name, protocolKind: .trojan, outbound: outbound)
+    }
+
+    private func clashAnyTLS(_ proxy: [String: Any]) throws -> ProviderNode {
+        let common = try clashCommon(proxy)
+        guard let password = nonemptyString(proxy["password"]),
+              !(boolean(proxy["skip-cert-verify"]) ?? false),
+              (boolean(proxy["tls"]) ?? true) else {
+            throw SubscriptionIntakeError.variantUnsupported
+        }
+        var tls = tlsObject(serverName: nonemptyString(proxy["servername"] ?? proxy["sni"]) ?? common.server)
+        if let alpn = clashALPN(proxy["alpn"]) { tls["alpn"] = alpn }
+        if let fingerprint = nonemptyString(proxy["client-fingerprint"]) {
+            guard Self.anyTLSFingerprints.contains(fingerprint.lowercased()) else {
+                throw SubscriptionIntakeError.variantUnsupported
+            }
+            tls["utls"] = ["enabled": true, "fingerprint": fingerprint.lowercased()]
+        }
+        let outbound: [String: Any] = [
+            "type": "anytls", "server": common.server, "server_port": common.port,
+            "password": password, "tls": tls
+        ]
+        return ProviderNode(name: common.name, protocolKind: .anytls, outbound: outbound)
     }
 
     private func clashCommon(_ proxy: [String: Any]) throws -> (name: String, server: String, port: Int) {
@@ -538,6 +597,14 @@ struct SubscriptionNormalizer: Sendable {
         return components
     }
 
+    private func anyTLSComponents(_ value: String) throws -> URLComponents {
+        guard let components = URLComponents(string: value), let host = components.host, !host.isEmpty,
+              let port = components.port, validPort(port) else {
+            throw SubscriptionIntakeError.payloadInvalid
+        }
+        return components
+    }
+
     private func queryMap(_ components: URLComponents) -> [String: String] {
         Dictionary(components.queryItems?.compactMap { item in item.value.map { (item.name.lowercased(), $0) } } ?? [], uniquingKeysWith: { _, last in last })
     }
@@ -547,8 +614,26 @@ struct SubscriptionNormalizer: Sendable {
         return ["0", "false"].contains(insecure.lowercased()) && query["pbk"] == nil && query["sid"] == nil
     }
 
+    private func safeAnyTLSQuery(_ query: [String: String]) -> Bool {
+        let insecure = query["allowinsecure"] ?? query["insecure"] ?? "0"
+        guard ["0", "false"].contains(insecure.lowercased()) else { return false }
+        if let fingerprint = query["fp"], !Self.anyTLSFingerprints.contains(fingerprint.lowercased()) { return false }
+        return true
+    }
+
     private func tlsObject(serverName: String) -> [String: Any] {
         ["enabled": true, "server_name": serverName, "insecure": false]
+    }
+
+    private func anyTLSTLSObject(serverName: String, query: [String: String]) -> [String: Any] {
+        var tls = tlsObject(serverName: serverName)
+        if let alpn = query["alpn"]?.split(separator: ",").map({ String($0).trimmingCharacters(in: .whitespacesAndNewlines) }).filter({ !$0.isEmpty }), !alpn.isEmpty {
+            tls["alpn"] = alpn
+        }
+        if let fingerprint = query["fp"], Self.anyTLSFingerprints.contains(fingerprint.lowercased()) {
+            tls["utls"] = ["enabled": true, "fingerprint": fingerprint.lowercased()]
+        }
+        return tls
     }
 
     private func parseEndpoint(_ endpoint: String) throws -> (host: String, port: Int) {
@@ -615,6 +700,18 @@ struct SubscriptionNormalizer: Sendable {
     }
 
     private func validPort(_ port: Int) -> Bool { (1...65_535).contains(port) }
+
+    private func clashALPN(_ value: Any?) -> [String]? {
+        if let values = value as? [Any] {
+            let result = values.compactMap { nonemptyString($0) }
+            return result.isEmpty ? nil : result
+        }
+        if let value = nonemptyString(value) {
+            let result = value.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            return result.isEmpty ? nil : result
+        }
+        return nil
+    }
 
     private func validRealityPublicKey(_ value: String) -> Bool {
         value.utf8.count <= 256 && value.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "-_=".contains($0)) }

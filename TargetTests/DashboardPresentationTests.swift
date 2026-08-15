@@ -22,9 +22,10 @@ final class DashboardPresentationTests: XCTestCase {
         error: BackendError? = nil,
         proxy: SystemProxyStatus = .disabled,
         busy: Bool = false,
-        safeMode: Bool = true
+        safeMode: Bool = true,
+        isUTMValidation: Bool = true
     ) -> DashboardPresentation {
-        DashboardPresentation(status: status, lifecycleState: lifecycle, serviceInstallation: service, xpcState: xpc, error: error, systemProxyStatus: proxy, isBusy: busy, isHostSafeMode: safeMode)
+        DashboardPresentation(status: status, lifecycleState: lifecycle, serviceInstallation: service, xpcState: xpc, error: error, systemProxyStatus: proxy, isBusy: busy, isHostSafeMode: safeMode, isUTMValidation: isUTMValidation)
     }
 
     func testEngineNotInstalledOffersInstallationInsteadOfStart() {
@@ -82,6 +83,13 @@ final class DashboardPresentationTests: XCTestCase {
 
         XCTAssertFalse(presentation.isHostSafeMode)
         XCTAssertEqual(presentation.hostSafetyNoticeKey, "host-safety.status.utm-validation")
+    }
+
+    func testNormalUserModeHasDistinctDashboardNotice() {
+        let presentation = makePresentation(safeMode: false, isUTMValidation: false)
+
+        XCTAssertFalse(presentation.isHostSafeMode)
+        XCTAssertEqual(presentation.hostSafetyNoticeKey, "host-safety.status.normal-user")
     }
 
     func testProxyTogglePresentationTracksRequestedTransitionThenFinalTruth() {

@@ -23,7 +23,7 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         profileStore: ProfileStore = ProfileStore(),
         engineDirectory: URL? = nil,
         executableURL: URL? = nil,
-        readinessTimeout: Duration = .seconds(3),
+        readinessTimeout: Duration = .seconds(10),
         runtimeControlClient: any RuntimeControlClient = SingBoxRuntimeControlClient()
     ) {
         let defaultDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -444,13 +444,8 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
     }
 
     private func run(_ process: Process) throws -> (status: Int32, output: String) {
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = output
-        try process.run()
-        process.waitUntilExit()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+        let result = try BoundedProcessRunner.run(process)
+        return (result.status, result.output)
     }
 
     private func waitForPortReadiness(for process: Process) async throws -> Bool {

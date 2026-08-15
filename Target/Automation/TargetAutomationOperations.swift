@@ -137,7 +137,7 @@ actor TargetAutomationOperations {
             "engineReachable": .boolean(proxy?.engineReachable ?? false),
             "affectedServiceCount": .integer(proxy?.affectedServiceCount ?? 0),
             "hasRecoverySnapshot": .boolean(proxy?.hasRecoverySnapshot ?? false),
-            "hostSafety": .string(hostNetworkSafetyMode.permitsNetworkWrites ? "authorizedValidation" : "safe"),
+            "hostSafety": .string(hostNetworkSafetyMode.automationValue),
             "recoveryRequired": .boolean(proxy?.state == .recoveryRequired),
             "recoveryAvailable": .boolean(recoveryCapability?.isAvailable ?? false),
             "recoveryBlocker": recoveryCapability.map {

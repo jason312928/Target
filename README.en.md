@@ -10,9 +10,11 @@ The runtime record binds the Profile ID and revision to Target's PID, executable
 
 Target is a native SwiftUI macOS client. Its optional sing-box engine runs as the signed-in user and exposes a local mixed HTTP/SOCKS listener on an automatically selected high localhost port.
 
-## Host Safe Mode
+## Host Safe Mode and Normal User Mode
 
-Target starts in Host Safe Mode. It observes the local listener and service health but does not change system proxy, PAC, proxy discovery, DNS, routes, firewall, or TUN settings. If an existing system proxy or another proxy application is detected, Target refuses to take over the network. System-proxy controls remain disabled in Safe Mode.
+Development Debug builds without the UTM validation flag start in Host Safe Mode. They observe the local listener and service health but do not change system proxy, PAC, proxy discovery, DNS, routes, firewall, or TUN settings.
+
+Release and Development Preview builds use Normal User Mode. Target changes the macOS system proxy only after the user explicitly enables it, only while the Target-owned local proxy is reachable, and only when no existing controller is detected. Target records the exact prior settings and restores them only when ownership still matches. It never enables a system proxy automatically when the engine starts.
 
 Recovery is disabled unless Target has a validated, Target-owned snapshot. A recovery operation compares the current settings with Target's last written settings and stops on an external-change conflict; it never clears all proxies as a fallback.
 
@@ -20,7 +22,7 @@ Recovery is disabled unless Target has a validated, Target-owned snapshot. A rec
 
 Profiles are stored only in Target's Application Support container. A Profile can hold local JSON and an optional remote configuration URL. Target fetches that URL only when you explicitly start an update; it has no automatic, background, or scheduled updates. The production download path allows only public HTTPS addresses that meet Target's safety policy, uses no provider or domain whitelist, enforces time and size limits, and rejects unsafe sources and redirects. When available, conditional requests use `ETag` and `Last-Modified` metadata, including HTTP 304 semantics.
 
-Downloaded content is locally detected within a bounded subset: sing-box JSON, URI lists, Base64 URI lists, and Clash YAML. Generic node subscriptions currently support Shadowsocks, VMess, VLESS, and Trojan and are normalized into sing-box configuration; every candidate must still pass local format checks and `sing-box check`. Target first shows a redacted structural preview; until you confirm, it neither replaces the current valid configuration nor creates a new revision. After confirmation, the configuration is saved as a new valid version in the existing history and can use the usual restore flow. You can cancel an update in progress. Target is not a universal provider converter, and provider-specific advanced or routing semantics may not be fully imported.
+Downloaded content is locally detected within a bounded subset: sing-box JSON, URI lists, Base64 URI lists, and Clash YAML. Generic node subscriptions support Shadowsocks, VMess, VLESS, Trojan, and AnyTLS and are normalized into sing-box configuration. SSR, Hysteria2/Hy2, and TUIC nodes are explicitly reported as skipped when supported nodes remain; they are never silently converted into another protocol. Every candidate must still pass local format checks and `sing-box check`. Target first shows a redacted structural preview; until you confirm, it neither replaces the current valid configuration nor creates a new revision. After confirmation, the configuration is saved as a new valid version in the existing history and can use the usual restore flow. You can cancel an update in progress. Target is not a universal provider converter, and provider-specific advanced or routing semantics may not be fully imported.
 
 The editor provides JSON syntax highlighting, line numbers, formatting, validation diagnostics, and previous-valid-version restore. Target stores configuration text as raw UTF-8 JSON, so fields unknown to this app remain intact. Each save first runs the official `sing-box check` command against a Target-managed staging file. A failed syntax or sing-box check never replaces the last valid JSON. Diagnostic and engine log handling redacts credentials, URLs, passwords, UUIDs, private keys, and local paths.
 

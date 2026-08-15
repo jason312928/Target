@@ -76,8 +76,25 @@ struct ProfileRuntimeConfigurationPreparer {
         }
         guard !containsSensitivePath(root) else { throw ProfileRuntimeConfigurationError.unsafeConfiguration }
         root = applyValidPolicyOverrides(to: root, version: version)
-        guard var inbounds = root["inbounds"] as? [[String: Any]], !inbounds.isEmpty else {
-            throw ProfileRuntimeConfigurationError.noLoopbackMixedInbound
+        var inbounds: [[String: Any]]
+        if let rawInbounds = root["inbounds"] {
+            guard let configuredInbounds = rawInbounds as? [[String: Any]] else {
+                throw ProfileRuntimeConfigurationError.invalidJSON
+            }
+            inbounds = configuredInbounds
+        } else {
+            inbounds = []
+        }
+        if inbounds.isEmpty {
+            // Provider sing-box documents commonly contain only outbounds. Add a
+            // Target-owned local adapter in the ephemeral copy so those documents
+            // can still be launched without changing the encrypted source profile.
+            inbounds = [[
+                "type": "mixed",
+                "tag": targetInboundTag(in: root),
+                "listen": LocalEngineEndpoint.host,
+                "listen_port": 0
+            ]]
         }
 
         var primaryPort: UInt16?
@@ -126,13 +143,39 @@ struct ProfileRuntimeConfigurationPreparer {
         )
     }
 
-    private func containsSensitivePath(_ value: Any) -> Bool {
+    private func containsSensitivePath(_ value: Any, key: String? = nil, parentKeys: [String] = []) -> Bool {
         if let string = value as? String {
-            return string.hasPrefix("/") || string.contains("../") || string.contains("..\\")
+            // WebSocket transport paths such as /ws are protocol data, not file
+            // paths. Keep the broader file-path rejection for every other field.
+            let isTransportPath = key?.lowercased() == "path" && parentKeys.contains { $0.lowercased() == "transport" }
+            return !isTransportPath && (string.hasPrefix("/") || string.contains("../") || string.contains("..\\"))
         }
-        if let array = value as? [Any] { return array.contains(where: containsSensitivePath) }
-        if let dictionary = value as? [String: Any] { return dictionary.values.contains(where: containsSensitivePath) }
+        if let array = value as? [Any] {
+            return array.contains { containsSensitivePath($0, key: key, parentKeys: parentKeys) }
+        }
+        if let dictionary = value as? [String: Any] {
+            return dictionary.contains { childKey, childValue in
+                containsSensitivePath(childValue, key: childKey, parentKeys: parentKeys + [key ?? ""])
+            }
+        }
         return false
+    }
+
+    private func targetInboundTag(in root: [String: Any]) -> String {
+        var usedTags = Set<String>()
+        for key in ["inbounds", "outbounds"] {
+            guard let entries = root[key] as? [[String: Any]] else { continue }
+            for entry in entries {
+                if let tag = entry["tag"] as? String { usedTags.insert(tag) }
+            }
+        }
+        var candidate = "target-mixed"
+        var suffix = 2
+        while usedTags.contains(candidate) {
+            candidate = "target-mixed-\(suffix)"
+            suffix += 1
+        }
+        return candidate
     }
 
     private func applyValidPolicyOverrides(

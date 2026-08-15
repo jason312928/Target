@@ -464,6 +464,24 @@ final class ProfileStorePersistenceTests: XCTestCase, ProfileTestCaseSupport {
         }
     }
 
+    func testSingBoxCheckTimeoutTerminatesOnlyTargetLaunchedProcess() throws {
+        let root = try temporaryDirectory()
+        let executable = root.appending(path: "sing-box")
+        let script = "#!/bin/sh\nwhile :; do :; done\n"
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let configuration = root.appending(path: "config.json")
+        try Data(#"{"inbounds":[],"outbounds":[]}"#.utf8).write(to: configuration)
+
+        let started = Date()
+        let result = SingBoxConfigurationChecker(executableURL: executable, timeout: 0.1).check(configurationURL: configuration)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        guard case .failure(let diagnostic) = result else {
+            return XCTFail("Expected a bounded check timeout")
+        }
+        XCTAssertEqual(diagnostic.messageKey, "profile.validation.check-failed")
+    }
+
     func testInstalledSingBoxChecksSafeExampleConfigurationWhenRequested() throws {
         guard FileManager.default.isExecutableFile(atPath: singBoxExecutable.path) else {
             throw XCTSkip("sing-box is not installed for localhost integration testing.")

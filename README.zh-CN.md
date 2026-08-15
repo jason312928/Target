@@ -4,9 +4,11 @@
 
 Target 是原生 SwiftUI macOS 客户端。可选的 sing-box 引擎以当前用户身份运行，并在自动选择的高位 localhost 端口提供本地 HTTP/SOCKS mixed 监听。
 
-## 宿主安全模式
+## 宿主安全模式与普通用户模式
 
-Target 默认进入宿主安全模式：仅观测本地监听和服务健康状态，不修改系统代理、PAC、自动代理发现、DNS、路由、防火墙或 TUN。检测到现有系统代理或其他代理应用时，Target 会拒绝接管网络；安全模式下系统代理控件保持禁用。
+没有 UTM 验证编译标志的 Development Debug 构建进入宿主安全模式：仅观测本地监听和服务健康状态，不修改系统代理、PAC、自动代理发现、DNS、路由、防火墙或 TUN。
+
+Release 和 Development Preview 构建使用普通用户模式。只有用户明确开启系统代理、Target 自有的本地代理可通信且未检测到其他网络控制器时，Target 才会写入 macOS 系统代理。Target 会记录精确的原始设置，并且只在 ownership 仍匹配时恢复；引擎启动不会自动开启系统代理。
 
 仅在 Target 持有已验证且归属明确的快照时，才允许恢复操作。恢复前会比较当前设置与 Target 最后写入的设置；若发现外部修改便停止，且绝不会以“关闭全部代理”作为替代方案。
 
@@ -14,7 +16,7 @@ Target 默认进入宿主安全模式：仅观测本地监听和服务健康状�
 
 Profile 仅存放在 Target 的 Application Support 容器中。Profile 可保存本地 JSON 和可选的远程配置地址。Target 仅在用户明确发起更新时下载该地址；不会自动、后台或定时更新。生产下载路径只接受符合 Target 安全策略的公共 HTTPS 地址，不依赖服务商或域名白名单，并具有超时和响应大小限制，拒绝不安全来源或重定向。可用时，条件请求会使用 `ETag`、`Last-Modified` 元数据及 HTTP 304 语义。
 
-下载内容会在本地自动识别一个有限子集：sing-box JSON、URI 列表、Base64 URI 列表和 Clash YAML。通用节点订阅当前支持 Shadowsocks、VMess、VLESS 和 Trojan，并归一化为 sing-box 配置；所有候选配置仍必须通过本地格式检查和 `sing-box check`。Target 会先显示脱敏的结构变化预览；用户确认前，既不会替换当前有效配置，也不会创建新版本。确认后，配置会作为新的有效版本写入既有历史，并可使用原有恢复流程。用户可以取消正在进行的更新。Target 不是通用服务商转换器，服务商专用的高级语义和路由语义可能不会完整导入。
+下载内容会在本地自动识别一个有限子集：sing-box JSON、URI 列表、Base64 URI 列表和 Clash YAML。通用节点订阅支持 Shadowsocks、VMess、VLESS、Trojan 和 AnyTLS；SSR、Hysteria2/Hy2、TUIC 节点会在仍有可用节点时明确报告为跳过，绝不会伪装成其他协议。所有候选配置仍必须通过本地格式检查和 `sing-box check`。Target 会先显示脱敏的结构变化预览；用户确认前，既不会替换当前有效配置，也不会创建新版本。确认后，配置会作为新的有效版本写入既有历史，并可使用原有恢复流程。用户可以取消正在进行的更新。Target 不是通用服务商转换器，服务商专用的高级语义和路由语义可能不会完整导入。
 
 编辑器提供 JSON 语法高亮、行号、格式化、验证诊断及上一有效版本恢复。Target 将配置按原始 UTF-8 JSON 保存，因此不会丢失本 App 不认识的字段。每次保存都先在 Target 管理的临时文件上调用官方 `sing-box check`；JSON 语法或 sing-box 验证失败都不会覆盖上一份有效配置。诊断与内核日志会脱敏认证信息、URL、密码、UUID、私钥和本机路径。
 

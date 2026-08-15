@@ -69,7 +69,8 @@ struct DashboardPresentation: Equatable {
         error: BackendError?,
         systemProxyStatus: SystemProxyStatus,
         isBusy: Bool,
-        isHostSafeMode: Bool
+        isHostSafeMode: Bool,
+        isUTMValidation: Bool = true
     ) {
         self.isBusy = isBusy
         self.showsRestartNotice = status.restartRequired
@@ -86,7 +87,9 @@ struct DashboardPresentation: Equatable {
         self.systemProxyEngineKey = systemProxyStatus.engineReachable ? "system-proxy.engine.reachable" : "system-proxy.engine.unreachable"
         self.isSystemProxyToggleOn = [.enabling, .enabled].contains(systemProxyStatus.state)
         self.isHostSafeMode = isHostSafeMode
-        self.hostSafetyNoticeKey = isHostSafeMode ? "host-safety.status.safe" : "host-safety.status.utm-validation"
+        self.hostSafetyNoticeKey = isHostSafeMode
+            ? "host-safety.status.safe"
+            : (isUTMValidation ? "host-safety.status.utm-validation" : "host-safety.status.normal-user")
 
         if isBusy || status.engineState == .starting || status.engineState == .stopping {
             statusLevel = .neutral

@@ -21,7 +21,8 @@ struct DashboardView: View {
             error: lifecycle.error,
             systemProxyStatus: lifecycle.systemProxyStatus,
             isBusy: lifecycle.isBusy,
-            isHostSafeMode: lifecycle.isHostSafeMode
+            isHostSafeMode: lifecycle.isHostSafeMode,
+            isUTMValidation: lifecycle.isUTMValidationMode
         )
     }
 

@@ -517,10 +517,14 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode, .authorizedNetworkTest)
         XCTAssertFalse(TargetValidationPolicy.isHostSafeMode)
         XCTAssertFalse(model.isHostSafeMode)
-#else
+#elseif DEBUG
         XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode, .safe)
         XCTAssertTrue(TargetValidationPolicy.isHostSafeMode)
         XCTAssertTrue(model.isHostSafeMode)
+#else
+        XCTAssertEqual(TargetValidationPolicy.hostNetworkSafetyMode, .normalUser)
+        XCTAssertFalse(TargetValidationPolicy.isHostSafeMode)
+        XCTAssertFalse(model.isHostSafeMode)
 #endif
     }
 

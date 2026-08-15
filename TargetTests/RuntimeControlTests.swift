@@ -30,6 +30,24 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(String(decoding: version.data, as: UTF8.self).contains("0.0.0.0:9090"), true)
     }
 
+    func testPreparationAddsTargetOwnedMixedInboundToProviderOutboundOnlyJSON() throws {
+        let source = Data(#"{"outbounds":[{"type":"direct","tag":"target-mixed"}]}"#.utf8)
+        let version = ProfileConfigurationVersion(profile: profile(), revision: 1, data: source)
+        let prepared = try ProfileRuntimeConfigurationPreparer(
+            portSelector: TestPortSelector([51_234]),
+            controllerPortSelector: TestPortSelector([51_235]),
+            secretGenerator: TestSecretGenerator(value: "unit-test-secret-not-production")
+        ).prepare(version)
+        XCTAssertEqual(prepared.primaryPort, 51_234)
+        XCTAssertEqual(source, version.data)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.data) as? [String: Any])
+        let inbound = try XCTUnwrap((root["inbounds"] as? [[String: Any]])?.first)
+        XCTAssertEqual(inbound["type"] as? String, "mixed")
+        XCTAssertEqual(inbound["listen"] as? String, "127.0.0.1")
+        XCTAssertEqual(inbound["listen_port"] as? Int, 51_234)
+        XCTAssertEqual(inbound["tag"] as? String, "target-mixed-2")
+    }
+
     func testDescriptorParserRejectsNonLoopbackController() {
         XCTAssertNil(RuntimeControlDescriptorParser.parse(Data(#"{"experimental":{"clash_api":{"external_controller":"0.0.0.0:51234","secret":"fixture"}}}"#.utf8)))
         XCTAssertNil(RuntimeControlDescriptorParser.parse(Data(#"{"experimental":{"clash_api":{"external_controller":"127.0.0.1:80","secret":"fixture"}}}"#.utf8)))

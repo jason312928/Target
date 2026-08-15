@@ -120,6 +120,7 @@ final class BackendLifecycleModel {
     var canManageService: Bool { !isBusy }
     var safeModeKey: String { "host-safety.status.safe" }
     var isHostSafeMode: Bool { !hostNetworkSafetyMode.permitsNetworkWrites }
+    var isUTMValidationMode: Bool { hostNetworkSafetyMode == .authorizedNetworkTest }
 
     func refresh() {
         guard !isBusy else { return }
