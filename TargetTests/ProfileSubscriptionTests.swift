@@ -517,7 +517,17 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(clash.summary.protocols, [.anytls])
         let clashOutbound = try generatedOutbounds(clash.data)[1]
         XCTAssertEqual(clashOutbound["type"] as? String, "anytls")
-        XCTAssertEqual((clashOutbound["tls"] as? [String: Any])?["server_name"] as? String, "proxy.example.com")
+        let clashTLS = try XCTUnwrap(clashOutbound["tls"] as? [String: Any])
+        XCTAssertEqual(clashTLS["server_name"] as? String, "proxy.example.com")
+        XCTAssertEqual(clashTLS["alpn"] as? [String], ["h2", "http/1.1"])
+        XCTAssertEqual((clashTLS["utls"] as? [String: Any])?["fingerprint"] as? String, "chrome")
+
+        let scalarALPN = try SubscriptionNormalizer().normalize(Data("""
+        proxies:
+          - {name: AnyTLS Scalar, type: anytls, server: example.com, port: 443, password: fixture-password, alpn: 'h2,http/1.1'}
+        """.utf8))
+        let scalarTLS = try XCTUnwrap(try generatedOutbounds(scalarALPN.data)[1]["tls"] as? [String: Any])
+        XCTAssertEqual(scalarTLS["alpn"] as? [String], ["h2", "http/1.1"])
 
         if FileManager.default.isExecutableFile(atPath: singBoxExecutable.path) {
             let check = SingBoxConfigurationChecker(executableURL: singBoxExecutable).check(configurationURL: try writeCandidate(uriResult.data))
@@ -633,6 +643,137 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         assertIntakeError(.payloadInvalid, "trojan://@example.com:443?security=tls")
         assertIntakeError(.variantUnsupported, tcp.replacingOccurrences(of: "type=tcp", with: "type=grpc"))
         assertIntakeError(.variantUnsupported, tcp.replacingOccurrences(of: "security=tls", with: "security=none"))
+    }
+
+    func testClashTrojanTLSCompatibilityPreservesFingerprintAndALPN() throws {
+        let result = try SubscriptionNormalizer().normalize(Data("""
+        proxies:
+          - {name: Fingerprint, type: trojan, server: one.example.com, port: 443, password: fixture-one, client-fingerprint: chrome}
+          - {name: ALPN, type: trojan, server: two.example.com, port: 443, password: fixture-two, alpn: [h2, http/1.1]}
+          - {name: Both, type: trojan, server: three.example.com, port: 443, password: fixture-three, client-fingerprint: firefox, alpn: [http/1.1, h2]}
+        """.utf8))
+        let outbounds = try generatedOutbounds(result.data)
+
+        let fingerprintTLS = try XCTUnwrap(outbounds[1]["tls"] as? [String: Any])
+        XCTAssertEqual((fingerprintTLS["utls"] as? [String: Any])?["enabled"] as? Bool, true)
+        XCTAssertEqual((fingerprintTLS["utls"] as? [String: Any])?["fingerprint"] as? String, "chrome")
+        XCTAssertNil(fingerprintTLS["alpn"])
+
+        let alpnTLS = try XCTUnwrap(outbounds[2]["tls"] as? [String: Any])
+        XCTAssertEqual(alpnTLS["alpn"] as? [String], ["h2", "http/1.1"])
+        XCTAssertNil(alpnTLS["utls"])
+
+        let bothTLS = try XCTUnwrap(outbounds[3]["tls"] as? [String: Any])
+        XCTAssertEqual(bothTLS["alpn"] as? [String], ["http/1.1", "h2"])
+        XCTAssertEqual((bothTLS["utls"] as? [String: Any])?["fingerprint"] as? String, "firefox")
+
+        if FileManager.default.isExecutableFile(atPath: singBoxExecutable.path) {
+            let check = SingBoxConfigurationChecker(executableURL: singBoxExecutable)
+                .check(configurationURL: try writeCandidate(result.data))
+            if case .failure(let diagnostic) = check {
+                XCTFail("Generated TLS compatibility configuration failed sing-box validation: \(diagnostic.messageKey)")
+            }
+        }
+    }
+
+    func testClashVLESSTLSCompatibilityPreservesFingerprint() throws {
+        let result = try SubscriptionNormalizer().normalize(Data("""
+        proxies:
+          - name: VLESS TLS
+            type: vless
+            server: vless.example.com
+            port: 443
+            uuid: 11111111-1111-4111-8111-111111111111
+            tls: true
+            servername: edge.example.com
+            client-fingerprint: safari
+        """.utf8))
+        let tls = try XCTUnwrap(try generatedOutbounds(result.data)[1]["tls"] as? [String: Any])
+        XCTAssertEqual(tls["insecure"] as? Bool, false)
+        XCTAssertEqual((tls["utls"] as? [String: Any])?["fingerprint"] as? String, "safari")
+    }
+
+    func testClashTLSCompatibilityRejectsUnknownFingerprintAndMalformedALPN() {
+        assertIntakeError(
+            .variantUnsupported,
+            "proxies:\n  - {name: Unknown, type: trojan, server: example.com, port: 443, password: fixture, client-fingerprint: unsupported-browser}"
+        )
+        assertIntakeError(
+            .variantUnsupported,
+            "proxies:\n  - {name: Mixed, type: trojan, server: example.com, port: 443, password: fixture, alpn: [h2, 7]}"
+        )
+        assertIntakeError(
+            .variantUnsupported,
+            "proxies:\n  - {name: Empty, type: trojan, server: example.com, port: 443, password: fixture, alpn: []}"
+        )
+        assertIntakeError(
+            .variantUnsupported,
+            "proxies:\n  - {name: Empty Item, type: trojan, server: example.com, port: 443, password: fixture, alpn: [h2, '']}"
+        )
+        assertIntakeError(
+            .variantUnsupported,
+            "proxies:\n  - {name: Scalar, type: trojan, server: example.com, port: 443, password: fixture, alpn: 'h2,http/1.1'}"
+        )
+        assertIntakeError(
+            .variantUnsupported,
+            "proxies:\n  - {name: No TLS, type: vmess, server: example.com, port: 443, uuid: 22222222-2222-4222-8222-222222222222, tls: false, client-fingerprint: chrome}"
+        )
+    }
+
+    func testClashTrojanWebSocketPreservesMihomoImplicitHostSemantics() throws {
+        let result = try SubscriptionNormalizer().normalize(Data("""
+        proxies:
+          - name: Implicit Host
+            type: trojan
+            server: origin.example.com
+            port: 443
+            password: fixture-one
+            network: ws
+            sni: edge.example.com
+            ws-opts: {path: /implicit}
+          - name: Explicit Host
+            type: trojan
+            server: origin.example.com
+            port: 443
+            password: fixture-two
+            network: ws
+            sni: edge.example.com
+            ws-opts:
+              path: /explicit
+              headers: {Host: ws.example.com}
+          - name: VLESS No Host
+            type: vless
+            server: origin.example.com
+            port: 443
+            uuid: 11111111-1111-4111-8111-111111111111
+            network: ws
+            tls: true
+            servername: edge.example.com
+            ws-opts: {path: /vless}
+        """.utf8))
+        let outbounds = try generatedOutbounds(result.data)
+        let implicit = try XCTUnwrap(outbounds[1]["transport"] as? [String: Any])
+        XCTAssertEqual((implicit["headers"] as? [String: String])?["Host"], "edge.example.com")
+        let explicit = try XCTUnwrap(outbounds[2]["transport"] as? [String: Any])
+        XCTAssertEqual((explicit["headers"] as? [String: String])?["Host"], "ws.example.com")
+        let vless = try XCTUnwrap(outbounds[3]["transport"] as? [String: Any])
+        XCTAssertNil(vless["headers"])
+    }
+
+    func testPlainClashTrojanRemainsMinimalAndUnsafeTLSIsSkipped() throws {
+        let result = try SubscriptionNormalizer().normalize(Data("""
+        proxies:
+          - {name: Plain, type: trojan, server: plain.example.com, port: 443, password: fixture-one}
+          - {name: Unsafe, type: trojan, server: unsafe.example.com, port: 443, password: fixture-two, skip-cert-verify: true}
+        """.utf8))
+        XCTAssertEqual(result.summary.nodeCount, 1)
+        XCTAssertEqual(result.summary.skippedTLSVerificationNodeCount, 1)
+        XCTAssertEqual(result.summary.skippedProtocols, [.trojan])
+        let outbound = try generatedOutbounds(result.data)[1]
+        XCTAssertNil(outbound["transport"])
+        let tls = try XCTUnwrap(outbound["tls"] as? [String: Any])
+        XCTAssertEqual(Set(tls.keys), ["enabled", "insecure", "server_name"])
+        XCTAssertEqual(tls["insecure"] as? Bool, false)
     }
 
     func testClashNodeCatalogConvertsSupportedNodesAndReportsIgnoredSemanticsSafely() throws {

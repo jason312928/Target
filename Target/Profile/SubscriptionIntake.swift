@@ -127,7 +127,7 @@ struct SubscriptionNormalizer: Sendable {
         "aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305"
     ]
     private static let vmessSecurity: Set<String> = ["auto", "none", "zero", "aes-128-gcm", "chacha20-poly1305"]
-    private static let anyTLSFingerprints: Set<String> = [
+    private static let clashClientFingerprints: Set<String> = [
         "chrome", "firefox", "safari", "edge", "360", "qq", "ios", "android",
         "random", "randomized"
     ]
@@ -484,7 +484,10 @@ struct SubscriptionNormalizer: Sendable {
         var outbound: [String: Any] = [
             "type": "trojan", "server": common.server, "server_port": common.port, "password": password
         ]
-        try applyClashNetworkAndTLS(proxy, server: common.server, tlsRequired: true, to: &outbound)
+        try applyClashNetworkAndTLS(
+            proxy, server: common.server, tlsRequired: true,
+            usesServerNameAsWebSocketHost: true, to: &outbound
+        )
         return ProviderNode(name: common.name, protocolKind: .trojan, outbound: outbound)
     }
 
@@ -496,13 +499,7 @@ struct SubscriptionNormalizer: Sendable {
             throw SubscriptionIntakeError.variantUnsupported
         }
         var tls = tlsObject(serverName: nonemptyString(proxy["servername"] ?? proxy["sni"]) ?? common.server)
-        if let alpn = clashALPN(proxy["alpn"]) { tls["alpn"] = alpn }
-        if let fingerprint = nonemptyString(proxy["client-fingerprint"]) {
-            guard Self.anyTLSFingerprints.contains(fingerprint.lowercased()) else {
-                throw SubscriptionIntakeError.variantUnsupported
-            }
-            tls["utls"] = ["enabled": true, "fingerprint": fingerprint.lowercased()]
-        }
+        try applyClashTLSCompatibility(proxy, allowsScalarALPN: true, to: &tls)
         let outbound: [String: Any] = [
             "type": "anytls", "server": common.server, "server_port": common.port,
             "password": password, "tls": tls
@@ -517,19 +514,51 @@ struct SubscriptionNormalizer: Sendable {
     }
 
     private func applyClashNetworkAndTLS(
-        _ proxy: [String: Any], server: String, tlsRequired: Bool, to outbound: inout [String: Any]
+        _ proxy: [String: Any], server: String, tlsRequired: Bool,
+        usesServerNameAsWebSocketHost: Bool = false, to outbound: inout [String: Any]
     ) throws {
         let network = nonemptyString(proxy["network"]) ?? "tcp"
         guard ["tcp", "ws"].contains(network), proxy["grpc-opts"] == nil, proxy["h2-opts"] == nil else {
             throw SubscriptionIntakeError.variantUnsupported
         }
-        let wsOptions = stringDictionary(proxy["ws-opts"] as Any) ?? [:]
-        let headers = stringDictionary(wsOptions["headers"] as Any) ?? [:]
-        try applyTransport(network: network, path: nonemptyString(wsOptions["path"]), host: nonemptyString(headers["Host"] ?? headers["host"]), to: &outbound)
         let tls = boolean(proxy["tls"]) ?? tlsRequired
         guard !(boolean(proxy["skip-cert-verify"]) ?? false) else { throw SubscriptionIntakeError.variantUnsupported }
         if tlsRequired && !tls { throw SubscriptionIntakeError.variantUnsupported }
-        if tls { outbound["tls"] = tlsObject(serverName: nonemptyString(proxy["servername"] ?? proxy["sni"]) ?? server) }
+        let serverName = nonemptyString(proxy["servername"] ?? proxy["sni"]) ?? server
+        if tls {
+            var tlsOptions = tlsObject(serverName: serverName)
+            try applyClashTLSCompatibility(proxy, to: &tlsOptions)
+            outbound["tls"] = tlsOptions
+        } else if proxy.keys.contains("client-fingerprint") || proxy.keys.contains("alpn") {
+            throw SubscriptionIntakeError.variantUnsupported
+        }
+
+        let wsOptions = stringDictionary(proxy["ws-opts"] as Any) ?? [:]
+        let headers = stringDictionary(wsOptions["headers"] as Any) ?? [:]
+        let explicitHost = nonemptyString(headers["Host"] ?? headers["host"])
+        // Mihomo Trojan WebSocket uses the effective SNI as its request Host when no header is explicit.
+        let transportHost = explicitHost ?? (usesServerNameAsWebSocketHost && network == "ws" ? serverName : nil)
+        try applyTransport(
+            network: network,
+            path: nonemptyString(wsOptions["path"]),
+            host: transportHost,
+            to: &outbound
+        )
+    }
+
+    private func applyClashTLSCompatibility(
+        _ proxy: [String: Any], allowsScalarALPN: Bool = false, to tls: inout [String: Any]
+    ) throws {
+        if proxy.keys.contains("alpn") {
+            tls["alpn"] = try clashALPN(proxy["alpn"], allowsScalar: allowsScalarALPN)
+        }
+        if proxy.keys.contains("client-fingerprint") {
+            guard let fingerprint = nonemptyString(proxy["client-fingerprint"])?.lowercased(),
+                  Self.clashClientFingerprints.contains(fingerprint) else {
+                throw SubscriptionIntakeError.variantUnsupported
+            }
+            tls["utls"] = ["enabled": true, "fingerprint": fingerprint]
+        }
     }
 
     private func requiresDisabledTLSVerification(_ proxy: [String: Any]) -> Bool {
@@ -617,7 +646,7 @@ struct SubscriptionNormalizer: Sendable {
     private func safeAnyTLSQuery(_ query: [String: String]) -> Bool {
         let insecure = query["allowinsecure"] ?? query["insecure"] ?? "0"
         guard ["0", "false"].contains(insecure.lowercased()) else { return false }
-        if let fingerprint = query["fp"], !Self.anyTLSFingerprints.contains(fingerprint.lowercased()) { return false }
+        if let fingerprint = query["fp"], !Self.clashClientFingerprints.contains(fingerprint.lowercased()) { return false }
         return true
     }
 
@@ -630,7 +659,7 @@ struct SubscriptionNormalizer: Sendable {
         if let alpn = query["alpn"]?.split(separator: ",").map({ String($0).trimmingCharacters(in: .whitespacesAndNewlines) }).filter({ !$0.isEmpty }), !alpn.isEmpty {
             tls["alpn"] = alpn
         }
-        if let fingerprint = query["fp"], Self.anyTLSFingerprints.contains(fingerprint.lowercased()) {
+        if let fingerprint = query["fp"], Self.clashClientFingerprints.contains(fingerprint.lowercased()) {
             tls["utls"] = ["enabled": true, "fingerprint": fingerprint.lowercased()]
         }
         return tls
@@ -701,16 +730,28 @@ struct SubscriptionNormalizer: Sendable {
 
     private func validPort(_ port: Int) -> Bool { (1...65_535).contains(port) }
 
-    private func clashALPN(_ value: Any?) -> [String]? {
+    private func clashALPN(_ value: Any?, allowsScalar: Bool) throws -> [String] {
+        let result: [String]
         if let values = value as? [Any] {
-            let result = values.compactMap { nonemptyString($0) }
-            return result.isEmpty ? nil : result
+            guard let strings = values as? [String], strings.count <= 16 else {
+                throw SubscriptionIntakeError.variantUnsupported
+            }
+            result = strings.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        } else if allowsScalar, let value = nonemptyString(value) {
+            result = value.split(separator: ",", omittingEmptySubsequences: false).map {
+                String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        } else {
+            throw SubscriptionIntakeError.variantUnsupported
         }
-        if let value = nonemptyString(value) {
-            let result = value.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-            return result.isEmpty ? nil : result
+        guard !result.isEmpty, result.count <= 16,
+              result.allSatisfy({ value in
+                  !value.isEmpty && value.utf8.count <= 64
+                      && value.unicodeScalars.allSatisfy { (0x21...0x7E).contains($0.value) }
+              }) else {
+            throw SubscriptionIntakeError.variantUnsupported
         }
-        return nil
+        return result
     }
 
     private func validRealityPublicKey(_ value: String) -> Bool {
