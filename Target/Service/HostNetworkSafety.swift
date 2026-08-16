@@ -54,9 +54,15 @@ enum TargetValidationPolicy {
     static let isUTMValidation = false
 #endif
 
+#if TARGET_BUILD_CHANNEL_DevelopmentPreview
+    static let buildChannel = TargetBuildChannel.developmentPreview
+#elseif TARGET_BUILD_CHANNEL_Stable || TARGET_BUILD_CHANNEL_Release
+    static let buildChannel = TargetBuildChannel.stable
+#else
     static let buildChannel = TargetBuildChannel(
         bundleValue: Bundle.main.object(forInfoDictionaryKey: "TargetBuildChannel") as? String
     )
+#endif
     static let hostNetworkSafetyMode = hostNetworkSafetyMode(
         buildChannel: buildChannel,
         isDebugBuild: isDebugBuild,
