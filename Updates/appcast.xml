@@ -1,22 +1,35 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?><!-- sparkle-sign-warning:
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- sparkle-sign-warning:
 IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
---><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
-  <channel>
-    <title>Target Updates</title>
-    <link>https://raw.githubusercontent.com/Jason312928/Target/main/Updates/appcast.xml</link>
-    <description>Target software updates</description>
-    <language>en</language>
-    <item>
-      <title>Target 1.0.0 Development Preview 2</title>
-      <pubDate>Sat, 15 Aug 2026 02:39:32 +0000</pubDate>
-      <sparkle:version>2</sparkle:version>
-      <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
-      <sparkle:channel>development</sparkle:channel>
-      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-      <enclosure url="https://github.com/Jason312928/Target/releases/download/v1.0.0-dev.2/Target-1.0.0-dev.2-macos-arm64.zip" length="2577177" type="application/octet-stream" sparkle:edSignature="0pwXbtaOljrY4CGXN8YgVAb9YhzCFLjxyFIX3Z2FZrICD/0SVsJ+xFRYMxQs7Axk3D33MT6ctxT10QA4DkkNDA=="></enclosure>
-    </item>
-  </channel>
-</rss><!-- sparkle-signatures:
-edSignature: uYrsp73dik1+7ZS2TKhhNt6Sn9bHH8Ztsh1hC3Jl+OZdQugaWV5mYm8NREH8lNOr9XJtNPZ7VtrlrvCimtdnCw==
-length: 1295
+-->
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Target Updates</title>
+        <link>https://raw.githubusercontent.com/Jason312928/Target/main/Updates/appcast.xml</link>
+        <description>Target software updates</description>
+        <language>en</language>
+        <item>
+            <title>1.0.0</title>
+            <pubDate>Sun, 16 Aug 2026 19:37:42 +0800</pubDate>
+            <sparkle:channel>development</sparkle:channel>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/Jason312928/Target/releases/download/v1.0.0-dev.3/Target-1.0.0-dev.3-macos-arm64.zip" length="3669747" type="application/octet-stream" sparkle:edSignature="kQcdzE5sjrxhAfKsY1gDPdneW+y1dwgRjYczN/ocmNRee59PKk0DHX8Dd23p5sQmMkeTsTUhol3812DnnWT4DQ=="/>
+        </item>
+        <item>
+            <title>Target 1.0.0 Development Preview 2</title>
+            <pubDate>Sat, 15 Aug 2026 02:39:32 +0000</pubDate>
+            <sparkle:version>2</sparkle:version>
+            <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+            <sparkle:channel>development</sparkle:channel>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/Jason312928/Target/releases/download/v1.0.0-dev.2/Target-1.0.0-dev.2-macos-arm64.zip" length="2577177" type="application/octet-stream" sparkle:edSignature="0pwXbtaOljrY4CGXN8YgVAb9YhzCFLjxyFIX3Z2FZrICD/0SVsJ+xFRYMxQs7Axk3D33MT6ctxT10QA4DkkNDA=="/>
+        </item>
+    </channel>
+</rss>
+<!-- sparkle-signatures:
+edSignature: JhaPQzMdAw3xfjFMQdIWk/VVR5wHvzvKqMEO4TzyUoBMiup+IxkvtWkigjqdx14pDEVmUW+hUrZkPRVBPufbCQ==
+length: 2119
 -->

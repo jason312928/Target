@@ -102,16 +102,36 @@ final class TargetUpdateControllerTests: XCTestCase {
         XCTAssertEqual(document.rootElement()?.namespaces?.first(where: { $0.name == "sparkle" })?.stringValue, sparkleNamespace)
 
         let items = try document.nodes(forXPath: "//item")
-        XCTAssertEqual(items.count, 1)
-        XCTAssertEqual(try document.nodes(forXPath: "//*[name()='sparkle:channel']").first?.stringValue, "development")
-        XCTAssertEqual(try document.nodes(forXPath: "//*[name()='sparkle:version']").first?.stringValue, "2")
-        XCTAssertEqual(try document.nodes(forXPath: "//*[name()='sparkle:shortVersionString']").first?.stringValue, "1.0.0")
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(
+            try document.nodes(forXPath: "//*[name()='sparkle:channel']").compactMap(\.stringValue),
+            ["development", "development"]
+        )
+        XCTAssertEqual(
+            try document.nodes(forXPath: "//*[name()='sparkle:version']").compactMap(\.stringValue),
+            ["3", "2"]
+        )
+        XCTAssertEqual(
+            try document.nodes(forXPath: "//*[name()='sparkle:shortVersionString']").compactMap(\.stringValue),
+            ["1.0.0", "1.0.0"]
+        )
 
-        let enclosure = try XCTUnwrap(try document.nodes(forXPath: "//enclosure").first as? XMLElement)
-        let url = try XCTUnwrap(enclosure.attribute(forName: "url")?.stringValue)
-        XCTAssertTrue(url.hasPrefix("https://github.com/Jason312928/Target/releases/download/v1.0.0-dev.2/"))
-        XCTAssertEqual(enclosure.attribute(forName: "length")?.stringValue, "2577177")
-        XCTAssertFalse(try XCTUnwrap(enclosure.attribute(forLocalName: "edSignature", uri: sparkleNamespace)?.stringValue).isEmpty)
+        let enclosures = try document.nodes(forXPath: "//enclosure").compactMap { $0 as? XMLElement }
+        XCTAssertEqual(enclosures.count, 2)
+        let expectedAssets = [
+            ("v1.0.0-dev.3/Target-1.0.0-dev.3-macos-arm64.zip", "3669747"),
+            ("v1.0.0-dev.2/Target-1.0.0-dev.2-macos-arm64.zip", "2577177")
+        ]
+        for (enclosure, expected) in zip(enclosures, expectedAssets) {
+            let url = try XCTUnwrap(enclosure.attribute(forName: "url")?.stringValue)
+            XCTAssertEqual(url, "https://github.com/Jason312928/Target/releases/download/\(expected.0)")
+            XCTAssertEqual(enclosure.attribute(forName: "length")?.stringValue, expected.1)
+            XCTAssertFalse(
+                try XCTUnwrap(
+                    enclosure.attribute(forLocalName: "edSignature", uri: sparkleNamespace)?.stringValue
+                ).isEmpty
+            )
+        }
 
         let text = String(decoding: data, as: UTF8.self)
         XCTAssertTrue(text.contains("<!-- sparkle-signatures:"))

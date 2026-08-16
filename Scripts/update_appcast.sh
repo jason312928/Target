@@ -47,15 +47,17 @@ case "$release_url" in
     */"$archive_name") ;;
     *) echo "release URL filename must match the ZIP" >&2; exit 64 ;;
 esac
-download_prefix=${release_url%/"$archive_name"}
+download_prefix=${release_url%"$archive_name"}
 cp "$release_zip" "$work_dir/$archive_name"
 cp "$repo_root/Updates/appcast.xml" "$work_dir/appcast.xml"
 
 extract_dir="$work_dir/extracted"
 mkdir "$extract_dir"
 ditto -x -k "$release_zip" "$extract_dir"
-app_plist=$(find "$extract_dir" -path '*.app/Contents/Info.plist' -type f -print -quit)
-[ -n "$app_plist" ] || { echo "release ZIP does not contain an app bundle" >&2; exit 65; }
+app_plist="$extract_dir/Target.app/Contents/Info.plist"
+[ -d "$extract_dir/Target.app" ] && [ ! -L "$extract_dir/Target.app" ] \
+    && [ -f "$app_plist" ] && [ ! -L "$app_plist" ] \
+    || { echo "release ZIP does not contain the expected Target app bundle" >&2; exit 65; }
 actual_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_plist")
 actual_build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_plist")
 [ "$actual_version" = "$expected_version" ] || { echo "release version does not match" >&2; exit 65; }
@@ -64,5 +66,7 @@ actual_build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_plist")
 "$sign_update" "$release_zip" >/dev/null
 # shellcheck disable=SC2086
 "$generate_appcast" --download-url-prefix "$download_prefix" --versions "$expected_build" --maximum-versions 0 $channel_arguments "$work_dir"
+grep -F "url=\"$release_url\"" "$work_dir/appcast.xml" >/dev/null \
+    || { echo "generated appcast URL does not match the release asset" >&2; exit 65; }
 "$sign_update" --verify "$work_dir/appcast.xml"
 cp "$work_dir/appcast.xml" "$repo_root/Updates/appcast.xml"
