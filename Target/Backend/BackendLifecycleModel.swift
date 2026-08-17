@@ -83,6 +83,10 @@ final class BackendLifecycleModel {
         operationTask != nil
     }
 
+    var isEngineRunning: Bool {
+        status.engineState == .running
+    }
+
     var canInstallEngine: Bool { !isBusy && status.engineInstallation != .installed }
 
     var canStart: Bool {

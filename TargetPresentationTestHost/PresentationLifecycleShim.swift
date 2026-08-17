@@ -5,6 +5,7 @@
 final class BackendLifecycleModel {
     var status: Int { 0 }
     var isBusy: Bool { false }
+    var isEngineRunning: Bool { false }
     var runtimeChangeGeneration: Int { 0 }
     var canRestart: Bool { false }
     func refresh() {}

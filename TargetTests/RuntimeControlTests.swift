@@ -62,6 +62,26 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(SingBoxRuntimeControlClient.makeSession().configuration.connectionProxyDictionary?.isEmpty, true)
     }
 
+    func testLatencyTimeoutPolicyIsBoundedAndOrdered() throws {
+        let policy = SingBoxRuntimeControlClient.ProbePolicy.timeout
+        XCTAssertTrue(policy.isValid)
+        XCTAssertEqual(policy.probeMilliseconds, 5_000)
+        XCTAssertLessThan(policy.probeSeconds, policy.controllerRequestSeconds)
+        XCTAssertLessThanOrEqual(policy.controllerRequestSeconds, policy.controllerResourceSeconds)
+
+        let configuration = SingBoxRuntimeControlClient.makeSession().configuration
+        XCTAssertEqual(configuration.timeoutIntervalForRequest, policy.controllerRequestSeconds)
+        XCTAssertEqual(configuration.timeoutIntervalForResource, policy.controllerResourceSeconds)
+
+        let request = try SingBoxRuntimeControlClient.makeRequest(
+            path: "/proxies/node/delay",
+            method: "GET",
+            descriptor: runtimeDescriptor,
+            body: nil
+        )
+        XCTAssertEqual(request.timeoutInterval, policy.controllerRequestSeconds)
+    }
+
     func testDelayRequestUsesFixedLoopbackPolicyAndPercentEncodesMember() throws {
         let descriptor = RuntimeControlDescriptor(
             host: "127.0.0.1",
@@ -82,7 +102,7 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer unit-test-secret-not-production")
         let query = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
         XCTAssertEqual(query.queryItems?.first(where: { $0.name == "url" })?.value, "https://www.gstatic.com/generate_204")
-        XCTAssertEqual(query.queryItems?.first(where: { $0.name == "timeout" })?.value, "1500")
+        XCTAssertEqual(query.queryItems?.first(where: { $0.name == "timeout" })?.value, "5000")
     }
 
     func testDelayProbeParsesBoundedLatency() async throws {

@@ -154,6 +154,7 @@ struct ProfilePolicyWorkspaceView: View {
                 isTestingLatency: testingSelectorID == selector.id,
                 canRestart: lifecycle?.canRestart == true,
                 lifecycleBusy: lifecycle?.isBusy == true,
+                engineIsRunning: lifecycle?.isEngineRunning == true,
                 select: select,
                 probeLatency: {
                     guard let tag = selector.tag else { return }
@@ -238,6 +239,7 @@ private struct SelectorDetail: View {
     let isTestingLatency: Bool
     let canRestart: Bool
     let lifecycleBusy: Bool
+    let engineIsRunning: Bool
     let select: (String, String) -> Void
     let probeLatency: () -> Void
     let restart: () -> Void
@@ -323,10 +325,13 @@ private struct SelectorDetail: View {
                     ))
                 }
                 .controlSize(.small)
-                .disabled(
-                    isTestingLatency || lifecycleBusy || selector.tag == nil
-                        || !selector.members.contains(where: \.isSelectable)
-                )
+                .disabled(!PolicyLatencyActionAvailability.isAvailable(
+                    engineIsRunning: engineIsRunning,
+                    isTestingLatency: isTestingLatency,
+                    lifecycleBusy: lifecycleBusy,
+                    selectorTag: selector.tag,
+                    hasSelectableMembers: selector.members.contains(where: \.isSelectable)
+                ))
                 .accessibilityIdentifier("policy.health.test-latency")
             }
             ForEach(selector.members) { member in

@@ -20,6 +20,22 @@ enum PolicyWorkspaceFilter: String, CaseIterable, Identifiable {
     }
 }
 
+enum PolicyLatencyActionAvailability {
+    static func isAvailable(
+        engineIsRunning: Bool,
+        isTestingLatency: Bool,
+        lifecycleBusy: Bool,
+        selectorTag: String?,
+        hasSelectableMembers: Bool
+    ) -> Bool {
+        engineIsRunning
+            && !isTestingLatency
+            && !lifecycleBusy
+            && selectorTag != nil
+            && hasSelectableMembers
+    }
+}
+
 struct PolicyWorkspacePresentation {
     let catalog: PolicyCatalog?
     let unavailable: Bool

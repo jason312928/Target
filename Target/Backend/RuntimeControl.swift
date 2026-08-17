@@ -41,6 +41,30 @@ protocol RuntimeControlClient: Sendable {
     func connections(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionsSnapshot
 }
 
+struct RuntimeControlTimeoutPolicy: Equatable, Sendable {
+    let probeMilliseconds: Int
+    let controllerRequestSeconds: TimeInterval
+    let controllerResourceSeconds: TimeInterval
+
+    static let `default` = RuntimeControlTimeoutPolicy(
+        probeMilliseconds: 5_000,
+        controllerRequestSeconds: 6,
+        controllerResourceSeconds: 7
+    )
+
+    var probeSeconds: TimeInterval { TimeInterval(probeMilliseconds) / 1_000 }
+
+    var isValid: Bool {
+        probeMilliseconds > 0
+            && controllerRequestSeconds.isFinite
+            && controllerResourceSeconds.isFinite
+            && controllerRequestSeconds > 0
+            && controllerResourceSeconds > 0
+            && probeSeconds < controllerRequestSeconds
+            && controllerRequestSeconds <= controllerResourceSeconds
+    }
+}
+
 extension RuntimeControlClient {
     func probeLatency(outbound: String, using descriptor: RuntimeControlDescriptor) async throws -> Int {
         throw RuntimeControlError.unavailable
@@ -59,7 +83,8 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
         /// the pinned sing-box URL tester. It is intentionally not configurable
         /// by a Profile, the UI, or automation clients.
         static let connectivityURL = "https://www.gstatic.com/generate_204"
-        static let timeoutMilliseconds = 1_500
+        static let timeout = RuntimeControlTimeoutPolicy.default
+        static let timeoutMilliseconds = timeout.probeMilliseconds
         static let maximumLatencyMilliseconds = Int(UInt16.max)
     }
 
@@ -78,8 +103,8 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
-        configuration.timeoutIntervalForRequest = 2
-        configuration.timeoutIntervalForResource = 3
+        configuration.timeoutIntervalForRequest = ProbePolicy.timeout.controllerRequestSeconds
+        configuration.timeoutIntervalForResource = ProbePolicy.timeout.controllerResourceSeconds
         return URLSession(configuration: configuration, delegate: RedirectRefusingDelegate(), delegateQueue: nil)
     }
 
@@ -197,7 +222,11 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
         guard let url = components.url, url.host == RuntimeControlDescriptor.host else {
             throw RuntimeControlError.invalidDescriptor
         }
-        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 2)
+        var request = URLRequest(
+            url: url,
+            cachePolicy: .reloadIgnoringLocalCacheData,
+            timeoutInterval: ProbePolicy.timeout.controllerRequestSeconds
+        )
         request.httpMethod = method
         request.setValue("Bearer \(descriptor.secret)", forHTTPHeaderField: "Authorization")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")

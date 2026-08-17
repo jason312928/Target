@@ -142,6 +142,30 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(PolicyRuntimePresentation(selector: selector(runtime: .unavailable)).titleKey, "policy.workspace.runtime.unavailable")
     }
 
+    func testPolicyLatencyActionRequiresRunningEngineButNotControllerObservation() {
+        XCTAssertFalse(PolicyLatencyActionAvailability.isAvailable(
+            engineIsRunning: false,
+            isTestingLatency: false,
+            lifecycleBusy: false,
+            selectorTag: "group",
+            hasSelectableMembers: true
+        ))
+        XCTAssertTrue(PolicyLatencyActionAvailability.isAvailable(
+            engineIsRunning: true,
+            isTestingLatency: false,
+            lifecycleBusy: false,
+            selectorTag: "group",
+            hasSelectableMembers: true
+        ))
+        XCTAssertFalse(PolicyLatencyActionAvailability.isAvailable(
+            engineIsRunning: true,
+            isTestingLatency: true,
+            lifecycleBusy: false,
+            selectorTag: "group",
+            hasSelectableMembers: true
+        ))
+    }
+
     func testPolicyWorkspacePresentationSearchesCredentialSafeTagAndTypeFacts() {
         let catalog = PolicyCatalog(
             formatVersion: 1,
