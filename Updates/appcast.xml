@@ -10,6 +10,16 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <language>en</language>
         <item>
             <title>1.0.0</title>
+            <pubDate>Mon, 17 Aug 2026 12:29:24 +0800</pubDate>
+            <sparkle:channel>development</sparkle:channel>
+            <sparkle:version>4</sparkle:version>
+            <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/Jason312928/Target/releases/download/v1.0.0-dev.4/Target-1.0.0-dev.4-macos-arm64.zip" length="3670482" type="application/octet-stream" sparkle:edSignature="a4PAQjsWVuiyrH+bClyq3fLCIdj/6iFmdqs9NH9ZyqHT3NrKHPjBK997nG9xcX2jh1bm4qXSGLiKd62xg3NzAA=="/>
+        </item>
+        <item>
+            <title>1.0.0</title>
             <pubDate>Sun, 16 Aug 2026 19:37:42 +0800</pubDate>
             <sparkle:channel>development</sparkle:channel>
             <sparkle:version>3</sparkle:version>
@@ -30,6 +40,6 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: JhaPQzMdAw3xfjFMQdIWk/VVR5wHvzvKqMEO4TzyUoBMiup+IxkvtWkigjqdx14pDEVmUW+hUrZkPRVBPufbCQ==
-length: 2119
+edSignature: k12rm12Lbj2CQKGvjIOcYT5mZVoTD6tJrQ8jcgU4ybY7+b/FT+v3ohaViuh/KV/PxRVR8CcBQRtVHmmA0h4MCA==
+length: 2881
 -->
