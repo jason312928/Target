@@ -6,6 +6,11 @@ import TargetCore
 enum RuntimeControlError: Error, Equatable, Sendable {
     case invalidDescriptor
     case unavailable
+    /// A delay request did not reach a conclusive controller response. The
+    /// caller must verify controller liveness before treating this as a member
+    /// failure because the same transport symptom can arise if the controller
+    /// disappears while a probe is in flight.
+    case probeTransportFailure
     case redirectRefused
     case malformedResponse
     case probeFailed
@@ -129,7 +134,11 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
 
     func probeLatency(outbound: String, using descriptor: RuntimeControlDescriptor) async throws -> Int {
         let request = try Self.makeDelayRequest(outbound: outbound, descriptor: descriptor)
-        let data = try await send(request, nonSuccessError: .probeFailed)
+        let data = try await send(
+            request,
+            nonSuccessError: .probeFailed,
+            transportError: .probeTransportFailure
+        )
         let decoded: DelayResponse
         do { decoded = try JSONDecoder().decode(DelayResponse.self, from: data) }
         catch { throw RuntimeControlError.malformedResponse }
@@ -161,12 +170,13 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
 
     private func send(
         _ request: URLRequest,
-        nonSuccessError: RuntimeControlError
+        nonSuccessError: RuntimeControlError,
+        transportError: RuntimeControlError = .unavailable
     ) async throws -> Data {
         let (data, response): (Data, URLResponse)
         do { (data, response) = try await session.data(for: request) }
         catch is CancellationError { throw CancellationError() }
-        catch { throw RuntimeControlError.unavailable }
+        catch { throw transportError }
         guard let http = response as? HTTPURLResponse else { throw RuntimeControlError.unavailable }
         guard (200...299).contains(http.statusCode) else {
             if http.statusCode == 401 || http.statusCode == 403 { throw RuntimeControlError.selectionRejected }

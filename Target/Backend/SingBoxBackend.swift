@@ -169,8 +169,9 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         let indexedTags = Array(outboundTags.enumerated())
         var indexedResults: [(Int, RuntimeProxyHealth)] = []
         var controllerUnavailable = false
+        var requiresLivenessReconciliation = false
 
-        try await withThrowingTaskGroup(of: (Int, RuntimeProxyHealth, Bool).self) { group in
+        try await withThrowingTaskGroup(of: (Int, RuntimeProxyHealth, Bool, Bool).self) { group in
             var nextIndex = 0
             func addNext() {
                 guard nextIndex < indexedTags.count else { return }
@@ -185,36 +186,54 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
                             latencyMilliseconds: latency,
                             observedAt: Date()
                         ) else {
-                            return (index, .unreachable(tag: tag, observedAt: Date()), false)
+                            return (index, .unreachable(tag: tag, observedAt: Date()), false, false)
                         }
-                        return (index, health, false)
+                        return (index, health, false, false)
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch let error as RuntimeControlError {
                         switch error {
                         case .unavailable, .invalidDescriptor, .redirectRefused, .selectionRejected:
-                            return (index, .runtimeUnavailable(tag: tag), true)
+                            return (index, .runtimeUnavailable(tag: tag), true, false)
+                        case .probeTransportFailure:
+                            return (index, .unreachable(tag: tag, observedAt: Date()), false, true)
                         case .malformedResponse, .probeFailed:
-                            return (index, .unreachable(tag: tag, observedAt: Date()), false)
+                            return (index, .unreachable(tag: tag, observedAt: Date()), false, false)
                         }
                     } catch {
-                        return (index, .unreachable(tag: tag, observedAt: Date()), false)
+                        return (index, .unreachable(tag: tag, observedAt: Date()), false, false)
                     }
                 }
             }
 
             for _ in 0..<min(maximumConcurrentProbes, indexedTags.count) { addNext() }
-            while let (index, result, unavailable) = try await group.next() {
+            while let (index, result, unavailable, requiresReconciliation) = try await group.next() {
                 indexedResults.append((index, result))
                 controllerUnavailable = controllerUnavailable || unavailable
+                requiresLivenessReconciliation = requiresLivenessReconciliation || requiresReconciliation
                 addNext()
             }
         }
         try Task.checkCancellation()
 
-        guard !controllerUnavailable,
-              let current = await verifiedRuntimeControlMaterial(),
+        guard !controllerUnavailable else {
+            return .runtimeUnavailable
+        }
+        if requiresLivenessReconciliation {
+            do {
+                _ = try await runtimeControlClient.selectors(using: descriptor)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                return .runtimeUnavailable
+            }
+        }
+        guard let current = await verifiedRuntimeControlMaterial(),
               current.record.runtimeConfigurationID == verified.record.runtimeConfigurationID,
+              current.record.profileID == verified.record.profileID,
+              current.record.profileRevision == verified.record.profileRevision,
+              current.record.sourceConfigurationFingerprint == verified.record.sourceConfigurationFingerprint,
+              current.record.configurationFingerprint == verified.record.configurationFingerprint,
               current.descriptor == verified.descriptor else {
             return .runtimeUnavailable
         }

@@ -139,6 +139,31 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         }
     }
 
+    func testDelayProbeMapsAuthenticationRejectionToControllerFailure() async {
+        let client = makeRuntimeControlClient(status: 401, body: Data())
+        do {
+            _ = try await client.probeLatency(outbound: "node", using: runtimeDescriptor)
+            XCTFail("Expected authentication rejection")
+        } catch {
+            XCTAssertEqual(error as? RuntimeControlError, .selectionRejected)
+            XCTAssertFalse(String(describing: error).contains(runtimeDescriptor.secret))
+        }
+    }
+
+    func testDelayProbeMapsTransportFailureToReconciledMemberFailure() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TransportFailingRuntimeControlURLProtocol.self]
+        let client = SingBoxRuntimeControlClient(session: URLSession(configuration: configuration))
+
+        do {
+            _ = try await client.probeLatency(outbound: "node", using: runtimeDescriptor)
+            XCTFail("Expected delay transport failure")
+        } catch {
+            XCTAssertEqual(error as? RuntimeControlError, .probeTransportFailure)
+            XCTAssertFalse(String(describing: error).contains(runtimeDescriptor.secret))
+        }
+    }
+
     func testControllerRedirectDelegateRefusesRedirect() throws {
         let session = URLSession(configuration: .ephemeral)
         let original = try XCTUnwrap(HTTPURLResponse(
@@ -301,6 +326,146 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(requestCount, 2)
     }
 
+    func testMemberDelayTransportFailurePreservesOtherLatencyAfterControllerReconciliation() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [
+            "node-a": .latency(1_200),
+            "node-b": .runtimeError(.probeTransportFailure)
+        ])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["node-a", "node-b"], client: client)
+
+        let outcome = try await fixture.backend.probePolicyMemberLatency(
+            expectedRuntime: fixture.expectedRuntime,
+            outboundTags: ["node-a", "node-b"]
+        )
+
+        guard case let .results(results) = outcome else { return XCTFail("Expected available runtime") }
+        XCTAssertEqual(results.map(\.tag), ["node-a", "node-b"])
+        XCTAssertEqual(results.map(\.state), [.reachable, .unreachable])
+        XCTAssertEqual(results.first?.latencyMilliseconds, 1_200)
+        let selectorCalls = await client.selectorCallCount()
+        XCTAssertEqual(selectorCalls, 1)
+    }
+
+    func testMultipleMemberDelayTransportFailuresUseOneControllerReconciliation() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [
+            "node-a": .runtimeError(.probeTransportFailure),
+            "node-b": .runtimeError(.probeTransportFailure),
+            "node-c": .runtimeError(.probeTransportFailure)
+        ])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["node-a", "node-b", "node-c"], client: client)
+
+        let outcome = try await fixture.backend.probePolicyMemberLatency(
+            expectedRuntime: fixture.expectedRuntime,
+            outboundTags: ["node-a", "node-b", "node-c"]
+        )
+
+        guard case let .results(results) = outcome else { return XCTFail("Expected available runtime") }
+        XCTAssertEqual(results.map(\.state), [.unreachable, .unreachable, .unreachable])
+        let selectorCalls = await client.selectorCallCount()
+        XCTAssertEqual(selectorCalls, 1)
+    }
+
+    func testMemberDelayTransportFailureBecomesRuntimeUnavailableWhenControllerReconciliationFails() async throws {
+        let client = ControlledRuntimeControlClient(
+            probeOutcomes: ["node": .runtimeError(.probeTransportFailure)],
+            selectorError: .unavailable
+        )
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["node"], client: client)
+
+        let outcome = try await fixture.backend.probePolicyMemberLatency(
+            expectedRuntime: fixture.expectedRuntime,
+            outboundTags: ["node"]
+        )
+
+        XCTAssertEqual(outcome, .runtimeUnavailable)
+        let selectorCalls = await client.selectorCallCount()
+        XCTAssertEqual(selectorCalls, 1)
+    }
+
+    func testControllerAuthenticationRejectionRemainsRuntimeUnavailable() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: ["node": .runtimeError(.selectionRejected)])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["node"], client: client)
+
+        let outcome = try await fixture.backend.probePolicyMemberLatency(
+            expectedRuntime: fixture.expectedRuntime,
+            outboundTags: ["node"]
+        )
+
+        XCTAssertEqual(outcome, .runtimeUnavailable)
+        let selectorCalls = await client.selectorCallCount()
+        XCTAssertEqual(selectorCalls, 0)
+    }
+
+    func testRuntimeConfigurationIdentityChangeDuringDelayProbeRemainsRuntimeUnavailable() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: ["node": .latency(42)])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["node"], client: client)
+        await client.replaceRuntimeIdentityWhenProbing(tag: "node") {
+            fixture.replaceRuntimeConfigurationIdentity()
+        }
+
+        let outcome = try await fixture.backend.probePolicyMemberLatency(
+            expectedRuntime: fixture.expectedRuntime,
+            outboundTags: ["node"]
+        )
+
+        XCTAssertEqual(outcome, .runtimeUnavailable)
+        let selectorCalls = await client.selectorCallCount()
+        XCTAssertEqual(selectorCalls, 0)
+    }
+
+    func testHTTPProbeFailureAndMalformedDelayResponseRemainMemberUnreachable() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [
+            "http": .runtimeError(.probeFailed),
+            "malformed": .runtimeError(.malformedResponse)
+        ])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["http", "malformed"], client: client)
+
+        let outcome = try await fixture.backend.probePolicyMemberLatency(
+            expectedRuntime: fixture.expectedRuntime,
+            outboundTags: ["http", "malformed"]
+        )
+
+        guard case let .results(results) = outcome else { return XCTFail("Expected available runtime") }
+        XCTAssertEqual(results.map(\.state), [.unreachable, .unreachable])
+        let selectorCalls = await client.selectorCallCount()
+        XCTAssertEqual(selectorCalls, 0)
+    }
+
+    func testPolicyMemberDelayProbeCancellationPropagates() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: ["node": .cancelled])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["node"], client: client)
+
+        do {
+            _ = try await fixture.backend.probePolicyMemberLatency(
+                expectedRuntime: fixture.expectedRuntime,
+                outboundTags: ["node"]
+            )
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected: cancellation must not be classified as health state.
+        }
+    }
+
+    func testAllMemberLatenciesRemainOrderedWithoutControllerReconciliation() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [
+            "first": .latency(12),
+            "second": .latency(34),
+            "third": .latency(56)
+        ])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["first", "second", "third"], client: client)
+
+        let outcome = try await fixture.backend.probePolicyMemberLatency(
+            expectedRuntime: fixture.expectedRuntime,
+            outboundTags: ["first", "second", "third"]
+        )
+
+        guard case let .results(results) = outcome else { return XCTFail("Expected available runtime") }
+        XCTAssertEqual(results.map(\.tag), ["first", "second", "third"])
+        XCTAssertEqual(results.map(\.latencyMilliseconds), [12, 34, 56])
+        let selectorCalls = await client.selectorCallCount()
+        XCTAssertEqual(selectorCalls, 0)
+    }
+
     func testPolicyLatencyProbeRuntimeIdentityMismatchMakesZeroControllerRequests() async throws {
         let store = try makeStore()
         let profile = try store.create(name: "Health")
@@ -411,6 +576,73 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertFalse(text.contains("secret"))
         XCTAssertFalse(text.contains("127.0.0.1"))
     }
+
+    private func makeRuntimePolicyProbeFixture(
+        members: [String],
+        client: any RuntimeControlClient
+    ) throws -> RuntimePolicyProbeFixture {
+        let root = try temporaryDirectory()
+        let engineDirectory = root.appending(path: "Engine", directoryHint: .isDirectory)
+        let executable = engineDirectory.appending(path: "sing-box")
+        try FileManager.default.createDirectory(at: engineDirectory, withIntermediateDirectories: true)
+        try Data("runtime-control-test-executable".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let profileStore = ProfileStore(
+            rootDirectory: root.appending(path: "Profiles", directoryHint: .isDirectory),
+            checker: TestChecker(result: .success(())),
+            keyProvider: TestProfileKeyProvider()
+        )
+        let profile = try profileStore.create(name: "Runtime Health")
+        try profileStore.save(
+            json: policyConfiguration(configuredDefault: members[0], members: members),
+            for: profile.id
+        )
+        let version = try profileStore.selectedValidVersion()
+        let expectedRuntime = ExpectedPolicyRuntimeIdentity(
+            profileID: profile.id,
+            profileRevision: version.revision,
+            sourceFingerprint: TargetConfigurationFingerprint.sha256(version.data)
+        )
+        let runtimeData = Data(#"{"experimental":{"clash_api":{"external_controller":"127.0.0.1:51235","secret":"unit-test-runtime-control-secret"}}}"#.utf8)
+        let configurations = RuntimeConfigurationStore(
+            directory: engineDirectory.appending(path: "runtime", directoryHint: .isDirectory)
+        )
+        let configurationID = UUID()
+        _ = try configurations.write(runtimeData, id: configurationID)
+        let record = EngineRuntimeRecord(
+            pid: getpid(),
+            executablePath: executable.path,
+            executableFingerprint: try EngineExecutableFingerprint.sha256(of: executable),
+            endpoint: LocalEngineEndpoint(port: 51_234),
+            profileID: profile.id,
+            profileRevision: version.revision,
+            sourceConfigurationFingerprint: expectedRuntime.sourceFingerprint,
+            configurationFingerprint: TargetConfigurationFingerprint.sha256(runtimeData),
+            startedAt: .now,
+            runtimeConfigurationID: configurationID
+        )
+        let recordStore = MutableEngineRuntimeStore(record: record)
+        let ownership = EngineRuntimeOwnership(
+            store: recordStore,
+            processInspector: AlwaysMatchingEngineProcessInspector(),
+            portProbe: AlwaysListeningEnginePortProbe()
+        )
+        let backend = SingBoxBackend(
+            runtimeOwnership: ownership,
+            profileStore: profileStore,
+            engineDirectory: engineDirectory,
+            executableURL: executable,
+            runtimeControlClient: client
+        )
+        return RuntimePolicyProbeFixture(
+            backend: backend,
+            expectedRuntime: expectedRuntime,
+            recordStore: recordStore,
+            configurations: configurations,
+            runtimeData: runtimeData
+        )
+    }
 }
 
 private let runtimeDescriptor = RuntimeControlDescriptor(
@@ -459,6 +691,149 @@ private final class RuntimeControlURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+}
+
+private final class TransportFailingRuntimeControlURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+    }
+    override func stopLoading() {}
+}
+
+private enum ControlledProbeOutcome: Sendable {
+    case latency(Int)
+    case runtimeError(RuntimeControlError)
+    case cancelled
+}
+
+private actor ControlledRuntimeControlClient: RuntimeControlClient {
+    private let probeOutcomes: [String: ControlledProbeOutcome]
+    private let selectorError: RuntimeControlError?
+    private var selectorCalls = 0
+    private var identityChange: (tag: String, action: @Sendable () -> Void)?
+
+    init(
+        probeOutcomes: [String: ControlledProbeOutcome],
+        selectorError: RuntimeControlError? = nil
+    ) {
+        self.probeOutcomes = probeOutcomes
+        self.selectorError = selectorError
+    }
+
+    func selectors(using descriptor: RuntimeControlDescriptor) async throws -> [String: RuntimeSelectorState] {
+        selectorCalls += 1
+        if let selectorError { throw selectorError }
+        return ["group": .init(tag: "group", selected: "node", members: [])]
+    }
+
+    func select(selector: String, outbound: String, using descriptor: RuntimeControlDescriptor) async throws {}
+
+    func connectionTotals(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionTotals {
+        .init(uploadTotalBytes: 0, downloadTotalBytes: 0, activeConnectionCount: 0)
+    }
+
+    func probeLatency(outbound: String, using descriptor: RuntimeControlDescriptor) async throws -> Int {
+        try Task.checkCancellation()
+        if let identityChange, identityChange.tag == outbound {
+            self.identityChange = nil
+            identityChange.action()
+        }
+        guard let outcome = probeOutcomes[outbound] else { throw RuntimeControlError.unavailable }
+        switch outcome {
+        case let .latency(milliseconds): return milliseconds
+        case let .runtimeError(error): throw error
+        case .cancelled: throw CancellationError()
+        }
+    }
+
+    func selectorCallCount() -> Int { selectorCalls }
+
+    func replaceRuntimeIdentityWhenProbing(tag: String, action: @escaping @Sendable () -> Void) {
+        identityChange = (tag, action)
+    }
+}
+
+private final class RuntimePolicyProbeFixture: @unchecked Sendable {
+    let backend: SingBoxBackend
+    let expectedRuntime: ExpectedPolicyRuntimeIdentity
+    private let recordStore: MutableEngineRuntimeStore
+    private let configurations: RuntimeConfigurationStore
+    private let runtimeData: Data
+
+    init(
+        backend: SingBoxBackend,
+        expectedRuntime: ExpectedPolicyRuntimeIdentity,
+        recordStore: MutableEngineRuntimeStore,
+        configurations: RuntimeConfigurationStore,
+        runtimeData: Data
+    ) {
+        self.backend = backend
+        self.expectedRuntime = expectedRuntime
+        self.recordStore = recordStore
+        self.configurations = configurations
+        self.runtimeData = runtimeData
+    }
+
+    func replaceRuntimeConfigurationIdentity() {
+        guard let current = recordStore.current() else { return }
+        let replacementID = UUID()
+        guard (try? configurations.write(runtimeData, id: replacementID)) != nil else { return }
+        recordStore.replace(EngineRuntimeRecord(
+            pid: current.pid,
+            executablePath: current.executablePath,
+            executableFingerprint: current.executableFingerprint,
+            endpoint: current.endpoint,
+            profileID: current.profileID,
+            profileRevision: current.profileRevision,
+            sourceConfigurationFingerprint: current.sourceConfigurationFingerprint,
+            configurationFingerprint: current.configurationFingerprint,
+            startedAt: current.startedAt,
+            runtimeConfigurationID: replacementID
+        ))
+    }
+}
+
+private final class MutableEngineRuntimeStore: EngineRuntimeStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var record: EngineRuntimeRecord?
+
+    init(record: EngineRuntimeRecord?) { self.record = record }
+
+    func load() throws -> EngineRuntimeRecord? {
+        lock.lock()
+        defer { lock.unlock() }
+        return record
+    }
+
+    func save(_ record: EngineRuntimeRecord) throws { replace(record) }
+
+    func clear() throws {
+        lock.lock()
+        record = nil
+        lock.unlock()
+    }
+
+    func current() -> EngineRuntimeRecord? {
+        lock.lock()
+        defer { lock.unlock() }
+        return record
+    }
+
+    func replace(_ record: EngineRuntimeRecord) {
+        lock.lock()
+        self.record = record
+        lock.unlock()
+    }
+}
+
+private struct AlwaysMatchingEngineProcessInspector: EngineProcessInspecting {
+    func matches(pid: Int32, executablePath: String) -> Bool { true }
+}
+
+private struct AlwaysListeningEnginePortProbe: LocalEnginePortProbing {
+    func isListening(on port: UInt16) async -> Bool { true }
 }
 
 private struct TestPortSelector: LocalEnginePortSelecting {
