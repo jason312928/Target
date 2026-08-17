@@ -490,7 +490,7 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(plain.data, wrapped.data)
     }
 
-    func testAnyTLSURIAndClashNodesNormalizeWithVerifiedTLS() throws {
+    func testAnyTLSURIAndClashNodesNormalizeWithTLSVerificationSemantics() throws {
         let uri = "anytls://fixture-password@example.com:443?security=tls&sni=proxy.example.com&alpn=h2%2Chttp%2F1.1&fp=chrome#AnyTLS%20URI"
         let uriResult = try SubscriptionNormalizer().normalize(Data(uri.utf8))
         XCTAssertEqual(uriResult.summary.protocols, [.anytls])
@@ -512,13 +512,14 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
             sni: proxy.example.com
             alpn: [h2, http/1.1]
             client-fingerprint: chrome
-            skip-cert-verify: false
+            skip-cert-verify: true
         """.utf8))
         XCTAssertEqual(clash.summary.protocols, [.anytls])
         let clashOutbound = try generatedOutbounds(clash.data)[1]
         XCTAssertEqual(clashOutbound["type"] as? String, "anytls")
         let clashTLS = try XCTUnwrap(clashOutbound["tls"] as? [String: Any])
         XCTAssertEqual(clashTLS["server_name"] as? String, "proxy.example.com")
+        XCTAssertEqual(clashTLS["insecure"] as? Bool, true)
         XCTAssertEqual(clashTLS["alpn"] as? [String], ["h2", "http/1.1"])
         XCTAssertEqual((clashTLS["utls"] as? [String: Any])?["fingerprint"] as? String, "chrome")
 
@@ -528,14 +529,41 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         """.utf8))
         let scalarTLS = try XCTUnwrap(try generatedOutbounds(scalarALPN.data)[1]["tls"] as? [String: Any])
         XCTAssertEqual(scalarTLS["alpn"] as? [String], ["h2", "http/1.1"])
+        XCTAssertEqual(scalarTLS["insecure"] as? Bool, false)
+
+        let explicitlyVerified = try SubscriptionNormalizer().normalize(Data("""
+        proxies:
+          - {name: AnyTLS Verified, type: anytls, server: example.com, port: 443, password: fixture-password, skip-cert-verify: false}
+        """.utf8))
+        let verifiedTLS = try XCTUnwrap(try generatedOutbounds(explicitlyVerified.data)[1]["tls"] as? [String: Any])
+        XCTAssertEqual(verifiedTLS["insecure"] as? Bool, false)
 
         if FileManager.default.isExecutableFile(atPath: singBoxExecutable.path) {
-            let check = SingBoxConfigurationChecker(executableURL: singBoxExecutable).check(configurationURL: try writeCandidate(uriResult.data))
+            let check = SingBoxConfigurationChecker(executableURL: singBoxExecutable).check(configurationURL: try writeCandidate(clash.data))
             if case .failure(let diagnostic) = check {
                 XCTFail("Generated AnyTLS configuration failed sing-box validation: \(diagnostic.messageKey)")
             }
         }
         assertIntakeError(.variantUnsupported, "anytls://fixture-password@example.com:443?security=tls&insecure=1#AnyTLS")
+    }
+
+    func testMultipleClashAnyTLSInsecureNodesImportWithoutTLSSkipAccounting() throws {
+        let result = try SubscriptionNormalizer().normalize(Data("""
+        proxies:
+          - {name: AnyTLS One, type: anytls, server: one.example.com, port: 443, password: fixture-one, skip-cert-verify: true}
+          - {name: AnyTLS Two, type: anytls, server: two.example.com, port: 443, password: fixture-two, skip-cert-verify: true, servername: edge.example.com}
+        """.utf8))
+        XCTAssertEqual(result.summary.nodeCount, 2)
+        XCTAssertEqual(result.summary.totalNodeCount, 2)
+        XCTAssertEqual(result.summary.skippedNodeCount, 0)
+        XCTAssertEqual(result.summary.skippedTLSVerificationNodeCount, 0)
+        XCTAssertEqual(result.summary.protocols, [.anytls])
+        XCTAssertTrue(result.summary.warnings.isEmpty)
+        let outbounds = try generatedOutbounds(result.data)
+        XCTAssertEqual((outbounds[1]["tls"] as? [String: Any])?["insecure"] as? Bool, true)
+        let secondTLS = try XCTUnwrap(outbounds[2]["tls"] as? [String: Any])
+        XCTAssertEqual(secondTLS["insecure"] as? Bool, true)
+        XCTAssertEqual(secondTLS["server_name"] as? String, "edge.example.com")
     }
 
     func testMixedAnyTLSAndUnsupportedProtocolsSkipOnlyUnsupportedNodes() throws {
@@ -633,6 +661,53 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         }
         assertIntakeError(.variantUnsupported, tcp.replacingOccurrences(of: "#", with: "&flow=xtls-rprx-vision#"))
         assertIntakeError(.variantUnsupported, tcp.replacingOccurrences(of: "security=tls", with: "security=reality"))
+    }
+
+    func testClashSharedTLSMapperPreservesProviderInsecurePerOutbound() throws {
+        let result = try SubscriptionNormalizer().normalize(Data("""
+        proxies:
+          - name: VMess Insecure
+            type: vmess
+            server: vmess.example.com
+            port: 443
+            uuid: 11111111-1111-4111-8111-111111111111
+            tls: true
+            skip-cert-verify: true
+          - name: VLESS Insecure
+            type: vless
+            server: vless.example.com
+            port: 443
+            uuid: 22222222-2222-4222-8222-222222222222
+            tls: true
+            skip-cert-verify: true
+            servername: vless-tls.example.com
+          - name: Trojan Verified
+            type: trojan
+            server: trojan.example.com
+            port: 443
+            password: fixture-password
+            skip-cert-verify: false
+            sni: trojan-tls.example.com
+        """.utf8))
+        let outbounds = try generatedOutbounds(result.data)
+        XCTAssertEqual(result.summary.nodeCount, 3)
+        XCTAssertEqual(result.summary.skippedNodeCount, 0)
+        let vmessTLS = try XCTUnwrap(outbounds[1]["tls"] as? [String: Any])
+        XCTAssertEqual(vmessTLS["insecure"] as? Bool, true)
+        let vlessTLS = try XCTUnwrap(outbounds[2]["tls"] as? [String: Any])
+        XCTAssertEqual(vlessTLS["insecure"] as? Bool, true)
+        XCTAssertEqual(vlessTLS["server_name"] as? String, "vless-tls.example.com")
+        let trojanTLS = try XCTUnwrap(outbounds[3]["tls"] as? [String: Any])
+        XCTAssertEqual(trojanTLS["insecure"] as? Bool, false)
+        XCTAssertEqual(trojanTLS["server_name"] as? String, "trojan-tls.example.com")
+
+        let check = try makeStore().checkSubscriptionCandidate(result.data)
+        if case .failure(let diagnostic) = check {
+            if diagnostic.messageKey == "profile.validation.engine-unavailable" {
+                throw XCTSkip("sing-box is not installed for generated configuration validation.")
+            }
+            XCTFail("Generated shared TLS configuration failed sing-box validation: \(diagnostic.messageKey)")
+        }
     }
 
     func testTrojanTCPAndWebSocketTLSSubset() throws {
@@ -760,20 +835,27 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertNil(vless["headers"])
     }
 
-    func testPlainClashTrojanRemainsMinimalAndUnsafeTLSIsSkipped() throws {
+    func testClashTLSVerificationSemanticsArePerOutboundAndNotSkipped() throws {
         let result = try SubscriptionNormalizer().normalize(Data("""
         proxies:
           - {name: Plain, type: trojan, server: plain.example.com, port: 443, password: fixture-one}
-          - {name: Unsafe, type: trojan, server: unsafe.example.com, port: 443, password: fixture-two, skip-cert-verify: true}
+          - {name: Insecure, type: trojan, server: insecure.example.com, port: 443, password: fixture-two, skip-cert-verify: true, sni: tls.example.com}
+          - {name: Explicitly Verified, type: trojan, server: verified.example.com, port: 443, password: fixture-three, skip-cert-verify: false, servername: verified-tls.example.com}
         """.utf8))
-        XCTAssertEqual(result.summary.nodeCount, 1)
-        XCTAssertEqual(result.summary.skippedTLSVerificationNodeCount, 1)
-        XCTAssertEqual(result.summary.skippedProtocols, [.trojan])
-        let outbound = try generatedOutbounds(result.data)[1]
-        XCTAssertNil(outbound["transport"])
-        let tls = try XCTUnwrap(outbound["tls"] as? [String: Any])
-        XCTAssertEqual(Set(tls.keys), ["enabled", "insecure", "server_name"])
-        XCTAssertEqual(tls["insecure"] as? Bool, false)
+        XCTAssertEqual(result.summary.nodeCount, 3)
+        XCTAssertEqual(result.summary.totalNodeCount, 3)
+        XCTAssertEqual(result.summary.skippedNodeCount, 0)
+        XCTAssertEqual(result.summary.skippedTLSVerificationNodeCount, 0)
+        XCTAssertTrue(result.summary.warnings.isEmpty)
+        let outbounds = try generatedOutbounds(result.data)
+        let plainTLS = try XCTUnwrap(outbounds[1]["tls"] as? [String: Any])
+        XCTAssertEqual(plainTLS["insecure"] as? Bool, false)
+        let insecureTLS = try XCTUnwrap(outbounds[2]["tls"] as? [String: Any])
+        XCTAssertEqual(insecureTLS["server_name"] as? String, "tls.example.com")
+        XCTAssertEqual(insecureTLS["insecure"] as? Bool, true)
+        let verifiedTLS = try XCTUnwrap(outbounds[3]["tls"] as? [String: Any])
+        XCTAssertEqual(verifiedTLS["server_name"] as? String, "verified-tls.example.com")
+        XCTAssertEqual(verifiedTLS["insecure"] as? Bool, false)
     }
 
     func testClashNodeCatalogConvertsSupportedNodesAndReportsIgnoredSemanticsSafely() throws {
@@ -836,12 +918,14 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
           - {name: VLESS insecure, type: vless, server: example.com, port: 443, uuid: 11111111-1111-4111-8111-111111111111, tls: true, skip-cert-verify: true}
           - {name: Unsupported, type: hysteria2, server: example.com, port: 443}
         """.utf8))
-        XCTAssertEqual(tlsSkipped.summary.nodeCount, 1)
+        XCTAssertEqual(tlsSkipped.summary.nodeCount, 2)
         XCTAssertEqual(tlsSkipped.summary.totalNodeCount, 3)
-        XCTAssertEqual(tlsSkipped.summary.skippedNodeCount, 2)
-        XCTAssertEqual(tlsSkipped.summary.skippedTLSVerificationNodeCount, 1)
-        XCTAssertEqual(tlsSkipped.summary.skippedProtocols, [.hysteria2, .vless])
-        XCTAssertEqual(tlsSkipped.summary.warnings, [.unsupportedNodesSkipped, .tlsVerificationRequired])
+        XCTAssertEqual(tlsSkipped.summary.skippedNodeCount, 1)
+        XCTAssertEqual(tlsSkipped.summary.skippedTLSVerificationNodeCount, 0)
+        XCTAssertEqual(tlsSkipped.summary.skippedProtocols, [.hysteria2])
+        XCTAssertEqual(tlsSkipped.summary.warnings, [.unsupportedNodesSkipped])
+        let importedTLS = try XCTUnwrap(try generatedOutbounds(tlsSkipped.data)[2]["tls"] as? [String: Any])
+        XCTAssertEqual(importedTLS["insecure"] as? Bool, true)
         assertIntakeError(.variantUnsupported, "proxies:\n  - {name: SS, type: ss, server: example.com, port: 8388, cipher: aes-128-gcm, password: test-password, plugin: obfs}")
     }
 

@@ -900,12 +900,6 @@ private struct SubscriptionIntakePreview: View {
                     .foregroundStyle(.orange)
                     .accessibilityIdentifier("profile.subscription.compatibility-warning.unsupported-nodes")
             }
-            if summary.warnings.contains(.tlsVerificationRequired) {
-                Label("profile.subscription.warning.tls-verification", systemImage: "lock.trianglebadge.exclamationmark")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                    .accessibilityIdentifier("profile.subscription.compatibility-warning.tls-verification")
-            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     if let diff = pending.diff {

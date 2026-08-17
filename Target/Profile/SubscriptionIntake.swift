@@ -28,7 +28,6 @@ enum SubscriptionProxyProtocol: String, CaseIterable, Equatable, Sendable {
 enum SubscriptionCompatibilityWarning: String, Equatable, Sendable {
     case providerSemanticsNotImported = "provider_semantics_not_imported"
     case unsupportedNodesSkipped = "unsupported_nodes_skipped"
-    case tlsVerificationRequired = "tls_verification_required"
 }
 
 enum SubscriptionSkippedProtocol: String, Equatable, Sendable {
@@ -386,18 +385,9 @@ struct SubscriptionNormalizer: Sendable {
         guard rawProxies.count <= Self.maximumNodeCount else { throw SubscriptionIntakeError.complexityLimitExceeded }
         var nodes: [ProviderNode] = []
         var skippedProtocols: [SubscriptionSkippedProtocol] = []
-        var skippedTLSVerificationNodeCount = 0
         for raw in rawProxies {
             guard let proxy = stringDictionary(raw), let type = nonemptyString(proxy["type"])?.lowercased() else {
                 throw SubscriptionIntakeError.payloadInvalid
-            }
-            if requiresDisabledTLSVerification(proxy) {
-                guard let protocolKind = SubscriptionSkippedProtocol(rawValue: type) else {
-                    throw SubscriptionIntakeError.variantUnsupported
-                }
-                skippedProtocols.append(protocolKind)
-                skippedTLSVerificationNodeCount += 1
-                continue
             }
             switch type {
             case "ss": nodes.append(try clashShadowsocks(proxy))
@@ -415,11 +405,9 @@ struct SubscriptionNormalizer: Sendable {
         var warnings: [SubscriptionCompatibilityWarning] = root.keys.contains(where: semanticKeys.contains)
             ? [.providerSemanticsNotImported] : []
         if !skippedProtocols.isEmpty { warnings.append(.unsupportedNodesSkipped) }
-        if skippedTLSVerificationNodeCount > 0 { warnings.append(.tlsVerificationRequired) }
         return try generatedResult(
             nodes: nodes, format: .clashYAML, warnings: warnings,
-            totalNodeCount: rawProxies.count, skippedProtocols: skippedProtocols,
-            skippedTLSVerificationNodeCount: skippedTLSVerificationNodeCount
+            totalNodeCount: rawProxies.count, skippedProtocols: skippedProtocols
         )
     }
 
@@ -494,11 +482,11 @@ struct SubscriptionNormalizer: Sendable {
     private func clashAnyTLS(_ proxy: [String: Any]) throws -> ProviderNode {
         let common = try clashCommon(proxy)
         guard let password = nonemptyString(proxy["password"]),
-              !(boolean(proxy["skip-cert-verify"]) ?? false),
               (boolean(proxy["tls"]) ?? true) else {
             throw SubscriptionIntakeError.variantUnsupported
         }
         var tls = tlsObject(serverName: nonemptyString(proxy["servername"] ?? proxy["sni"]) ?? common.server)
+        applyClashTLSVerification(proxy, to: &tls)
         try applyClashTLSCompatibility(proxy, allowsScalarALPN: true, to: &tls)
         let outbound: [String: Any] = [
             "type": "anytls", "server": common.server, "server_port": common.port,
@@ -522,11 +510,11 @@ struct SubscriptionNormalizer: Sendable {
             throw SubscriptionIntakeError.variantUnsupported
         }
         let tls = boolean(proxy["tls"]) ?? tlsRequired
-        guard !(boolean(proxy["skip-cert-verify"]) ?? false) else { throw SubscriptionIntakeError.variantUnsupported }
         if tlsRequired && !tls { throw SubscriptionIntakeError.variantUnsupported }
         let serverName = nonemptyString(proxy["servername"] ?? proxy["sni"]) ?? server
         if tls {
             var tlsOptions = tlsObject(serverName: serverName)
+            applyClashTLSVerification(proxy, to: &tlsOptions)
             try applyClashTLSCompatibility(proxy, to: &tlsOptions)
             outbound["tls"] = tlsOptions
         } else if proxy.keys.contains("client-fingerprint") || proxy.keys.contains("alpn") {
@@ -561,8 +549,10 @@ struct SubscriptionNormalizer: Sendable {
         }
     }
 
-    private func requiresDisabledTLSVerification(_ proxy: [String: Any]) -> Bool {
-        boolean(proxy["skip-cert-verify"]) == true
+    private func applyClashTLSVerification(_ proxy: [String: Any], to tls: inout [String: Any]) {
+        if boolean(proxy["skip-cert-verify"]) == true {
+            tls["insecure"] = true
+        }
     }
 
     private func generatedResult(
