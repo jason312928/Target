@@ -53,6 +53,22 @@ final class DashboardPresentationTests: XCTestCase {
         XCTAssertEqual(makePresentation(status: status, lifecycle: .running).primaryAction, .stop)
     }
 
+    func testNormalUserRunningEngineWithoutSystemProxyIsNotConnectedPositive() {
+        let status = BackendStatus(serviceInstallation: .enabled, engineState: .running, engineInstallation: .installed)
+        let presentation = makePresentation(status: status, lifecycle: .running, proxy: .disabled, safeMode: false, isUTMValidation: false)
+
+        XCTAssertEqual(presentation.statusLevel, .warning)
+        XCTAssertEqual(presentation.titleKey, "dashboard.status.proxy-disabled")
+    }
+
+    func testHostSafeRunningEngineIsExplicitlyEngineOnly() {
+        let status = BackendStatus(serviceInstallation: .enabled, engineState: .running, engineInstallation: .installed)
+        let presentation = makePresentation(status: status, lifecycle: .running, proxy: .disabled, safeMode: true)
+
+        XCTAssertEqual(presentation.statusLevel, .neutral)
+        XCTAssertEqual(presentation.titleKey, "dashboard.status.host-safe-running")
+    }
+
     func testRestartRequirementIsProminentWhenRunning() {
         let status = BackendStatus(serviceInstallation: .enabled, engineState: .running, engineInstallation: .installed, hasSelectedValidProfile: true, restartRequired: true)
         let presentation = makePresentation(status: status, lifecycle: .running)

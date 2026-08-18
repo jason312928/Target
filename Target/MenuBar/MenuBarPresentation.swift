@@ -49,7 +49,8 @@ struct MenuBarPresentation: Equatable {
         canRestart: Bool,
         canEnableSystemProxy: Bool,
         canDisableSystemProxy: Bool,
-        isBusy: Bool
+        isBusy: Bool,
+        isHostSafeMode: Bool = false
     ) {
         self.isBusy = isBusy
         self.errorKey = error?.localizedKey ?? systemProxyStatus.error?.localizedKey
@@ -63,6 +64,14 @@ struct MenuBarPresentation: Equatable {
             statusKey = "menu-bar.status.restart-required"
             symbolName = "exclamationmark.circle"
             primaryAction = canRestart ? .restart : .unavailable
+        } else if status.engineState == .running && isHostSafeMode {
+            statusKey = "menu-bar.status.host-safe-running"
+            symbolName = "circle.dashed"
+            primaryAction = canStop ? .stop : .unavailable
+        } else if status.engineState == .running && systemProxyStatus.state != .enabled {
+            statusKey = "menu-bar.status.proxy-disabled"
+            symbolName = "exclamationmark.circle"
+            primaryAction = canStop ? .stop : .unavailable
         } else if status.engineState == .running {
             statusKey = "menu-bar.status.running"
             symbolName = "circle.fill"

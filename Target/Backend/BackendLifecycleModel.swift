@@ -11,6 +11,7 @@ final class BackendLifecycleModel {
     private let systemProxyClient: any SystemProxyClient
     private let systemProxyOperations: any TargetSystemProxyOperating
     private let runtimeOperations: any TargetRuntimeOperating
+    private let connectionOperations: any TargetConnectionOperating
     private let runtimeObservationOperations: any TargetRuntimeObserving
     private let runtimeConnectionProvider: (any RuntimeConnectionProviding)?
     private let runtimeLogProvider: (any RuntimeLogProviding)?
@@ -45,6 +46,7 @@ final class BackendLifecycleModel {
         systemProxyClient: any SystemProxyClient = TargetServiceXPCClient(),
         systemProxyOperations: (any TargetSystemProxyOperating)? = nil,
         runtimeOperations: (any TargetRuntimeOperating)? = nil,
+        connectionOperations: (any TargetConnectionOperating)? = nil,
         runtimeObservationOperations: any TargetRuntimeObserving = UnavailableRuntimeObservationProvider(),
         runtimeConnectionProvider: (any RuntimeConnectionProviding)? = nil,
         runtimeLogProvider: (any RuntimeLogProviding)? = nil,
@@ -60,12 +62,16 @@ final class BackendLifecycleModel {
         self.systemProxyClient = systemProxyClient
         let resolvedSystemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: systemProxyClient)
         self.systemProxyOperations = resolvedSystemProxyOperations
-        self.runtimeOperations = runtimeOperations ?? TargetRuntimeOperations(
+        let resolvedRuntimeOperations = runtimeOperations ?? TargetRuntimeOperations(
             backend: backend,
             systemProxyClient: systemProxyClient,
             systemProxyOperations: resolvedSystemProxyOperations,
             hostNetworkSafetyMode: hostNetworkSafetyMode
         )
+        self.runtimeOperations = resolvedRuntimeOperations
+        self.connectionOperations = connectionOperations
+            ?? (resolvedRuntimeOperations as? any TargetConnectionOperating)
+            ?? UnavailableTargetConnectionOperations()
         self.runtimeObservationOperations = runtimeObservationOperations
         self.runtimeConnectionProvider = runtimeConnectionProvider ?? (backend as? any RuntimeConnectionProviding)
         self.runtimeLogProvider = runtimeLogProvider ?? (backend as? any RuntimeLogProviding)
@@ -97,7 +103,9 @@ final class BackendLifecycleModel {
     }
 
     var canStop: Bool {
-        !isBusy && status.engineState == .running
+        !isBusy && (status.engineState == .running
+            || (hostNetworkSafetyMode.permitsNetworkWrites
+                && (systemProxyStatus.state != .disabled || systemProxyStatus.hasRecoverySnapshot)))
     }
 
     var canRestart: Bool { canStop && status.restartRequired }
@@ -319,10 +327,10 @@ final class BackendLifecycleModel {
             finish(with: .serviceUnavailable)
             return
         }
-        let runtimeOperations = runtimeOperations
+        let connectionOperations = connectionOperations
         operationTask = Task { [weak self, backend] in
             do {
-                let result = try await runtimeOperations.startEngine()
+                let result = try await connectionOperations.connect()
                 if Task.isCancelled {
                     await self?.finishCancellation(afterReconciling: backend)
                     return
@@ -331,6 +339,8 @@ final class BackendLifecycleModel {
                 self?.finish(with: result.engineStatus)
             } catch is CancellationError {
                 await self?.finishCancellation(afterReconciling: backend)
+            } catch let error as TargetConnectionOperationError {
+                self?.finishConnectionFailure(error)
             } catch let error as BackendError {
                 self?.finish(with: error)
             } catch {
@@ -341,16 +351,18 @@ final class BackendLifecycleModel {
 
     func stop() {
         guard !isBusy else { return }
-        guard status.engineState == .running else {
+        guard status.engineState == .running
+                || (hostNetworkSafetyMode.permitsNetworkWrites
+                    && (systemProxyStatus.state != .disabled || systemProxyStatus.hasRecoverySnapshot)) else {
             finish(with: .invalidLifecycleTransition)
             return
         }
         lifecycleState = .stopping
         error = nil
-        let runtimeOperations = runtimeOperations
+        let connectionOperations = connectionOperations
         operationTask = Task { [weak self, backend] in
             do {
-                let result = try await runtimeOperations.stopEngineSafely()
+                let result = try await connectionOperations.disconnect()
                 if Task.isCancelled {
                     await self?.finishCancellation(afterReconciling: backend)
                     return
@@ -374,16 +386,10 @@ final class BackendLifecycleModel {
         lifecycleState = .stopping
         error = nil
         let backend = backend
-        let runtimeOperations = runtimeOperations
+        let connectionOperations = connectionOperations
         operationTask = Task { [weak self] in
             do {
-                let stopResult = try await runtimeOperations.stopEngineSafely()
-                if let proxyStatus = stopResult.systemProxyStatus {
-                    self?.systemProxyStatus = proxyStatus
-                }
-                try Task.checkCancellation()
-                self?.lifecycleState = .starting
-                let startResult = try await runtimeOperations.startEngine()
+                let startResult = try await connectionOperations.restart()
                 if Task.isCancelled {
                     await self?.finishCancellation(afterReconciling: backend)
                     return
@@ -392,6 +398,8 @@ final class BackendLifecycleModel {
                 self?.finish(with: startResult.engineStatus)
             } catch is CancellationError {
                 await self?.finishCancellation(afterReconciling: backend)
+            } catch let error as TargetConnectionOperationError {
+                self?.finishConnectionFailure(error)
             } catch let error as BackendError {
                 await self?.finishStopFailure(afterReconciling: backend, error: error)
             } catch {
@@ -546,6 +554,15 @@ final class BackendLifecycleModel {
         }
         lifecycleState = .failed(error)
         operationTask = nil
+    }
+
+    private func finishConnectionFailure(_ connectionError: TargetConnectionOperationError) {
+        applyAuthoritativeEngineStatus(connectionError.engineStatus)
+        systemProxyStatus = connectionError.systemProxyStatus
+        error = .serviceUnavailable
+        lifecycleState = .failed(.serviceUnavailable)
+        operationTask = nil
+        updateObservationLifecycle(for: connectionError.engineStatus)
     }
 
     private func finishPing(with result: String) {

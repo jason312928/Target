@@ -10,10 +10,23 @@ final class MenuBarPresentationTests: XCTestCase {
     }
 
     func testRunningEngineOffersStop() {
-        let presentation = makePresentation(status: runningStatus(), canStop: true)
+        let presentation = makePresentation(status: runningStatus(), proxy: managedProxyStatus(), canStop: true)
 
         XCTAssertEqual(presentation.statusKey, "menu-bar.status.running")
         XCTAssertEqual(presentation.primaryAction, .stop)
+    }
+
+    func testRunningEngineWithoutSystemProxyIsNotShownAsConnected() {
+        let presentation = makePresentation(status: runningStatus(), proxy: .disabled, canStop: true)
+
+        XCTAssertEqual(presentation.statusKey, "menu-bar.status.proxy-disabled")
+        XCTAssertEqual(presentation.symbolName, "exclamationmark.circle")
+    }
+
+    func testHostSafeRunningEngineIsExplicitlyEngineOnly() {
+        let presentation = makePresentation(status: runningStatus(), proxy: .disabled, canStop: true, hostSafe: true)
+
+        XCTAssertEqual(presentation.statusKey, "menu-bar.status.host-safe-running")
     }
 
     func testRestartRequiredOffersRestartOnlyWhenLifecycleAllowsIt() {
@@ -109,7 +122,8 @@ final class MenuBarPresentationTests: XCTestCase {
         canRestart: Bool = false,
         canEnableProxy: Bool = false,
         canDisableProxy: Bool = false,
-        busy: Bool = false
+        busy: Bool = false,
+        hostSafe: Bool = false
     ) -> MenuBarPresentation {
         MenuBarPresentation(
             status: status,
@@ -121,7 +135,8 @@ final class MenuBarPresentationTests: XCTestCase {
             canRestart: canRestart,
             canEnableSystemProxy: canEnableProxy,
             canDisableSystemProxy: canDisableProxy,
-            isBusy: busy
+            isBusy: busy,
+            isHostSafeMode: hostSafe
         )
     }
 
@@ -132,5 +147,9 @@ final class MenuBarPresentationTests: XCTestCase {
             engineInstallation: .installed,
             hasSelectedValidProfile: true
         )
+    }
+
+    private func managedProxyStatus() -> SystemProxyStatus {
+        SystemProxyStatus(state: .enabled, engineReachable: true, affectedServiceCount: 1, error: nil, hasRecoverySnapshot: true)
     }
 }

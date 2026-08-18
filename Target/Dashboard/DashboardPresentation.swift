@@ -106,6 +106,16 @@ struct DashboardPresentation: Equatable {
             titleKey = "dashboard.status.restart-required"
             descriptionKey = "engine.restart.required"
             primaryAction = .restart
+        } else if status.engineState == .running && isHostSafeMode {
+            statusLevel = .neutral
+            titleKey = "dashboard.status.host-safe-running"
+            descriptionKey = "dashboard.status.host-safe-running.description"
+            primaryAction = .stop
+        } else if status.engineState == .running && systemProxyStatus.state != .enabled {
+            statusLevel = .warning
+            titleKey = "dashboard.status.proxy-disabled"
+            descriptionKey = "dashboard.status.proxy-disabled.description"
+            primaryAction = .stop
         } else if status.engineState == .running {
             statusLevel = .positive
             titleKey = "dashboard.status.running"

@@ -21,7 +21,8 @@ struct MenuBarView: View {
             canRestart: lifecycle.canRestart,
             canEnableSystemProxy: lifecycle.canEnableSystemProxy,
             canDisableSystemProxy: lifecycle.canDisableSystemProxy,
-            isBusy: lifecycle.isBusy
+            isBusy: lifecycle.isBusy,
+            isHostSafeMode: lifecycle.isHostSafeMode
         )
     }
 

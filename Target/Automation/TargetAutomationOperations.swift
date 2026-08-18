@@ -14,6 +14,7 @@ actor TargetAutomationOperations {
     private let serviceClient: any SystemProxyClient
     private let systemProxyOperations: any TargetSystemProxyOperating
     private let runtimeOperations: any TargetRuntimeOperating
+    private let connectionOperations: any TargetConnectionOperating
     private let runtimeObservationOperations: any TargetRuntimeObserving
     private let hostNetworkSafetyMode: HostNetworkSafetyMode
     private let engineStatusObserver: (@Sendable (BackendStatus) async -> Void)?
@@ -27,6 +28,7 @@ actor TargetAutomationOperations {
         serviceClient: any SystemProxyClient = TargetServiceXPCClient(),
         systemProxyOperations: (any TargetSystemProxyOperating)? = nil,
         runtimeOperations: (any TargetRuntimeOperating)? = nil,
+        connectionOperations: (any TargetConnectionOperating)? = nil,
         runtimeObservationOperations: any TargetRuntimeObserving = UnavailableRuntimeObservationProvider(),
         hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode,
         engineStatusObserver: (@Sendable (BackendStatus) async -> Void)? = nil,
@@ -39,11 +41,16 @@ actor TargetAutomationOperations {
         self.serviceClient = serviceClient
         let resolvedSystemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: serviceClient)
         self.systemProxyOperations = resolvedSystemProxyOperations
-        self.runtimeOperations = runtimeOperations ?? TargetRuntimeOperations(
+        let resolvedRuntimeOperations = runtimeOperations ?? TargetRuntimeOperations(
             backend: backend,
             systemProxyClient: serviceClient,
-            systemProxyOperations: resolvedSystemProxyOperations
+            systemProxyOperations: resolvedSystemProxyOperations,
+            hostNetworkSafetyMode: hostNetworkSafetyMode
         )
+        self.runtimeOperations = resolvedRuntimeOperations
+        self.connectionOperations = connectionOperations
+            ?? (resolvedRuntimeOperations as? any TargetConnectionOperating)
+            ?? UnavailableTargetConnectionOperations()
         self.runtimeObservationOperations = runtimeObservationOperations
         self.hostNetworkSafetyMode = hostNetworkSafetyMode
         self.engineStatusObserver = engineStatusObserver
@@ -74,6 +81,9 @@ actor TargetAutomationOperations {
             case "engine.status": return await engineStatus()
             case "engine.start": return try await engineStart()
             case "engine.stop": return try await engineStop()
+            case "connection.start": return await connectionStart()
+            case "connection.stop": return await connectionStop()
+            case "connection.restart": return await connectionRestart()
             case "service.status": return serviceStatus()
             case "service.install": return try serviceInstall()
             case "service.ping": return await servicePing()
@@ -324,6 +334,137 @@ actor TargetAutomationOperations {
         return engineResult(result.engineStatus)
     }
 
+    private func connectionStart() async -> AutomationResponse {
+        do {
+            let result = try await connectionOperations.connect()
+            await engineStatusObserver?(result.engineStatus)
+            await observeSystemProxyStatus(result.systemProxyStatus)
+            return connectionResult(
+                result.engineStatus,
+                result.systemProxyStatus,
+                statusAuthoritative: result.systemProxyStatus.error != .statusUnavailable
+            )
+        } catch let error as TargetConnectionOperationError {
+            await engineStatusObserver?(error.engineStatus)
+            await observeSystemProxyStatus(error.systemProxyStatus)
+            return connectionFailure(error)
+        } catch let error as BackendError {
+            let failure = backendFailure(error)
+            return await connectionStatusFailure(
+                code: failure.error?.code ?? "connection_failed",
+                message: failure.error?.message ?? "The connection could not be established safely."
+            )
+        } catch {
+            return await connectionStatusFailure(
+                code: "connection_failed",
+                message: "The connection could not be established safely."
+            )
+        }
+    }
+
+    private func connectionRestart() async -> AutomationResponse {
+        do {
+            let result = try await connectionOperations.restart()
+            await engineStatusObserver?(result.engineStatus)
+            await observeSystemProxyStatus(result.systemProxyStatus)
+            return connectionResult(
+                result.engineStatus,
+                result.systemProxyStatus,
+                statusAuthoritative: result.systemProxyStatus.error != .statusUnavailable
+            )
+        } catch let error as TargetConnectionOperationError {
+            await engineStatusObserver?(error.engineStatus)
+            await observeSystemProxyStatus(error.systemProxyStatus)
+            return connectionFailure(error)
+        } catch let error as BackendError {
+            let failure = backendFailure(error)
+            return await connectionStatusFailure(
+                code: failure.error?.code ?? "connection_restart_failed",
+                message: failure.error?.message ?? "The connection could not be restarted safely."
+            )
+        } catch {
+            return await connectionStatusFailure(
+                code: "connection_restart_failed",
+                message: "The connection could not be restarted safely."
+            )
+        }
+    }
+
+    private func connectionStop() async -> AutomationResponse {
+        do {
+            let result = try await connectionOperations.disconnect()
+            await engineStatusObserver?(result.engineStatus)
+            await observeSystemProxyStatus(result.systemProxyStatus)
+            let proxyStatus = result.systemProxyStatus ?? .disabled
+            return connectionResult(result.engineStatus, proxyStatus, statusAuthoritative: result.systemProxyStatus != nil)
+        } catch let error as BackendError {
+            let failure = backendFailure(error)
+            return await connectionStatusFailure(
+                code: failure.error?.code ?? "disconnect_failed",
+                message: failure.error?.message ?? "The connection could not be stopped safely."
+            )
+        } catch let error as SystemProxyError {
+            return await connectionStatusFailure(
+                code: serviceFailure(xpcError(error).code).error?.code ?? "disconnect_failed",
+                message: "The connection could not be stopped safely."
+            )
+        } catch {
+            return await connectionStatusFailure(
+                code: "disconnect_failed",
+                message: "The connection could not be stopped safely."
+            )
+        }
+    }
+
+    private func connectionStatusFailure(code: String, message: String) async -> AutomationResponse {
+        let engineStatus = try? await backend.queryStatus()
+        let proxyRead = await systemProxyStatusRead()
+        if let engineStatus { await engineStatusObserver?(engineStatus) }
+        await observeSystemProxyStatus(proxyRead.status)
+        return AutomationResponse(
+            protocolVersion: AutomationProtocol.version,
+            ok: false,
+            result: .object([
+                "connected": .boolean(engineStatus?.engineState == .running && proxyRead.status?.state == .enabled),
+                "engineState": .string(engineStatus?.engineState.rawValue ?? "unknown"),
+                "hasRecoverySnapshot": .boolean(proxyRead.status?.hasRecoverySnapshot ?? false),
+                "statusAuthoritative": .boolean(proxyRead.isAuthoritative),
+                "systemProxyState": .string(proxyRead.status?.state.rawValue ?? "unavailable")
+            ]),
+            error: AutomationErrorPayload(code: code, message: message)
+        )
+    }
+
+    private func connectionResult(
+        _ engineStatus: BackendStatus,
+        _ proxyStatus: SystemProxyStatus,
+        statusAuthoritative: Bool
+    ) -> AutomationResponse {
+        .success(.object([
+            "connected": .boolean(engineStatus.engineState == .running && proxyStatus.state == .enabled),
+            "engineState": .string(engineStatus.engineState.rawValue),
+            "hasRecoverySnapshot": .boolean(proxyStatus.hasRecoverySnapshot),
+            "statusAuthoritative": .boolean(statusAuthoritative),
+            "systemProxyState": .string(proxyStatus.state.rawValue)
+        ]))
+    }
+
+    private func connectionFailure(_ error: TargetConnectionOperationError) -> AutomationResponse {
+        let stableCode = serviceFailure(xpcError(error.operationError).code).error?.code ?? "connection_failed"
+        return AutomationResponse(
+            protocolVersion: AutomationProtocol.version,
+            ok: false,
+            result: .object([
+                "connected": .boolean(false),
+                "engineState": .string(error.engineStatus.engineState.rawValue),
+                "hasRecoverySnapshot": .boolean(error.systemProxyStatus.hasRecoverySnapshot),
+                "statusAuthoritative": .boolean(error.systemProxyStatus.error != .statusUnavailable),
+                "systemProxyState": .string(error.systemProxyStatus.state.rawValue)
+            ]),
+            error: AutomationErrorPayload(code: stableCode, message: "The connection could not be established safely.")
+        )
+    }
+
     private func engineResult(_ status: BackendStatus) -> AutomationResponse {
         .success(.object([
             "engineInstallation": .string(status.engineInstallation.rawValue),
@@ -530,7 +671,7 @@ actor TargetAutomationOperations {
 
     private static let commands = [
         "capabilities", "status", "runtime.status", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset",
-        "engine.status", "engine.start", "engine.stop", "service.status", "service.install",
+        "engine.status", "engine.start", "engine.stop", "connection.start", "connection.stop", "connection.restart", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
     ]
     private static let argumentFreeActions = Set(commands).subtracting([

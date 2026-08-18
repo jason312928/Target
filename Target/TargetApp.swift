@@ -95,7 +95,8 @@ struct TargetApp: App {
             canRestart: lifecycle.canRestart,
             canEnableSystemProxy: lifecycle.canEnableSystemProxy,
             canDisableSystemProxy: lifecycle.canDisableSystemProxy,
-            isBusy: lifecycle.isBusy
+            isBusy: lifecycle.isBusy,
+            isHostSafeMode: lifecycle.isHostSafeMode
         ).symbolName) {
             MenuBarView(lifecycle: lifecycle)
         }
