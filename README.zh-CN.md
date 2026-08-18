@@ -8,7 +8,7 @@ Target 是原生 SwiftUI macOS 客户端。可选的 sing-box 引擎以当前用
 
 没有 UTM 验证编译标志的 Development Debug 构建进入宿主安全模式：仅观测本地监听和服务健康状态，不修改系统代理、PAC、自动代理发现、DNS、路由、防火墙或 TUN。
 
-Release 和 Development Preview 构建使用普通用户模式。只有用户明确开启系统代理、Target 自有的本地代理可通信且未检测到其他网络控制器时，Target 才会写入 macOS 系统代理。Target 会记录精确的原始设置，并且只在 ownership 仍匹配时恢复；引擎启动不会自动开启系统代理。
+Release 和 Development Preview 构建使用普通用户模式。用户明确执行主 Start / Connect 操作后，Target 会启动自有引擎并权威地开启系统代理，建立正常 connected session。Disconnect / Restart 继续遵循安全的系统代理生命周期：只有 Target 自有的本地代理可通信且未检测到其他网络控制器时才写入 macOS 系统代理，记录精确的原始设置，并且只在 ownership 仍匹配时恢复。App 启动、刷新和后台观测不会自动接管系统网络。
 
 仅在 Target 持有已验证且归属明确的快照时，才允许恢复操作。恢复前会比较当前设置与 Target 最后写入的设置；若发现外部修改便停止，且绝不会以“关闭全部代理”作为替代方案。
 

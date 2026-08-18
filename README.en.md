@@ -14,7 +14,7 @@ Target is a native SwiftUI macOS client. Its optional sing-box engine runs as th
 
 Development Debug builds without the UTM validation flag start in Host Safe Mode. They observe the local listener and service health but do not change system proxy, PAC, proxy discovery, DNS, routes, firewall, or TUN settings.
 
-Release and Development Preview builds use Normal User Mode. Target changes the macOS system proxy only after the user explicitly enables it, only while the Target-owned local proxy is reachable, and only when no existing controller is detected. Target records the exact prior settings and restores them only when ownership still matches. It never enables a system proxy automatically when the engine starts.
+Release and Development Preview builds use Normal User Mode. When the user explicitly runs the main Start / Connect action, Target starts its owned engine and establishes the authoritative system-proxy connection for a normal connected session. Disconnect and Restart retain the safe system-proxy lifecycle: Target changes the macOS system proxy only while the Target-owned local proxy is reachable and no existing controller is detected, records the exact prior settings, and restores them only when ownership still matches. App launch, refresh, and background observation never take over the system network automatically.
 
 Recovery is disabled unless Target has a validated, Target-owned snapshot. A recovery operation compares the current settings with Target's last written settings and stops on an external-change conflict; it never clears all proxies as a fallback.
 
