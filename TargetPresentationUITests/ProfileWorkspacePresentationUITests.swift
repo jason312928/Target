@@ -59,6 +59,9 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         let app = launch(.policyCatalogEmpty)
         showProxies(in: app)
         assertExists(element("policy.catalog.empty", in: app), message: "Missing localized Policy Catalog empty state")
+        clickButton("policy.catalog.empty.open-configuration", in: app)
+        assertExists(element("profile.workspace.configuration", in: app), message: "Empty Policy state did not open Configuration")
+        assertExists(app.scrollViews["profile.json-editor.scroll"], message: "Configuration editor is unavailable from the empty Policy state")
         assertDoesNotExist(app.outlines["policy.workspace.selectors"], message: "Empty catalog rendered selector rows")
     }
 
@@ -126,6 +129,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         let selection = element("policy.catalog.selector.0.member.1", in: app)
         assertExists(selection, message: "Desired Policy selection control is unavailable")
         XCTAssertTrue(selection.isEnabled)
+        clickButton("policy.workspace.actions", in: app)
         let reset = element("policy.catalog.reset", in: app)
         assertExists(reset, message: "Persisted override did not expose Profile defaults reset")
         XCTAssertTrue(reset.isEnabled)
@@ -134,20 +138,21 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     func testPolicyCatalogResetReturnsToSourceDefaultPresentation() {
         let app = launch(.policyCatalogMismatch)
         showProxies(in: app)
+        clickButton("policy.workspace.actions", in: app)
         clickButton("policy.catalog.reset", in: app)
         assertDoesNotExist(element("policy.catalog.reset", in: app), message: "Reset control remained after all overrides were cleared")
         assertAccessibleValueContains("Applied", for: selectorRow(0, in: app))
     }
 
-    func testProxiesWorkspaceSupportsSectionNavigationSearchAndFilter() {
+    func testProxiesWorkspaceSupportsSectionNavigationAndNodeSearch() {
         let app = launch(.policyCatalogPopulated)
         _ = sectionControl("Overview", in: app)
         _ = sectionControl("Proxies", in: app)
         let configuration = sectionControl("Configuration", in: app)
         showProxies(in: app)
         assertExists(element("policy.workspace.search", in: app), message: "Missing Proxies search")
-        assertExists(element("policy.workspace.filter", in: app), message: "Missing Proxies filter")
-        assertExists(element("policy.workspace.refresh", in: app), message: "Missing Policy refresh")
+        assertDoesNotExist(element("policy.workspace.filter", in: app), message: "Removed selector filter is still visible")
+        assertExists(element("policy.workspace.actions", in: app), message: "Missing Policy actions menu")
 
         let search = app.textFields["policy.workspace.search"]
         search.click()
@@ -155,8 +160,8 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         XCTAssertEqual(search.value as? String, "no-such-proxy", "Proxies search input did not accept the query")
         app.typeKey(.return, modifierFlags: [])
         assertExists(
-            element("policy.workspace.search.empty", in: app),
-            message: "Search did not produce the Proxies empty state"
+            element("policy.workspace.members.empty", in: app),
+            message: "Search did not produce the nodes empty state"
         )
 
         configuration.click()
@@ -410,6 +415,15 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         assertFullShellSelectedProfile(.remoteProfile, size: "950x670")
     }
 
+    func testFullShellProfileRowsSwitchTheSelectedProfile() {
+        let app = launchFullShell(.localProfile, windowSize: "950x670", resetDestination: true)
+        navigateToProfiles(in: app)
+        XCTAssertEqual(state("presentation.selected-profile", in: app), "First Profile")
+        selectSecondProfile(in: app)
+        waitForState("presentation.selected-profile", toEqual: "Second Profile", in: app)
+        XCTAssertEqual(state("presentation.selected-profile", in: app), "Second Profile")
+    }
+
     func testFullShellRestoresProfilesDestinationAfterRestartAtBothSizes() {
         assertRestoredShellWorkspace(size: "740x511")
         assertRestoredShellWorkspace(size: "950x670")
@@ -591,8 +605,9 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
         guard destination.isHittable || waitUntilHittable(destination) else {
             return XCTFail("Profiles destination is not hittable")
         }
-        destination.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
-        assertExists(element("profile.list", in: app), message: "Inner Profile list is unavailable")
+        destination.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.5)).click()
+        assertExists(button("profile.action.create", in: app), message: "Profile workspace toolbar is unavailable")
+        assertDoesNotExist(element("profile.list", in: app), message: "Redundant inner Profile list is still visible")
     }
 
     private func navigateToDashboard(in app: XCUIApplication) {
@@ -608,7 +623,7 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
 
     private func assertEmptyShellWorkspace(in app: XCUIApplication) {
         assertVisibleInsideWindow(element("app-shell.sidebar", in: app), in: app, message: "Outer sidebar is unavailable")
-        assertVisibleInsideWindow(element("profile.list", in: app), in: app, message: "Inner Profile list is unavailable")
+        assertDoesNotExist(element("profile.list", in: app), message: "Redundant inner Profile list is still visible")
         let empty = element("profile.workspace.empty", in: app)
         assertVisibleInsideWindow(empty, in: app, message: "Empty Profile workspace is unavailable")
         XCTAssertGreaterThan(empty.firstMatch.frame.width, 150, "Empty state title is constrained to a character column")
@@ -638,19 +653,28 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     }
 
     private func assertUsableProfileList(in app: XCUIApplication) {
-        // AppKit can report the native List container's accessibility frame beyond
-        // the window even when its rows are fully visible. Assert a contained row,
-        // which is the actual selectable UI, instead of that incidental container.
-        let list = element("profile.list", in: app)
-        assertExists(list, message: "Inner Profile list is unavailable")
+        assertDoesNotExist(element("profile.list", in: app), message: "Redundant inner Profile list is still visible")
+        assertVisibleInsideWindow(element("app-shell.sidebar", in: app), in: app, message: "Main sidebar is unavailable")
         let rows = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "profile.row."))
             .allElementsBoundByIndex
         guard let visibleRow = rows.first(where: { isVisibleInsideWindow($0, in: app) }) else {
-            return XCTFail("Inner Profile list has no visible Profile row")
+            return XCTFail("Expanded Profiles destination has no visible Profile row")
         }
         assertVisibleInsideWindow(visibleRow, in: app, message: "Profile row is unavailable")
         XCTAssertTrue(visibleRow.isHittable || waitUntilHittable(visibleRow), "Profile row is not reachable")
+
+        let disclosure = button("app-shell.profiles.disclosure", in: app)
+        assertExists(disclosure, message: "Profiles disclosure control is unavailable")
+        disclosure.click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier BEGINSWITH %@", "profile.row."))
+                .allElementsBoundByIndex.isEmpty,
+            "Collapsing Profiles did not hide Profile rows"
+        )
+        disclosure.click()
+        assertExists(rows[0], message: "Expanding Profiles did not restore Profile rows")
     }
 
     private func assertOuterProfilesTitle(in app: XCUIApplication) {
@@ -749,11 +773,9 @@ final class ProfileWorkspacePresentationUITests: XCTestCase {
     private func recordShellFrames(in app: XCUIApplication, detailIdentifier: String) {
         let window = app.windows.firstMatch.frame
         let outerSidebar = element("app-shell.sidebar", in: app)
-        let profileList = element("profile.list", in: app)
         let outer = outerSidebar.exists ? outerSidebar.frame : .zero
-        let list = profileList.exists ? profileList.frame : .zero
         let detail = element(detailIdentifier, in: app).firstMatch.frame
-        let record = XCTAttachment(string: "window=\(window) outer=\(outer) list=\(list) detail=\(detail)")
+        let record = XCTAttachment(string: "window=\(window) sidebar=\(outer) detail=\(detail)")
         record.name = "Profiles full-shell frames"
         record.lifetime = .keepAlways
         add(record)

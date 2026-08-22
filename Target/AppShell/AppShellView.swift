@@ -11,6 +11,7 @@ struct AppShellView: View {
     @SceneStorage("app-shell.destination") private var persistedDestinationRawValue: String?
     @State private var profileModel: ProfileViewModel
     @State private var outerColumnVisibility: NavigationSplitViewVisibility = .all
+    @SceneStorage("app-shell.profiles-expanded") private var profilesExpanded = true
     private let refreshOnTask: Bool
     private let restoredDestination: AppDestination?
 
@@ -32,7 +33,11 @@ struct AppShellView: View {
 
     var body: some View {
         NavigationSplitView(columnVisibility: $outerColumnVisibility) {
-            AppSidebarView(selection: destination)
+            AppSidebarView(
+                selection: sidebarSelection,
+                profiles: profileModel.profiles,
+                profilesExpanded: $profilesExpanded
+            )
         } detail: {
             shellDetail
         }
@@ -69,10 +74,24 @@ struct AppShellView: View {
         }
     }
 
-    private var destination: Binding<AppDestination> {
+    private var sidebarSelection: Binding<AppSidebarSelection> {
         Binding(
-            get: { AppDestination.destination(for: persistedDestinationRawValue) },
-            set: { persistedDestinationRawValue = $0.rawValue }
+            get: {
+                let destination = AppDestination.destination(for: persistedDestinationRawValue)
+                if destination == .profiles, let selectedID = profileModel.selectedID {
+                    return .profile(selectedID)
+                }
+                return .destination(destination)
+            },
+            set: { selection in
+                switch selection {
+                case .destination(let destination):
+                    persistedDestinationRawValue = destination.rawValue
+                case .profile(let profileID):
+                    persistedDestinationRawValue = AppDestination.profiles.rawValue
+                    profileModel.requestSelection(profileID)
+                }
+            }
         )
     }
 
@@ -108,7 +127,7 @@ struct AppShellView: View {
         case .dashboard:
             DashboardView(lifecycle: lifecycle, onRoute: handle)
         case .profiles:
-            ProfileWorkspaceView(lifecycle: lifecycle, model: profileModel)
+            ProfileWorkspaceView(lifecycle: lifecycle, model: profileModel, showsProfileList: false)
         case .connections:
             RuntimeActivityDestinationView(destination: .connections, lifecycle: lifecycle)
         case .traffic:
@@ -120,21 +139,35 @@ struct AppShellView: View {
 }
 
 struct AppSidebarView: View {
-    @Binding var selection: AppDestination
+    @Binding var selection: AppSidebarSelection
+    let profiles: [Profile]
+    @Binding var profilesExpanded: Bool
 
     var body: some View {
         List(selection: $selection) {
             ForEach(AppNavigationSection.ordered) { section in
                 Section(section.title) {
                     ForEach(AppDestination.metadata(in: section)) { metadata in
-                        Label {
-                            Text(metadata.title)
-                        } icon: {
-                            Image(systemName: metadata.symbolName)
+                        if metadata.destination == .profiles {
+                            profilesDestination(metadata)
+                            if profilesExpanded {
+                                ForEach(profiles) { profile in
+                                    AppSidebarProfileRow(
+                                        profile: profile,
+                                        isSelected: selection == .profile(profile.id)
+                                    )
+                                        .tag(AppSidebarSelection.profile(profile.id))
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            selection = .profile(profile.id)
+                                        }
+                                        .accessibilityElement(children: .combine)
+                                        .accessibilityIdentifier("profile.row.\(profile.id.uuidString)")
+                                }
+                            }
+                        } else {
+                            destinationLabel(metadata)
                         }
-                        .tag(metadata.destination)
-                        .accessibilityLabel(Text(metadata.title))
-                        .accessibilityIdentifier("app-shell.destination.\(metadata.destination.rawValue)")
                     }
                 }
             }
@@ -145,5 +178,93 @@ struct AppSidebarView: View {
         .accessibilityIdentifier("app-shell.sidebar")
         .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 220)
         .toolbar(removing: .sidebarToggle)
+    }
+
+    private func destinationLabel(_ metadata: AppDestinationMetadata) -> some View {
+        Label {
+            Text(metadata.title)
+        } icon: {
+            Image(systemName: metadata.symbolName)
+        }
+        .tag(AppSidebarSelection.destination(metadata.destination))
+        .accessibilityLabel(Text(metadata.title))
+        .accessibilityIdentifier("app-shell.destination.\(metadata.destination.rawValue)")
+    }
+
+    private func profilesDestination(_ metadata: AppDestinationMetadata) -> some View {
+        HStack(spacing: 6) {
+            Label {
+                Text(metadata.title)
+            } icon: {
+                Image(systemName: metadata.symbolName)
+            }
+            Spacer(minLength: 4)
+            Button {
+                profilesExpanded.toggle()
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .rotationEffect(.degrees(profilesExpanded ? 90 : 0))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(profilesExpanded
+                ? "app-shell.profiles.collapse"
+                : "app-shell.profiles.expand"))
+            .accessibilityIdentifier("app-shell.profiles.disclosure")
+        }
+        .tag(AppSidebarSelection.destination(.profiles))
+        .accessibilityIdentifier("app-shell.destination.profiles")
+    }
+}
+
+enum AppSidebarSelection: Hashable {
+    case destination(AppDestination)
+    case profile(UUID)
+}
+
+private struct AppSidebarProfileRow: View {
+    let profile: Profile
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: profile.hasRemoteSubscription ? "link" : "doc.text")
+                .foregroundStyle(isSelected ? Color.white.opacity(0.9) : Color.secondary)
+            Text(profile.name)
+                .lineLimit(1)
+                .help(profile.name)
+                .foregroundStyle(isSelected ? Color.white : Color.primary)
+            Spacer(minLength: 4)
+            Image(systemName: validationSymbol)
+                .foregroundStyle(isSelected ? Color.white : validationColor)
+                .accessibilityLabel(Text(validationTitleKey))
+        }
+        .padding(.leading, 18)
+    }
+
+    private var validationTitleKey: LocalizedStringKey {
+        switch profile.validation.status {
+        case .valid: "profile.validation.valid"
+        case .invalid: "profile.validation.invalid"
+        case .notChecked: "profile.validation.not-checked"
+        }
+    }
+
+    private var validationSymbol: String {
+        switch profile.validation.status {
+        case .valid: "checkmark.circle.fill"
+        case .invalid: "xmark.circle.fill"
+        case .notChecked: "circle.dashed"
+        }
+    }
+
+    private var validationColor: Color {
+        switch profile.validation.status {
+        case .valid: .green
+        case .invalid: .red
+        case .notChecked: .secondary
+        }
     }
 }

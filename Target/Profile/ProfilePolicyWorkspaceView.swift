@@ -11,10 +11,10 @@ struct ProfilePolicyWorkspaceView: View {
     let probeLatency: (Int, String) -> Void
     let reset: () -> Void
     let refresh: () -> Void
+    let openConfiguration: () -> Void
 
     @State private var selectedSelectorID: Int?
     @State private var query = ""
-    @State private var filter: PolicyWorkspaceFilter = .all
 
     private var presentation: PolicyWorkspacePresentation {
         PolicyWorkspacePresentation(
@@ -24,16 +24,12 @@ struct ProfilePolicyWorkspaceView: View {
         )
     }
 
-    private var visibleSelectors: [PolicySelectorPresentation] {
-        presentation.selectors(matching: query, filter: filter)
-    }
-
     private var selectedSelector: PolicySelectorPresentation? {
         if let selectedSelectorID,
-           let selected = visibleSelectors.first(where: { $0.id == selectedSelectorID }) {
+           let selected = presentation.selectors.first(where: { $0.id == selectedSelectorID }) {
             return selected
         }
-        return visibleSelectors.first
+        return presentation.selectors.first
     }
 
     var body: some View {
@@ -43,41 +39,44 @@ struct ProfilePolicyWorkspaceView: View {
                     titleKey: "policy.catalog.unavailable.title",
                     symbol: "lock.trianglebadge.exclamationmark",
                     descriptionKey: "policy.catalog.unavailable.description",
-                    accessibilityIdentifier: "policy.catalog.unavailable"
+                    accessibilityIdentifier: "policy.catalog.unavailable",
+                    actionTitleKey: "policy.workspace.refresh",
+                    action: refresh
                 )
             } else if presentation.selectors.isEmpty {
                 PolicyCatalogState(
                     titleKey: "policy.catalog.empty.title",
                     symbol: "point.3.connected.trianglepath.dotted",
                     descriptionKey: "policy.catalog.empty.description",
-                    accessibilityIdentifier: "policy.catalog.empty"
+                    accessibilityIdentifier: "policy.catalog.empty",
+                    actionTitleKey: "profile.action.edit-configuration",
+                    actionAccessibilityIdentifier: "policy.catalog.empty.open-configuration",
+                    action: openConfiguration
                 )
             } else {
                 proxyWorkspace
             }
         }
-        .onChange(of: visibleSelectors.map(\.id)) { _, ids in
-            // Filtering is presentation-only. Keep the user's selector choice
-            // intact even while it is temporarily filtered out.
-            if selectedSelectorID == nil {
+        .onChange(of: presentation.selectors.map(\.id)) { _, ids in
+            if selectedSelectorID.map({ ids.contains($0) }) != true {
                 selectedSelectorID = ids.first
             }
         }
         .task {
-            if selectedSelectorID == nil { selectedSelectorID = visibleSelectors.first?.id }
+            if selectedSelectorID == nil { selectedSelectorID = presentation.selectors.first?.id }
         }
     }
 
     private var proxyWorkspace: some View {
         VStack(spacing: 0) {
             proxyToolbar
-            Divider()
-            HSplitView {
-                selectorList
-                    .frame(minWidth: 210, idealWidth: 255, maxWidth: 320)
-                selectorDetail
-                    .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+            if presentation.selectors.count > 1 {
+                Divider()
+                selectorTabs
             }
+            Divider()
+            selectorDetail
+                .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -86,63 +85,59 @@ struct ProfilePolicyWorkspaceView: View {
             TextField("policy.workspace.search", text: $query)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("policy.workspace.search")
-            Picker("policy.workspace.filter", selection: $filter) {
-                ForEach(PolicyWorkspaceFilter.allCases) { item in
-                    Text(LocalizedStringKey(item.titleKey)).tag(item)
+                .frame(maxWidth: 320)
+            Spacer(minLength: 0)
+            Menu {
+                Button("policy.workspace.refresh", systemImage: "arrow.clockwise", action: refresh)
+                    .disabled(isSelecting || lifecycle?.isBusy == true)
+                    .accessibilityIdentifier("policy.workspace.refresh")
+                if presentation.overrideCount > 0 {
+                    Divider()
+                    Button("policy.catalog.reset", systemImage: "arrow.uturn.backward", action: reset)
+                        .disabled(isSelecting)
+                        .accessibilityIdentifier("policy.catalog.reset")
                 }
-            }
-            .pickerStyle(.menu)
-            .accessibilityIdentifier("policy.workspace.filter")
-            Button {
-                refresh()
             } label: {
-                Image(systemName: "arrow.clockwise")
+                Image(systemName: "ellipsis.circle")
             }
-            .help(Text("policy.workspace.refresh"))
-            .disabled(isSelecting || lifecycle?.isBusy == true)
-            .accessibilityLabel(Text("policy.workspace.refresh"))
-            .accessibilityIdentifier("policy.workspace.refresh")
-            if presentation.overrideCount > 0 {
-                Button("policy.catalog.reset", action: reset)
-                    .controlSize(.small)
-                    .disabled(isSelecting)
-                    .accessibilityIdentifier("policy.catalog.reset")
-            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .accessibilityLabel(Text("policy.workspace.actions"))
+            .accessibilityIdentifier("policy.workspace.actions")
         }
-        .padding(12)
+        .frame(maxWidth: 760)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
     }
 
-    private var selectorList: some View {
-        Group {
-            if visibleSelectors.isEmpty {
-                PolicyCatalogState(
-                    titleKey: "policy.workspace.search.empty.title",
-                    symbol: "magnifyingglass",
-                    descriptionKey: "policy.workspace.search.empty.description",
-                    accessibilityIdentifier: "policy.workspace.search.empty"
-                )
-            } else {
-                List {
-                    ForEach(visibleSelectors) { selector in
-                        Button {
-                            selectedSelectorID = selector.id
-                        } label: {
-                            SelectorRow(selector: selector)
+    private var selectorTabs: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 18) {
+                ForEach(presentation.selectors) { selector in
+                    Button {
+                        selectedSelectorID = selector.id
+                    } label: {
+                        VStack(spacing: 7) {
+                            Text(selector.displayTag)
+                                .lineLimit(1)
+                                .foregroundStyle(selectedSelectorID == selector.id ? .primary : .secondary)
+                            Rectangle()
+                                .fill(selectedSelectorID == selector.id ? Color.accentColor : Color.clear)
+                                .frame(height: 2)
                         }
-                        .buttonStyle(.plain)
-                        // A native List row does not preserve an accessibility label
-                        // or value set on its SwiftUI content.  The selector itself
-                        // is an interaction, so expose it as the stable Button that
-                        // selects the detail pane.
-                        .accessibilityIdentifier("policy.catalog.selector.\(selector.id)")
-                        .accessibilityLabel(Text(verbatim: selector.displayTag))
-                        .accessibilityValue(selector.accessibilityValue(isSelected: selectedSelectorID == selector.id))
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("policy.catalog.selector.\(selector.id)")
+                    .accessibilityLabel(Text(verbatim: selector.displayTag))
+                    .accessibilityValue(selector.accessibilityValue(isSelected: selectedSelectorID == selector.id))
                 }
-                .listStyle(.sidebar)
-                .accessibilityIdentifier("policy.workspace.selectors")
             }
+            .frame(maxWidth: 760, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 10)
         }
+        .accessibilityIdentifier("policy.workspace.selectors")
     }
 
     @ViewBuilder
@@ -155,6 +150,8 @@ struct ProfilePolicyWorkspaceView: View {
                 canRestart: lifecycle?.canRestart == true,
                 lifecycleBusy: lifecycle?.isBusy == true,
                 engineIsRunning: lifecycle?.isEngineRunning == true,
+                query: query,
+                exposesSelectorAccessibilityIdentity: presentation.selectors.count == 1,
                 select: select,
                 probeLatency: {
                     guard let tag = selector.tag else { return }
@@ -169,38 +166,6 @@ struct ProfilePolicyWorkspaceView: View {
                 description: Text("policy.workspace.search.empty.description")
             )
         }
-    }
-}
-
-private struct SelectorRow: View {
-    let selector: PolicySelectorPresentation
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Image(systemName: selector.statusSymbol)
-                    .foregroundStyle(selector.statusLevel.tint)
-                Text(selector.displayTag).lineLimit(1)
-                Spacer(minLength: 0)
-                if selector.restartRequired {
-                    Image(systemName: "arrow.clockwise")
-                        .foregroundStyle(.orange)
-                }
-            }
-            HStack(spacing: 4) {
-                Text(selector.desiredSelection ?? "—")
-                if let running = selector.runningSelection, running != selector.desiredSelection {
-                    Image(systemName: "arrow.right")
-                    Text(running)
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            (Text("policy.workspace.member-count") + Text(": \(selector.memberCount)"))
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.vertical, 3)
     }
 }
 
@@ -240,9 +205,12 @@ private struct SelectorDetail: View {
     let canRestart: Bool
     let lifecycleBusy: Bool
     let engineIsRunning: Bool
+    let query: String
+    let exposesSelectorAccessibilityIdentity: Bool
     let select: (String, String) -> Void
     let probeLatency: () -> Void
     let restart: () -> Void
+    @State private var pendingSelection: String?
 
     var body: some View {
         ScrollView {
@@ -251,102 +219,138 @@ private struct SelectorDetail: View {
                 runtimeSummary
                 members
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
             .padding(20)
+        }
+        .onChange(of: isSelecting) { wasSelecting, selecting in
+            if wasSelecting && !selecting {
+                pendingSelection = nil
+            }
         }
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(selector.displayTag)
-                .font(.title3.weight(.semibold))
-            HStack(spacing: 8) {
-                Label {
-                    Text("policy.workspace.member-count") + Text(": \(selector.memberCount)")
-                } icon: {
-                    Image(systemName: "circle.grid.2x2")
-                }
-                if let statusKey = selector.statusKey {
-                    Label(LocalizedStringKey(statusKey), systemImage: selector.statusSymbol)
-                        .foregroundStyle(selector.statusLevel.tint)
-                }
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(selector.displayTag)
+                    .font(.title3.weight(.semibold))
+                (Text("policy.workspace.nodes") + Text(" · \(selector.memberCount)"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-    }
-
-    private var runtimeSummary: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(LocalizedStringKey(selector.runtime.titleKey), systemImage: selector.runtime.symbolName)
-                .font(.callout.weight(.medium))
-                .foregroundStyle(selector.runtime.level.tint)
-            Text(LocalizedStringKey(selector.runtime.detailKey))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            policyRelations
-            if selector.restartRequired && canRestart {
-                Button("policy.workspace.restart-to-apply", action: restart)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(lifecycleBusy || isSelecting)
-                    .accessibilityIdentifier("policy.workspace.restart-to-apply")
+            Spacer()
+            if let statusKey = selector.statusKey {
+                Label(LocalizedStringKey(statusKey), systemImage: selector.statusSymbol)
+                    .font(.caption)
+                    .foregroundStyle(selector.statusLevel.tint)
             }
         }
-        .padding(12)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(
+            exposesSelectorAccessibilityIdentity
+                ? "policy.catalog.selector.\(selector.id)"
+                : "policy.workspace.selector-detail"
+        )
+        .accessibilityLabel(Text(verbatim: selector.displayTag))
+        .accessibilityValue(selector.accessibilityValue(isSelected: true))
     }
 
     @ViewBuilder
-    private var policyRelations: some View {
-        if let configuredDefault = selector.configuredDefault {
-            LabeledContent("policy.catalog.configured-default", value: configuredDefault)
+    private var runtimeSummary: some View {
+        switch selector.runtime.state {
+        case .converged:
+            EmptyView()
+        case .notRunning:
+            Label(LocalizedStringKey(selector.runtime.detailKey), systemImage: selector.runtime.symbolName)
                 .font(.caption)
+                .foregroundStyle(.secondary)
+        case .restartRequired, .unavailable:
+            VStack(alignment: .leading, spacing: 8) {
+                Label(LocalizedStringKey(selector.runtime.titleKey), systemImage: selector.runtime.symbolName)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(selector.runtime.level.tint)
+                Text(LocalizedStringKey(selector.runtime.detailKey))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if selector.restartRequired && canRestart {
+                    Button("policy.workspace.restart-to-apply", action: restart)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(lifecycleBusy || isSelecting)
+                        .accessibilityIdentifier("policy.workspace.restart-to-apply")
+                }
+            }
+            .padding(12)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
-        if let desired = selector.desiredSelection {
-            LabeledContent("policy.catalog.desired-selection", value: desired)
-                .font(.caption)
-        }
-        if let running = selector.runningSelection, running != selector.desiredSelection {
-            LabeledContent("policy.catalog.running-selection", value: running)
-                .font(.caption)
+    }
+
+    private var filteredMembers: [PolicyMemberPresentation] {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return selector.members }
+        return selector.members.filter {
+            $0.tag.lowercased().contains(normalized)
+                || ($0.type?.lowercased().contains(normalized) == true)
         }
     }
 
     private var members: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                TargetSectionTitle("policy.workspace.members", systemImage: "circle.grid.2x2")
+                TargetSectionTitle("policy.workspace.nodes", systemImage: "server.rack")
                 Spacer()
-                Button(action: probeLatency) {
-                    Text(LocalizedStringKey(
-                        isTestingLatency
-                            ? "policy.health.testing"
-                            : (selector.hasHealthResults ? "policy.health.probe-again" : "policy.health.test-latency")
-                    ))
-                }
-                .controlSize(.small)
-                .disabled(!PolicyLatencyActionAvailability.isAvailable(
-                    engineIsRunning: engineIsRunning,
-                    isTestingLatency: isTestingLatency,
-                    lifecycleBusy: lifecycleBusy,
-                    selectorTag: selector.tag,
-                    hasSelectableMembers: selector.members.contains(where: \.isSelectable)
-                ))
-                .accessibilityIdentifier("policy.health.test-latency")
-            }
-            ForEach(selector.members) { member in
-                MemberRow(
-                    member: member,
-                    selectorID: selector.id,
-                    isDesired: selector.desiredSelection == member.tag,
-                    isSelecting: isSelecting,
-                    choose: {
-                        guard let selectorTag = selector.tag, member.isSelectable else { return }
-                        select(selectorTag, member.tag)
+                if latencyActionIsAvailable || isTestingLatency {
+                    Button(action: probeLatency) {
+                        Text(LocalizedStringKey(
+                            isTestingLatency
+                                ? "policy.health.testing"
+                                : (selector.hasHealthResults ? "policy.health.probe-again" : "policy.health.test-latency")
+                        ))
                     }
+                    .controlSize(.small)
+                    .disabled(!latencyActionIsAvailable)
+                    .accessibilityIdentifier("policy.health.test-latency")
+                }
+            }
+            if selector.members.isEmpty {
+                ContentUnavailableView(
+                    "policy.workspace.members.empty.title",
+                    systemImage: "server.rack",
+                    description: Text("policy.workspace.members.empty.description")
                 )
+                .frame(maxWidth: .infinity, minHeight: 180)
+                .accessibilityIdentifier("policy.workspace.members.empty")
+            } else if filteredMembers.isEmpty {
+                ContentUnavailableView.search(text: query)
+                    .frame(maxWidth: .infinity, minHeight: 180)
+                    .accessibilityIdentifier("policy.workspace.members.empty")
+            } else {
+                ForEach(filteredMembers) { member in
+                    MemberRow(
+                        member: member,
+                        selectorID: selector.id,
+                        isDesired: (pendingSelection ?? selector.desiredSelection) == member.tag,
+                        isSelecting: isSelecting,
+                        choose: {
+                            guard let selectorTag = selector.tag, member.isSelectable else { return }
+                            pendingSelection = member.tag
+                            select(selectorTag, member.tag)
+                        }
+                    )
+                    if member.id != filteredMembers.last?.id { Divider() }
+                }
             }
         }
+    }
+
+    private var latencyActionIsAvailable: Bool {
+        PolicyLatencyActionAvailability.isAvailable(
+            engineIsRunning: engineIsRunning,
+            isTestingLatency: isTestingLatency,
+            lifecycleBusy: lifecycleBusy,
+            selectorTag: selector.tag,
+            hasSelectableMembers: selector.members.contains(where: \.isSelectable)
+        )
     }
 }
 
@@ -363,28 +367,23 @@ private struct MemberRow: View {
                 Image(systemName: isDesired ? "checkmark.circle.fill" : member.statusSymbol)
                     .foregroundStyle(isDesired ? Color.accentColor : member.statusLevel.tint)
                 VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(member.tag).lineLimit(1)
-                        if let type = member.type {
-                            Text(type).foregroundStyle(.secondary)
-                        }
-                    }
+                    Text(member.tag).lineLimit(1)
                     if let statusKey = member.statusKey {
                         Label(LocalizedStringKey(statusKey), systemImage: member.statusSymbol)
                             .font(.caption)
                             .foregroundStyle(member.statusLevel.tint)
-                    }
-                    if let titleKey = member.role.titleKey {
-                        Text(LocalizedStringKey(titleKey))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 }
                 Spacer()
                 if isSelecting && isDesired { ProgressView().controlSize(.small) }
                 healthValue
             }
-            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(
+                isDesired ? Color.accentColor.opacity(0.08) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -413,9 +412,7 @@ private struct MemberRow: View {
     private var healthValue: some View {
         switch member.health.state {
         case .unknown:
-            Text(verbatim: "—")
-                .foregroundStyle(.secondary)
-                .help(Text("policy.health.not-tested"))
+            EmptyView()
         case .testing:
             HStack(spacing: 5) {
                 ProgressView().controlSize(.small)
@@ -456,10 +453,28 @@ private struct PolicyCatalogState: View {
     let symbol: String
     let descriptionKey: LocalizedStringKey
     let accessibilityIdentifier: String
+    var actionTitleKey: LocalizedStringKey? = nil
+    var actionAccessibilityIdentifier: String? = nil
+    var action: (() -> Void)? = nil
 
     var body: some View {
-        ContentUnavailableView(titleKey, systemImage: symbol, description: Text(descriptionKey))
-            .accessibilityElement(children: .combine)
-            .accessibilityIdentifier(accessibilityIdentifier)
+        VStack(alignment: .leading, spacing: 12) {
+            Label(titleKey, systemImage: symbol)
+                .font(.title3.weight(.semibold))
+            Text(descriptionKey)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            if let actionTitleKey, let action {
+                Button(actionTitleKey, action: action)
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier(actionAccessibilityIdentifier ?? "policy.catalog.state.action")
+            }
+        }
+        .frame(maxWidth: 620, alignment: .leading)
+        .frame(maxWidth: 760, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding(20)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(accessibilityIdentifier)
     }
 }

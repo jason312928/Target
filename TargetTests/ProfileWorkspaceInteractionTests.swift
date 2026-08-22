@@ -16,6 +16,8 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(shared.selectCount, 1)
+        await waitForPolicyMutationToFinish(model)
+        XCTAssertNil(model.messageKey, "Successful node selection should use inline state instead of a banner")
 
         let automation = TargetAutomationOperations(
             profileStore: fixture.store,
@@ -44,6 +46,8 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(shared.resetCount, 1)
+        await waitForPolicyMutationToFinish(model)
+        XCTAssertNil(model.messageKey, "Successful reset should not interrupt the workspace with a banner")
 
         let automation = TargetAutomationOperations(profileStore: fixture.store, policyOperations: shared, backend: MockBackend())
         let response = await automation.handle(AutomationRequest(protocolVersion: 1, action: "policy.reset"))

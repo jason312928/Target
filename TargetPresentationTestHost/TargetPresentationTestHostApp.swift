@@ -74,6 +74,7 @@ private enum PresentationShellState {
     static func resetDestinationIfRequested() {
         guard ProcessInfo.processInfo.arguments.contains("--presentation-reset-shell-destination") else { return }
         UserDefaults.standard.removeObject(forKey: "app-shell.destination")
+        UserDefaults.standard.removeObject(forKey: "app-shell.profiles-expanded")
     }
 
     static var restoredDestination: AppDestination? {

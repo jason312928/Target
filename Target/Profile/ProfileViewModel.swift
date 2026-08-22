@@ -277,7 +277,6 @@ final class ProfileViewModel {
                     outboundTag: outboundTag
                 )
                 self.isPolicyCatalogUnavailable = false
-                self.messageKey = "policy.catalog.selection.saved"
                 self.refreshMetadataPreservingEditor()
                 self.markReadinessChanged()
             } catch let error as TargetPolicyOperationError {
@@ -303,7 +302,6 @@ final class ProfileViewModel {
             do {
                 self.policyCatalog = try await self.policyOperations.reset().catalog
                 self.isPolicyCatalogUnavailable = false
-                self.messageKey = "policy.catalog.reset.saved"
                 self.refreshMetadataPreservingEditor()
                 self.markReadinessChanged()
             } catch let error as TargetPolicyOperationError {
