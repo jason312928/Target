@@ -276,29 +276,21 @@ private struct ProfileWorkspaceDetailView: View {
                 presentation: presentation,
                 showRename: showRename,
                 requestDelete: requestDelete,
-                requestExport: requestExport
+                requestExport: requestExport,
+                showOverview: { section = .overview },
+                showConfiguration: { section = .configuration }
             )
                 .frame(maxWidth: 760, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
-
-            Picker("profile.workspace.section", selection: $section) {
-                ForEach(ProfileWorkspaceSection.allCases) { item in
-                    Label(LocalizedStringKey(item.titleKey), systemImage: item.symbolName).tag(item)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.small)
-            .frame(maxWidth: 360)
-            .frame(maxWidth: 760, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            .accessibilityIdentifier("profile.workspace.section-switcher")
+                .padding(.bottom, 14)
 
             Divider()
+            if section != .proxies {
+                auxiliaryNavigation
+                Divider()
+            }
             sectionContent
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -314,6 +306,26 @@ private struct ProfileWorkspaceDetailView: View {
         .onChange(of: lifecycle?.status) { _, _ in
             model.invalidatePolicyHealth()
         }
+    }
+
+    private var auxiliaryNavigation: some View {
+        HStack(spacing: 10) {
+            Button {
+                section = .proxies
+            } label: {
+                Label("profile.workspace.back-to-nodes", systemImage: "chevron.left")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier("profile.workspace.back-to-nodes")
+            Spacer()
+            Label(LocalizedStringKey(section.titleKey), systemImage: section.symbolName)
+                .font(.callout.weight(.semibold))
+        }
+        .frame(maxWidth: 760)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
     }
 
     @ViewBuilder
@@ -352,7 +364,7 @@ private struct ProfileWorkspaceDetailView: View {
     }
 }
 
-private enum ProfileWorkspaceSection: String, CaseIterable, Identifiable {
+private enum ProfileWorkspaceSection: String, Identifiable {
     case overview
     case proxies
     case configuration
@@ -536,6 +548,8 @@ private struct ProfileSummaryHeader: View {
     let showRename: () -> Void
     let requestDelete: () -> Void
     let requestExport: () -> Void
+    let showOverview: () -> Void
+    let showConfiguration: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -565,7 +579,9 @@ private struct ProfileSummaryHeader: View {
                     model: model,
                     showRename: showRename,
                     requestDelete: requestDelete,
-                    requestExport: requestExport
+                    requestExport: requestExport,
+                    showOverview: showOverview,
+                    showConfiguration: showConfiguration
                 )
             }
         }
@@ -809,9 +825,16 @@ private struct ProfileMoreActions: View {
     let showRename: () -> Void
     let requestDelete: () -> Void
     let requestExport: () -> Void
+    var showOverview: (() -> Void)? = nil
+    var showConfiguration: (() -> Void)? = nil
 
     var body: some View {
         Menu {
+            if let showOverview, let showConfiguration {
+                Button("profile.workspace.section.overview", systemImage: "info.circle", action: showOverview)
+                Button("profile.action.edit-configuration", systemImage: "curlybraces", action: showConfiguration)
+                Divider()
+            }
             Button("profile.action.rename", action: showRename)
             Button("profile.action.duplicate") { model.requestDuplicate(profile.id) }
             Button("profile.action.restore") { model.requestRestore(profile.id) }
