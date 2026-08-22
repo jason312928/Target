@@ -325,19 +325,24 @@ private struct SelectorDetail: View {
                     .frame(maxWidth: .infinity, minHeight: 180)
                     .accessibilityIdentifier("policy.workspace.members.empty")
             } else {
-                ForEach(filteredMembers) { member in
-                    MemberRow(
-                        member: member,
-                        selectorID: selector.id,
-                        isDesired: (pendingSelection ?? selector.desiredSelection) == member.tag,
-                        isSelecting: isSelecting,
-                        choose: {
-                            guard let selectorTag = selector.tag, member.isSelectable else { return }
-                            pendingSelection = member.tag
-                            select(selectorTag, member.tag)
-                        }
-                    )
-                    if member.id != filteredMembers.last?.id { Divider() }
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 250, maximum: 360), spacing: 10)],
+                    alignment: .leading,
+                    spacing: 10
+                ) {
+                    ForEach(filteredMembers) { member in
+                        MemberRow(
+                            member: member,
+                            selectorID: selector.id,
+                            isDesired: (pendingSelection ?? selector.desiredSelection) == member.tag,
+                            isSelecting: isSelecting,
+                            choose: {
+                                guard let selectorTag = selector.tag, member.isSelectable else { return }
+                                pendingSelection = member.tag
+                                select(selectorTag, member.tag)
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -360,6 +365,7 @@ private struct MemberRow: View {
     let isDesired: Bool
     let isSelecting: Bool
     let choose: () -> Void
+    @State private var isHovering = false
 
     var body: some View {
         Button(action: choose) {
@@ -378,16 +384,27 @@ private struct MemberRow: View {
                 if isSelecting && isDesired { ProgressView().controlSize(.small) }
                 healthValue
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
             .background(
-                isDesired ? Color.accentColor.opacity(0.08) : Color.clear,
+                isDesired
+                    ? Color.accentColor.opacity(0.12)
+                    : (isHovering ? Color.primary.opacity(0.055) : Color.primary.opacity(0.025)),
                 in: RoundedRectangle(cornerRadius: 6, style: .continuous)
             )
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(
+                        isDesired ? Color.accentColor.opacity(0.55) : Color.primary.opacity(0.08),
+                        lineWidth: isDesired ? 1.5 : 1
+                    )
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(!member.isSelectable || isSelecting)
+        .disabled(!member.isSelectable)
+        .onHover { isHovering = $0 }
         // Member rows are semantic Buttons, so their identity and presentation
         // facts live on the Button rather than on visual label descendants.
         .accessibilityIdentifier("policy.catalog.selector.\(selectorID).member.\(member.id)")

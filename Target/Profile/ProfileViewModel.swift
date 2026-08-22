@@ -14,6 +14,7 @@ final class ProfileViewModel {
     private var subscriptionGeneration = 0
     private var importTask: Task<Void, Never>?
     private var policyTask: Task<Void, Never>?
+    private var queuedPolicySelection: (selectorTag: String, outboundTag: String)?
     private var policyProbeTask: Task<Void, Never>?
     private var policyRefreshGeneration = 0
     private var policyHealthGeneration = 0
@@ -262,30 +263,39 @@ final class ProfileViewModel {
     }
 
     func selectPolicy(selectorTag: String, outboundTag: String) {
-        guard !isSelectingPolicy else { return }
+        if isSelectingPolicy {
+            queuedPolicySelection = (selectorTag, outboundTag)
+            return
+        }
         isSelectingPolicy = true
         messageKey = nil
         policyTask = Task { [weak self] in
             guard let self else { return }
-            defer {
-                self.policyTask = nil
-                self.isSelectingPolicy = false
+            var selection = (selectorTag: selectorTag, outboundTag: outboundTag)
+            while true {
+                self.messageKey = nil
+                do {
+                    self.policyCatalog = try await self.policyOperations.select(
+                        selectorTag: selection.selectorTag,
+                        outboundTag: selection.outboundTag
+                    )
+                    self.isPolicyCatalogUnavailable = false
+                    self.refreshMetadataPreservingEditor()
+                    self.markReadinessChanged()
+                } catch let error as TargetPolicyOperationError {
+                    self.messageKey = self.policyMessageKey(for: error)
+                    self.refreshPolicyCatalog()
+                } catch {
+                    self.messageKey = "policy.catalog.selection.failed"
+                    self.refreshPolicyCatalog()
+                }
+
+                guard let queued = self.queuedPolicySelection else { break }
+                self.queuedPolicySelection = nil
+                selection = queued
             }
-            do {
-                self.policyCatalog = try await self.policyOperations.select(
-                    selectorTag: selectorTag,
-                    outboundTag: outboundTag
-                )
-                self.isPolicyCatalogUnavailable = false
-                self.refreshMetadataPreservingEditor()
-                self.markReadinessChanged()
-            } catch let error as TargetPolicyOperationError {
-                self.messageKey = self.policyMessageKey(for: error)
-                self.refreshPolicyCatalog()
-            } catch {
-                self.messageKey = "policy.catalog.selection.failed"
-                self.refreshPolicyCatalog()
-            }
+            self.policyTask = nil
+            self.isSelectingPolicy = false
         }
     }
 
@@ -298,6 +308,13 @@ final class ProfileViewModel {
             defer {
                 self.policyTask = nil
                 self.isSelectingPolicy = false
+                if let queued = self.queuedPolicySelection {
+                    self.queuedPolicySelection = nil
+                    self.selectPolicy(
+                        selectorTag: queued.selectorTag,
+                        outboundTag: queued.outboundTag
+                    )
+                }
             }
             do {
                 self.policyCatalog = try await self.policyOperations.reset().catalog

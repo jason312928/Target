@@ -55,7 +55,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(shared.resetCount, 2)
     }
 
-    func testPolicyMutationBusyGateRejectsDuplicatesAcrossSelectionAndReset() async throws {
+    func testPolicyMutationBusyGateQueuesLatestSelectionAndRejectsDuplicateReset() async throws {
         let fixture = try makeFixture()
         let catalog = PolicyCatalogParser.parse(
             Data(#"{"outbounds":[{"type":"selector","tag":"group","outbounds":["first","second"]},{"type":"direct","tag":"first"},{"type":"block","tag":"second"}]}"#.utf8),
@@ -74,6 +74,8 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertTrue(selectingModel.isSelectingPolicy)
         await selectionGate.release()
         await waitForPolicyMutationToFinish(selectingModel)
+        XCTAssertEqual(selectionSpy.selectCount, 2)
+        XCTAssertEqual(selectionSpy.lastSelectedOutbound, "first")
         XCTAssertFalse(selectingModel.isSelectingPolicy)
         selectingModel.resetPolicy()
         await waitForPolicyMutationToFinish(selectingModel)
@@ -91,10 +93,9 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertTrue(resettingModel.isSelectingPolicy)
         await resetGate.release()
         await waitForPolicyMutationToFinish(resettingModel)
-        XCTAssertFalse(resettingModel.isSelectingPolicy)
-        resettingModel.selectPolicy(selectorTag: "group", outboundTag: "first")
-        await waitForPolicyMutationToFinish(resettingModel)
         XCTAssertEqual(resetSpy.selectCount, 1)
+        XCTAssertEqual(resetSpy.lastSelectedOutbound, "first")
+        XCTAssertFalse(resettingModel.isSelectingPolicy)
     }
 
     func testImportPanelResultSelectsOnlyAcceptedURL() {
@@ -793,6 +794,7 @@ private final class GatedPolicyOperationSpy: TargetPolicyOperating, @unchecked S
     private let catalog: PolicyCatalog
     private let gate: PolicyMutationGate
     private var selections = 0
+    private var selectedOutbounds: [String] = []
     private var resets = 0
 
     init(catalog: PolicyCatalog, gate: PolicyMutationGate) {
@@ -812,11 +814,17 @@ private final class GatedPolicyOperationSpy: TargetPolicyOperating, @unchecked S
         return resets
     }
 
+    var lastSelectedOutbound: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return selectedOutbounds.last
+    }
+
     func readPersisted() throws -> PolicyCatalog { catalog }
     func read() async throws -> PolicyCatalog { catalog }
 
     func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog {
-        recordSelection()
+        recordSelection(outboundTag)
         await gate.enter(.select)
         return catalog
     }
@@ -827,9 +835,10 @@ private final class GatedPolicyOperationSpy: TargetPolicyOperating, @unchecked S
         return PolicyResetResult(clearedOverrideCount: catalog.storedOverrideCount, catalog: catalog)
     }
 
-    private func recordSelection() {
+    private func recordSelection(_ outboundTag: String) {
         lock.lock()
         selections += 1
+        selectedOutbounds.append(outboundTag)
         lock.unlock()
     }
 
