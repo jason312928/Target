@@ -7,25 +7,35 @@ struct ProfileWorkspaceView: View {
     @Bindable var model: ProfileViewModel
     @State private var sheet: ProfileSheet?
     @State private var deleteTarget: UUID?
+    private let showsProfileList: Bool
 
-    init(lifecycle: BackendLifecycleModel?, model: ProfileViewModel) {
+    init(lifecycle: BackendLifecycleModel?, model: ProfileViewModel, showsProfileList: Bool = true) {
         self.lifecycle = lifecycle
         self.model = model
+        self.showsProfileList = showsProfileList
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            profileList
-                .frame(
-                    minWidth: ProfileWorkspaceLayout.sidebarMinimumWidth,
-                    idealWidth: ProfileWorkspaceLayout.sidebarIdealWidth,
-                    maxWidth: ProfileWorkspaceLayout.sidebarMaximumWidth,
-                    maxHeight: .infinity
-                )
-            Divider()
-            workspaceDetail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Group {
+            if showsProfileList {
+                HStack(spacing: 0) {
+                    profileList
+                        .frame(
+                            minWidth: ProfileWorkspaceLayout.sidebarMinimumWidth,
+                            idealWidth: ProfileWorkspaceLayout.sidebarIdealWidth,
+                            maxWidth: ProfileWorkspaceLayout.sidebarMaximumWidth,
+                            maxHeight: .infinity
+                        )
+                    Divider()
+                    workspaceDetail
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            } else {
+                workspaceDetail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
         }
+        .toolbar { profileToolbar }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .sheet(item: $sheet) { sheet in
             switch sheet {
@@ -161,22 +171,24 @@ struct ProfileWorkspaceView: View {
         .listStyle(.sidebar)
         .navigationTitle("profile.list.title")
         .accessibilityIdentifier("profile.list")
-        .toolbar {
-            ToolbarItemGroup {
-                Button("profile.action.create", systemImage: "plus") { sheet = .create }
-                    .accessibilityIdentifier("profile.action.create")
-                Button("profile.subscription.add", systemImage: "link.badge.plus") { sheet = .subscription }
-                    .disabled(model.isUpdatingSubscription)
-                    .accessibilityIdentifier("profile.action.add-subscription")
-                Button("profile.action.import", systemImage: "square.and.arrow.down") { presentImportPanel() }
-                    .disabled(model.isPreparingImport || model.isCommittingImport)
-                    .accessibilityIdentifier("profile.action.import")
-                    .accessibilityLabel(Text("profile.accessibility.import"))
-                Button("profile.action.export", systemImage: "square.and.arrow.up") { model.requestExport() }
-                    .disabled(!model.canExport)
-                    .accessibilityIdentifier("profile.action.export")
-                    .accessibilityLabel(Text("profile.accessibility.export"))
-            }
+    }
+
+    @ToolbarContentBuilder
+    private var profileToolbar: some ToolbarContent {
+        ToolbarItemGroup {
+            Button("profile.action.create", systemImage: "plus") { sheet = .create }
+                .accessibilityIdentifier("profile.action.create")
+            Button("profile.subscription.add", systemImage: "link.badge.plus") { sheet = .subscription }
+                .disabled(model.isUpdatingSubscription)
+                .accessibilityIdentifier("profile.action.add-subscription")
+            Button("profile.action.import", systemImage: "square.and.arrow.down") { presentImportPanel() }
+                .disabled(model.isPreparingImport || model.isCommittingImport)
+                .accessibilityIdentifier("profile.action.import")
+                .accessibilityLabel(Text("profile.accessibility.import"))
+            Button("profile.action.export", systemImage: "square.and.arrow.up") { model.requestExport() }
+                .disabled(!model.canExport)
+                .accessibilityIdentifier("profile.action.export")
+                .accessibilityLabel(Text("profile.accessibility.export"))
         }
     }
 
@@ -252,13 +264,22 @@ private struct ProfileWorkspaceDetailView: View {
     let requestDelete: () -> Void
     let requestExport: () -> Void
     let lifecycle: BackendLifecycleModel?
-    @State private var section: ProfileWorkspaceSection = .overview
+    @State private var section: ProfileWorkspaceSection = .proxies
 
     private var presentation: ProfileWorkspacePresentation { ProfileWorkspacePresentation(profile: profile) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ProfileSummaryHeader(profile: profile, model: model, presentation: presentation)
+            ProfileSummaryHeader(
+                profile: profile,
+                model: model,
+                presentation: presentation,
+                showRename: showRename,
+                requestDelete: requestDelete,
+                requestExport: requestExport
+            )
+                .frame(maxWidth: 760, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
 
@@ -268,14 +289,20 @@ private struct ProfileWorkspaceDetailView: View {
                 }
             }
             .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .frame(maxWidth: 360)
+            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
             .padding(.horizontal, 20)
-            .padding(.vertical, 14)
+            .padding(.vertical, 12)
             .accessibilityIdentifier("profile.workspace.section-switcher")
 
             Divider()
             sectionContent
         }
-        .navigationTitle("profile.editor.title")
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .navigationTitle("profile.list.title")
         .overlay(alignment: .top) {
             if model.isPreparingImport || model.isCommittingImport {
                 ProgressView(model.isCommittingImport ? "profile.import.committing" : "profile.import.preparing")
@@ -297,9 +324,6 @@ private struct ProfileWorkspaceDetailView: View {
                 profile: profile,
                 model: model,
                 presentation: presentation,
-                showRename: showRename,
-                requestDelete: requestDelete,
-                requestExport: requestExport,
                 showProxies: { section = .proxies }
             )
         case .proxies:
@@ -313,7 +337,8 @@ private struct ProfileWorkspaceDetailView: View {
                 select: model.selectPolicy,
                 probeLatency: model.probePolicyLatency,
                 reset: model.resetPolicy,
-                refresh: model.refreshPolicyState
+                refresh: model.refreshPolicyState,
+                openConfiguration: { section = .configuration }
             )
         case .configuration:
             ProfileConfigurationView(
@@ -347,9 +372,6 @@ private struct ProfileOverviewView: View {
     let profile: Profile
     @Bindable var model: ProfileViewModel
     let presentation: ProfileWorkspacePresentation
-    let showRename: () -> Void
-    let requestDelete: () -> Void
-    let requestExport: () -> Void
     let showProxies: () -> Void
 
     private var policyPresentation: PolicyWorkspacePresentation {
@@ -358,7 +380,7 @@ private struct ProfileOverviewView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 18) {
                 if let subscription = profile.subscription {
                     ProfileSubscriptionStatus(
                         subscription: subscription,
@@ -368,24 +390,18 @@ private struct ProfileOverviewView: View {
                         cancel: model.cancelSubscriptionUpdate
                     )
                 }
-                TargetSectionTitle("profile.overview.policy", systemImage: "point.3.connected.trianglepath.dotted")
-                policySummary
                 ProfileFeedback(
                     diagnostic: model.diagnostic,
                     subscriptionFailure: model.subscriptionFailureDiagnostic,
                     messageKey: model.messageKey
                 )
-                Divider()
-                ProfileOverviewActions(
-                    profile: profile,
-                    model: model,
-                    showRename: showRename,
-                    requestDelete: requestDelete,
-                    requestExport: requestExport
-                )
+                if profile.subscription != nil {
+                    Divider()
+                }
+                policySummary
             }
-            .frame(maxWidth: TargetUI.pageContentMaxWidth, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
             .padding(20)
         }
         .accessibilityIdentifier("profile.workspace.overview")
@@ -393,75 +409,58 @@ private struct ProfileOverviewView: View {
 
     private var policySummary: some View {
         Button(action: showProxies) {
-            VStack(alignment: .leading, spacing: 9) {
-                if model.isPolicyCatalogUnavailable {
-                    Label("policy.catalog.unavailable.title", systemImage: "questionmark.circle")
-                        .foregroundStyle(.orange)
-                } else if policyPresentation.selectorCount == 0 {
-                    Label("policy.catalog.empty.title", systemImage: "point.3.connected.trianglepath.dotted")
-                        .foregroundStyle(.secondary)
-                } else {
-                    HStack(spacing: 22) {
-                        ProfilePolicyMetric(labelKey: "profile.overview.selectors", value: "\(policyPresentation.selectorCount)")
-                        ProfilePolicyMetric(labelKey: "profile.overview.overrides", value: "\(policyPresentation.overrideCount)")
-                        ProfilePolicyMetric(
-                            labelKey: "profile.overview.needs-restart",
-                            value: "\(policyPresentation.restartRequiredCount)"
-                        )
+            HStack(spacing: 12) {
+                Image(systemName: policySummarySymbol)
+                    .font(.title3)
+                    .foregroundStyle(policySummaryTint)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("profile.overview.nodes.title")
+                        .font(.callout.weight(.medium))
+                    Group {
+                        if policyPresentation.restartRequiredCount > 0 {
+                            Text("policy.catalog.restart-required")
+                        } else if policyPresentation.hasIssues {
+                            Text("profile.overview.policy.issues")
+                        } else if model.isPolicyCatalogUnavailable {
+                            Text("policy.catalog.unavailable.title")
+                        } else if policyPresentation.selectorCount == 0 {
+                            Text("policy.catalog.empty.title")
+                        } else {
+                            Text("profile.overview.policy.ready")
+                        }
                     }
-                    if policyPresentation.restartRequiredCount > 0 {
-                        Label("policy.catalog.restart-required", systemImage: "arrow.clockwise")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    } else if policyPresentation.hasIssues {
-                        Label("profile.overview.policy.issues", systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    } else {
-                        Text("profile.overview.policy.ready")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("profile.overview.policy-summary")
         .accessibilityHint(Text("profile.overview.policy.open.hint"))
     }
-}
 
-private struct ProfilePolicyMetric: View {
-    let labelKey: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(value).font(.title3.weight(.semibold))
-            Text(LocalizedStringKey(labelKey)).font(.caption).foregroundStyle(.secondary)
-        }
-        .accessibilityElement(children: .combine)
+    private var policySummarySymbol: String {
+        if policyPresentation.restartRequiredCount > 0 { return "arrow.clockwise.circle.fill" }
+        if policyPresentation.hasIssues || model.isPolicyCatalogUnavailable { return "exclamationmark.triangle.fill" }
+        if policyPresentation.selectorCount == 0 { return "point.3.connected.trianglepath.dotted" }
+        return "checkmark.circle.fill"
     }
-}
 
-private struct ProfileOverviewActions: View {
-    let profile: Profile
-    @Bindable var model: ProfileViewModel
-    let showRename: () -> Void
-    let requestDelete: () -> Void
-    let requestExport: () -> Void
-
-    var body: some View {
-        ProfileMoreActions(
-            profile: profile,
-            model: model,
-            showRename: showRename,
-            requestDelete: requestDelete,
-            requestExport: requestExport
-        )
+    private var policySummaryTint: Color {
+        if policyPresentation.restartRequiredCount > 0
+            || policyPresentation.hasIssues
+            || model.isPolicyCatalogUnavailable {
+            return .orange
+        }
+        return policyPresentation.selectorCount == 0 ? .secondary : .green
     }
 }
 
@@ -534,6 +533,9 @@ private struct ProfileSummaryHeader: View {
     let profile: Profile
     @Bindable var model: ProfileViewModel
     let presentation: ProfileWorkspacePresentation
+    let showRename: () -> Void
+    let requestDelete: () -> Void
+    let requestExport: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -543,50 +545,32 @@ private struct ProfileSummaryHeader: View {
                         .font(.title2.weight(.semibold))
                         .lineLimit(1)
                         .accessibilityIdentifier("profile.summary.name")
-                    Label(sourceKey, systemImage: sourceSymbol)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("profile.summary.source")
+                    HStack(spacing: 10) {
+                        Label(sourceKey, systemImage: sourceSymbol)
+                            .accessibilityIdentifier("profile.summary.source")
+                        Label {
+                            Text(profile.updatedAt, style: .relative)
+                        } icon: {
+                            Image(systemName: "clock")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
                 ProfileStatusBadge(level: presentation.validationLevel, titleKey: presentation.validationTitleKey)
                     .accessibilityIdentifier("profile.summary.validation")
+                ProfileMoreActions(
+                    profile: profile,
+                    model: model,
+                    showRename: showRename,
+                    requestDelete: requestDelete,
+                    requestExport: requestExport
+                )
             }
-
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 16) {
-                    metadata
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    metadata
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("profile.workspace.summary")
-    }
-
-    @ViewBuilder
-    private var metadata: some View {
-        Label {
-            Text("profile.summary.updated") + Text(" ") + Text(profile.updatedAt, style: .relative)
-        } icon: {
-            Image(systemName: "clock")
-        }
-        Label {
-            Text("profile.revision") + Text(" \(profile.validRevision)")
-        } icon: {
-            Image(systemName: "number")
-        }
-        if let checkedAt = profile.validation.checkedAt {
-            Label {
-                Text("profile.summary.checked") + Text(" ") + Text(checkedAt, style: .relative)
-            } icon: {
-                Image(systemName: "checkmark.circle")
-            }
-        }
     }
 
     private var sourceKey: LocalizedStringKey {
@@ -606,42 +590,49 @@ private struct ProfileSubscriptionStatus: View {
     let cancel: () -> Void
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) { content }
-            VStack(alignment: .leading, spacing: 8) { content }
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text("profile.subscription.status")
+                        .font(.callout.weight(.medium))
+                    if let titleKey = presentation.subscriptionTitleKey,
+                       let level = presentation.subscriptionLevel {
+                        ProfileStatusBadge(level: level, titleKey: titleKey)
+                    }
+                }
+                if let error = subscription.lastErrorKey {
+                    Text(LocalizedStringKey(error))
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                } else if let checkedAt = subscription.lastCheckedAt {
+                    (Text("profile.subscription.last-checked") + Text(" ") + Text(checkedAt, style: .relative))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 12)
+            subscriptionAction
         }
-        .font(.caption)
+        .padding(.vertical, 8)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("profile.subscription.summary")
     }
 
     @ViewBuilder
-    private var content: some View {
-        Label("profile.subscription.status", systemImage: "arrow.triangle.2.circlepath")
-            .foregroundStyle(.secondary)
-        if let titleKey = presentation.subscriptionTitleKey,
-           let level = presentation.subscriptionLevel {
-            ProfileStatusBadge(level: level, titleKey: titleKey)
-        }
-        if let checkedAt = subscription.lastCheckedAt {
-            Label {
-                Text("profile.subscription.last-checked") + Text(" ") + Text(checkedAt, style: .relative)
-            } icon: {
-                Image(systemName: "clock")
-            }
-            .foregroundStyle(.secondary)
-        }
-        if let error = subscription.lastErrorKey {
-            Label(LocalizedStringKey(error), systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
-        }
-        Spacer(minLength: 0)
+    private var subscriptionAction: some View {
         if isUpdating {
-            ProgressView().controlSize(.small)
-            Button("profile.subscription.cancel", action: cancel)
-                .accessibilityIdentifier("profile.subscription.cancel")
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Button("profile.subscription.cancel", action: cancel)
+                    .accessibilityIdentifier("profile.subscription.cancel")
+            }
         } else {
             Button("profile.subscription.update", action: update)
+                .controlSize(.small)
                 .accessibilityIdentifier("profile.subscription.update")
         }
     }
@@ -679,6 +670,7 @@ private struct ProfileFeedback: View {
 
 private struct SubscriptionFailureView: View {
     let diagnostic: SubscriptionFailureDiagnostic
+    @State private var showsTechnicalDetails = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -687,42 +679,48 @@ private struct SubscriptionFailureView: View {
                 .foregroundStyle(.red)
             Text(LocalizedStringKey(diagnostic.reasonKey))
                 .font(.callout)
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
-                row("profile.subscription.diagnostic.stage", LocalizedStringKey(diagnostic.stage.titleKey))
-                row("profile.subscription.diagnostic.category", LocalizedStringKey(diagnostic.reasonKey))
-                if let status = diagnostic.httpStatus {
-                    row("profile.subscription.diagnostic.http-status", Text("\(status)"))
+            DisclosureGroup("profile.subscription.diagnostic.details", isExpanded: $showsTechnicalDetails) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 5) {
+                        row("profile.subscription.diagnostic.stage", LocalizedStringKey(diagnostic.stage.titleKey))
+                        row("profile.subscription.diagnostic.category", LocalizedStringKey(diagnostic.reasonKey))
+                        if let status = diagnostic.httpStatus {
+                            row("profile.subscription.diagnostic.http-status", Text("\(status)"))
+                        }
+                        if let domain = diagnostic.transportErrorDomain, let code = diagnostic.transportErrorCode {
+                            row("profile.subscription.diagnostic.error-code", Text("\(domain) \(code)"))
+                        }
+                        if let attempts = diagnostic.attemptCount {
+                            row("profile.subscription.diagnostic.attempts", Text("\(attempts)"))
+                        }
+                        if let contentType = diagnostic.contentType {
+                            row("profile.subscription.diagnostic.content-type", Text(contentType))
+                        }
+                        if let bytes = diagnostic.responseBytes {
+                            row("profile.subscription.diagnostic.response-bytes", Text("\(bytes)"))
+                        }
+                        if diagnostic.showsSupportedFormats {
+                            row("profile.subscription.diagnostic.supported-formats",
+                                LocalizedStringKey("profile.subscription.diagnostic.supported-formats.value"))
+                        }
+                        if let retryable = diagnostic.isRetryable {
+                            row("profile.subscription.diagnostic.retry",
+                                LocalizedStringKey(retryable
+                                    ? "profile.subscription.diagnostic.retry.yes"
+                                    : "profile.subscription.diagnostic.retry.no"))
+                        }
+                    }
+                    .font(.caption)
+                    Button("profile.subscription.diagnostic.copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(diagnostic.copyableDescription, forType: .string)
+                    }
+                    .controlSize(.small)
+                    .accessibilityIdentifier("profile.subscription.diagnostic.copy")
                 }
-                if let domain = diagnostic.transportErrorDomain, let code = diagnostic.transportErrorCode {
-                    row("profile.subscription.diagnostic.error-code", Text("\(domain) \(code)"))
-                }
-                if let attempts = diagnostic.attemptCount {
-                    row("profile.subscription.diagnostic.attempts", Text("\(attempts)"))
-                }
-                if let contentType = diagnostic.contentType {
-                    row("profile.subscription.diagnostic.content-type", Text(contentType))
-                }
-                if let bytes = diagnostic.responseBytes {
-                    row("profile.subscription.diagnostic.response-bytes", Text("\(bytes)"))
-                }
-                if diagnostic.showsSupportedFormats {
-                    row("profile.subscription.diagnostic.supported-formats",
-                        LocalizedStringKey("profile.subscription.diagnostic.supported-formats.value"))
-                }
-                if let retryable = diagnostic.isRetryable {
-                    row("profile.subscription.diagnostic.retry",
-                        LocalizedStringKey(retryable
-                            ? "profile.subscription.diagnostic.retry.yes"
-                            : "profile.subscription.diagnostic.retry.no"))
-                }
+                .padding(.top, 6)
             }
             .font(.caption)
-            Button("profile.subscription.diagnostic.copy") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(diagnostic.copyableDescription, forType: .string)
-            }
-            .controlSize(.small)
-            .accessibilityIdentifier("profile.subscription.diagnostic.copy")
         }
         .padding(12)
         .background(.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
@@ -824,8 +822,12 @@ private struct ProfileMoreActions: View {
             Divider()
             Button("profile.action.delete", role: .destructive, action: requestDelete)
         } label: {
-            Text("profile.actions.more")
+            Image(systemName: "ellipsis.circle")
         }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(Text("profile.actions.more"))
+        .accessibilityLabel(Text("profile.actions.more"))
         .accessibilityIdentifier("profile.actions.more")
         .accessibilityHint(Text("profile.actions.more.hint"))
     }

@@ -18,6 +18,14 @@ final class AppShellRoutingTests: XCTestCase {
         XCTAssertEqual(AppDestination.profiles.id, .profiles)
     }
 
+    func testSidebarSelectionDistinguishesDestinationsFromProfiles() {
+        let profileID = UUID()
+
+        XCTAssertEqual(AppSidebarSelection.destination(.profiles), .destination(.profiles))
+        XCTAssertEqual(AppSidebarSelection.profile(profileID), .profile(profileID))
+        XCTAssertNotEqual(AppSidebarSelection.profile(profileID), .destination(.profiles))
+    }
+
     func testNavigationSectionsAndDestinationOrderAreStable() {
         XCTAssertEqual(AppNavigationSection.ordered, [.workspace])
         XCTAssertEqual(
