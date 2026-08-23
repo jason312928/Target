@@ -142,6 +142,7 @@ struct PolicyMemberPresentation: Identifiable, Equatable {
     var id: Int { member.id }
     var tag: String { member.tag }
     var type: String? { member.type }
+    var endpoint: String? { member.endpoint }
     var statusKey: String? { member.status.presentationKey }
     var statusSymbol: String { member.status.presentationSymbol }
     var statusLevel: TargetStatusLevel { member.status.presentationLevel }
@@ -195,7 +196,11 @@ struct PolicyRouteCountry: Identifiable, Equatable, Hashable {
         localeIdentifier.lowercased().hasPrefix("zh") ? simplifiedChineseName : englishName
     }
 
-    static func recognize(in nodeName: String) -> PolicyRouteCountry? {
+    static func recognize(in nodeName: String, endpoint: String? = nil) -> PolicyRouteCountry? {
+        if let ipCountry = PolicyIPCountryResolver.country(for: endpoint),
+           let country = supported.first(where: { $0.code == ipCountry }) {
+            return country
+        }
         if let flaggedCountry = supported.first(where: { nodeName.contains($0.flag) }) {
             return flaggedCountry
         }
@@ -235,9 +240,10 @@ struct PolicyRouteCountry: Identifiable, Equatable, Hashable {
 
     static let supported: [PolicyRouteCountry] = [
         .init(code: "HK", englishName: "Hong Kong", simplifiedChineseName: "香港", latitude: 22.32, longitude: 114.17, aliases: ["hong kong", "hongkong", "hk", "hkg", "香港"]),
-        .init(code: "TW", englishName: "Taiwan", simplifiedChineseName: "台湾", latitude: 23.70, longitude: 120.96, aliases: ["taiwan", "taipei", "tw", "tpe", "台湾", "台北"]),
+        .init(code: "TW", englishName: "Taiwan", simplifiedChineseName: "台湾", latitude: 23.70, longitude: 120.96, aliases: ["taiwan", "taipei", "tw", "tpe", "台湾", "台灣", "台北", "臺北"]),
         .init(code: "JP", englishName: "Japan", simplifiedChineseName: "日本", latitude: 36.20, longitude: 138.25, aliases: ["japan", "tokyo", "osaka", "jp", "jpn", "日本", "东京", "大阪"]),
         .init(code: "SG", englishName: "Singapore", simplifiedChineseName: "新加坡", latitude: 1.35, longitude: 103.82, aliases: ["singapore", "singapore city", "sg", "sgp", "新加坡", "狮城"]),
+        .init(code: "CN", englishName: "China", simplifiedChineseName: "中国", latitude: 35.86, longitude: 104.20, aliases: ["china", "beijing", "shanghai", "cn", "chn", "中国", "北京", "上海"]),
         .init(code: "KR", englishName: "South Korea", simplifiedChineseName: "韩国", latitude: 36.50, longitude: 127.90, aliases: ["south korea", "korea", "seoul", "kr", "kor", "韩国", "首尔"]),
         .init(code: "US", englishName: "United States", simplifiedChineseName: "美国", latitude: 39.50, longitude: -98.35, aliases: ["united states", "usa", "us", "america", "los angeles", "new york", "san jose", "seattle", "chicago", "美国", "洛杉矶", "纽约", "西雅图", "圣何塞"]),
         .init(code: "CA", englishName: "Canada", simplifiedChineseName: "加拿大", latitude: 56.13, longitude: -106.35, aliases: ["canada", "toronto", "vancouver", "montreal", "ca", "can", "加拿大", "多伦多", "温哥华"]),
@@ -318,7 +324,7 @@ struct PolicyCountryRoute: Identifiable, Equatable {
 extension PolicySelectorPresentation {
     var countryRoutes: [PolicyCountryRoute] {
         let grouped = Dictionary(grouping: members) { member in
-            PolicyRouteCountry.recognize(in: member.tag)
+            PolicyRouteCountry.recognize(in: member.tag, endpoint: member.endpoint)
         }
         return grouped.compactMap { country, members in
             country.map { PolicyCountryRoute(country: $0, members: members) }
@@ -327,7 +333,42 @@ extension PolicySelectorPresentation {
     }
 
     var unclassifiedMembers: [PolicyMemberPresentation] {
-        members.filter { PolicyRouteCountry.recognize(in: $0.tag) == nil }
+        members.filter { PolicyRouteCountry.recognize(in: $0.tag, endpoint: $0.endpoint) == nil }
+    }
+}
+
+/// A deliberately local IP-to-country boundary. Production can replace this
+/// table with a bundled, licensed offline GeoIP database without changing the
+/// presentation or policy-selection contracts. No endpoint is sent to a
+/// geolocation service, and unknown addresses are left for name fallback.
+private enum PolicyIPCountryResolver {
+    private static let exactCountryCodes: [String: String] = [
+        // Documentation-only ranges keep Xcode Preview and unit tests offline.
+        "192.0.2.1": "JP", "198.51.100.1": "HK", "203.0.113.1": "US",
+        "1.0.0.1": "AU", "1.1.1.1": "AU",
+        "8.8.4.4": "US", "8.8.8.8": "US", "9.9.9.9": "US",
+        "114.114.114.114": "CN", "223.5.5.5": "CN",
+        "168.95.1.1": "TW",
+        "208.67.222.222": "US"
+    ]
+
+    static func country(for endpoint: String?) -> String? {
+        guard let endpoint,
+              let address = ipv4Literal(in: endpoint) else { return nil }
+        return exactCountryCodes[address]
+    }
+
+    private static func ipv4Literal(in endpoint: String) -> String? {
+        let candidates = endpoint
+            .split(whereSeparator: { $0 == ":" || $0 == "/" || $0 == "[" || $0 == "]" || $0 == " " })
+            .map(String.init)
+        return candidates.first(where: { candidate in
+            let octets = candidate.split(separator: ".")
+            return octets.count == 4 && octets.allSatisfy { octet in
+                guard let value = Int(octet) else { return false }
+                return (0...255).contains(value)
+            }
+        })
     }
 }
 

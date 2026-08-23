@@ -240,6 +240,25 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertNil(PolicyRouteCountry.recognize(in: "Automatic Route"))
     }
 
+    func testPolicyRouteCountryPrefersLocalIPResolutionOverMisleadingName() throws {
+        XCTAssertEqual(
+            PolicyRouteCountry.recognize(in: "Japan 01", endpoint: "1.1.1.1:443")?.code,
+            "AU"
+        )
+
+        let catalog = PolicyCatalogParser.parse(Data(#"""
+        {
+          "outbounds": [
+            {"type":"selector","tag":"Proxy","outbounds":["Japan 01"]},
+            {"type":"vmess","tag":"Japan 01","server":"1.1.1.1","server_port":443}
+          ]
+        }
+        """#.utf8))
+        let member = try XCTUnwrap(catalog.selectors.first?.members.first)
+        XCTAssertEqual(member.endpoint, "1.1.1.1")
+        XCTAssertEqual(PolicyRouteCountry.recognize(in: member.tag, endpoint: member.endpoint)?.code, "AU")
+    }
+
     func testCountryRoutesChooseLowestMeasuredLatencyAndKeepUnknownNodesSeparate() throws {
         let selector = PolicyCatalogSelector(
             identity: 0,

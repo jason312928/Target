@@ -1,5 +1,4 @@
 import SwiftUI
-import MapKit
 
 struct ProfilePolicyWorkspaceView: View {
     let catalog: PolicyCatalog?
@@ -401,7 +400,8 @@ private struct SelectorDetail: View {
 
     private var currentCountry: PolicyRouteCountry? {
         guard let selectedMemberTag else { return nil }
-        return PolicyRouteCountry.recognize(in: selectedMemberTag)
+        let member = selector.members.first(where: { $0.tag == selectedMemberTag })
+        return PolicyRouteCountry.recognize(in: selectedMemberTag, endpoint: member?.endpoint)
     }
 
     private var filteredCountryRoutes: [PolicyCountryRoute] {
@@ -512,30 +512,17 @@ private struct CountryRouteMap: View {
     @State private var hoveredCountryCode: String?
 
     var body: some View {
-        Map(
-            initialPosition: .region(Self.region(for: routes)),
-            interactionModes: [.pan, .zoom]
-        ) {
-            ForEach(routes) { route in
-                Annotation(
-                    route.country.englishName,
-                    coordinate: CLLocationCoordinate2D(
-                        latitude: route.country.latitude,
-                        longitude: route.country.longitude
-                    ),
-                    anchor: .bottom
-                ) {
+        GeometryReader { proxy in
+            ZStack {
+                FlatWorldArtwork()
+                ForEach(routes) { route in
                     countryButton(route)
+                        .position(Self.point(for: route.country, in: proxy.size))
                 }
             }
         }
-        .mapStyle(.standard(
-            elevation: .flat,
-            pointsOfInterest: .excludingAll,
-            showsTraffic: false
-        ))
-        .mapControlVisibility(.hidden)
         .frame(height: 330)
+        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -615,28 +602,83 @@ private struct CountryRouteMap: View {
         return .red
     }
 
-    private static func region(for routes: [PolicyCountryRoute]) -> MKCoordinateRegion {
-        guard let first = routes.first else {
-            return MKCoordinateRegion(
-                center: CLLocationCoordinate2D(latitude: 18, longitude: 12),
-                span: MKCoordinateSpan(latitudeDelta: 145, longitudeDelta: 330)
-            )
-        }
-        let latitudes = routes.map(\.country.latitude)
-        let longitudes = routes.map(\.country.longitude)
-        let latitudeBounds = (latitudes.min() ?? first.country.latitude, latitudes.max() ?? first.country.latitude)
-        let longitudeBounds = (longitudes.min() ?? first.country.longitude, longitudes.max() ?? first.country.longitude)
-        let latitudeSpan = min(max((latitudeBounds.1 - latitudeBounds.0) * 1.45, 24), 145)
-        let longitudeSpan = min(max((longitudeBounds.1 - longitudeBounds.0) * 1.35, 42), 330)
-
-        return MKCoordinateRegion(
-            center: CLLocationCoordinate2D(
-                latitude: (latitudeBounds.0 + latitudeBounds.1) / 2,
-                longitude: (longitudeBounds.0 + longitudeBounds.1) / 2
-            ),
-            span: MKCoordinateSpan(latitudeDelta: latitudeSpan, longitudeDelta: longitudeSpan)
+    private static func point(for country: PolicyRouteCountry, in size: CGSize) -> CGPoint {
+        let horizontalInset = min(size.width * 0.035, 24)
+        let verticalInset = min(size.height * 0.09, 26)
+        let usableWidth = max(size.width - horizontalInset * 2, 1)
+        let usableHeight = max(size.height - verticalInset * 2, 1)
+        return CGPoint(
+            x: horizontalInset + ((country.longitude + 180) / 360) * usableWidth,
+            y: verticalInset + ((90 - country.latitude) / 180) * usableHeight
         )
     }
+}
+
+private struct FlatWorldArtwork: View {
+    var body: some View {
+        Canvas { context, size in
+            let gridColor = Color.primary.opacity(0.065)
+            var grid = Path()
+            for longitude in stride(from: -180.0, through: 180.0, by: 30.0) {
+                let x = ((longitude + 180) / 360) * size.width
+                grid.move(to: CGPoint(x: x, y: 0))
+                grid.addLine(to: CGPoint(x: x, y: size.height))
+            }
+            for latitude in stride(from: -60.0, through: 60.0, by: 30.0) {
+                let y = ((90 - latitude) / 180) * size.height
+                grid.move(to: CGPoint(x: 0, y: y))
+                grid.addLine(to: CGPoint(x: size.width, y: y))
+            }
+            context.stroke(grid, with: .color(gridColor), lineWidth: 0.6)
+
+            let outlineColor = Color.primary.opacity(0.19)
+            for polygon in Self.continents {
+                var path = Path()
+                for (index, coordinate) in polygon.enumerated() {
+                    let point = CGPoint(
+                        x: ((coordinate.longitude + 180) / 360) * size.width,
+                        y: ((90 - coordinate.latitude) / 180) * size.height
+                    )
+                    if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+                }
+                path.closeSubpath()
+                context.stroke(path, with: .color(outlineColor), lineWidth: 1.1)
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private static let continents: [[(latitude: Double, longitude: Double)]] = [
+        [
+            (72, -168), (70, -140), (61, -128), (55, -125), (48, -124),
+            (30, -117), (16, -90), (20, -82), (30, -82), (44, -67),
+            (51, -58), (60, -64), (70, -76), (75, -105), (72, -168)
+        ],
+        [
+            (13, -81), (5, -77), (-12, -78), (-23, -70), (-38, -73),
+            (-55, -68), (-52, -58), (-35, -54), (-10, -35), (4, -52),
+            (13, -81)
+        ],
+        [
+            (37, -10), (44, -8), (50, -5), (59, 3), (70, 32),
+            (67, 58), (72, 100), (67, 145), (54, 168), (42, 141),
+            (27, 122), (18, 108), (10, 80), (24, 55), (35, 35),
+            (36, 15), (37, -10)
+        ],
+        [
+            (37, -18), (35, 10), (29, 33), (13, 42), (-5, 51),
+            (-22, 42), (-35, 27), (-34, 17), (-20, 10), (2, -5),
+            (20, -17), (37, -18)
+        ],
+        [
+            (-11, 112), (-18, 129), (-35, 153), (-41, 146),
+            (-38, 122), (-25, 113), (-11, 112)
+        ],
+        [
+            (83, -74), (76, -63), (70, -50), (60, -43), (66, -22),
+            (76, -20), (83, -38), (83, -74)
+        ]
+    ]
 }
 
 private struct MemberRow: View {

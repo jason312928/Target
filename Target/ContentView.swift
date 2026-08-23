@@ -193,16 +193,16 @@ private enum TargetPreviewFixtures {
 private struct CountryRoutingPreview: View {
     @State private var selectedMember = "Japan 02"
 
-    private let nodes: [(tag: String, latency: Int?)] = [
-        ("Hong Kong 01", 58),
-        ("Hong Kong 02", 46),
-        ("Japan 01", 83),
-        ("Japan 02", 41),
-        ("Singapore 01", 92),
-        ("United States West", 138),
-        ("Germany 01", 176),
-        ("Taiwan 01", 52),
-        ("Automatic Route", nil)
+    private let nodes: [(tag: String, endpoint: String?, latency: Int?)] = [
+        ("Hong Kong 01", "198.51.100.1", 58),
+        ("Hong Kong 02", "198.51.100.2", 46),
+        ("Tokyo Edge 01", "192.0.2.1", 83),
+        ("Tokyo Edge 02", "192.0.2.2", 41),
+        ("Singapore 01", "203.0.113.2", 92),
+        ("United States West", "203.0.113.1", 138),
+        ("Germany 01", nil, 176),
+        ("Taiwan 01", "168.95.1.1", 52),
+        ("Automatic Route", nil, nil)
     ]
 
     var body: some View {
@@ -241,7 +241,7 @@ private struct CountryRoutingPreview: View {
                     runtimeConvergence: .converged,
                     restartRequired: false,
                     members: nodes.enumerated().map { index, node in
-                        PolicyCatalogMember(identity: index, tag: node.tag, type: "vmess", status: .available)
+                        PolicyCatalogMember(identity: index, tag: node.tag, type: "vmess", status: .available, endpoint: node.endpoint)
                     }
                 )
             ]

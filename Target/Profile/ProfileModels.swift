@@ -241,7 +241,24 @@ struct PolicyCatalogMember: Equatable, Sendable, Identifiable {
     let tag: String
     let type: String?
     let status: PolicyCatalogStructuralStatus
+    /// The provider endpoint is retained only as a non-rendered routing hint.
+    /// It is never included in accessibility, diagnostics, or ordinary UI copy.
+    let endpoint: String?
     var id: Int { identity }
+
+    init(
+        identity: Int,
+        tag: String,
+        type: String?,
+        status: PolicyCatalogStructuralStatus,
+        endpoint: String? = nil
+    ) {
+        self.identity = identity
+        self.tag = tag
+        self.type = type
+        self.status = status
+        self.endpoint = endpoint
+    }
 }
 
 enum PolicyCatalogStructuralStatus: String, Equatable, Sendable {
@@ -450,7 +467,16 @@ enum PolicyCatalogParser {
                 guard let type = nonemptyString(matches[0]["type"]) else {
                     return PolicyCatalogMember(identity: memberIndex, tag: name, type: nil, status: .unavailable)
                 }
-                return PolicyCatalogMember(identity: memberIndex, tag: name, type: type, status: .available)
+                let endpoint = nonemptyString(matches[0]["server"])
+                    ?? nonemptyString(matches[0]["address"])
+                    ?? nonemptyString(matches[0]["host"])
+                return PolicyCatalogMember(
+                    identity: memberIndex,
+                    tag: name,
+                    type: type,
+                    status: .available,
+                    endpoint: endpoint
+                )
             }
             let configuredDefault = nonemptyString(selector["default"]).flatMap { candidate in
                 members.first(where: { $0.tag == candidate && $0.status == .available })?.tag
