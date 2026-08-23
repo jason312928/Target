@@ -69,7 +69,7 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 [ -n "$derived_data" ] && [ -n "$commit" ] && [ -n "$build_number" ]
-app="$derived_data/Build/Products/Debug/Target.app"
+app="$derived_data/Build/Products/Release/Target.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$app/Contents/MacOS/Target"
 chmod 755 "$app/Contents/MacOS/Target"
@@ -420,7 +420,7 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 [ -n "$derived_data" ] && [ -n "$commit" ] && [ -n "$build_number" ]
-app="$derived_data/Build/Products/Debug/Target.app"
+app="$derived_data/Build/Products/Release/Target.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$app/Contents/MacOS/Target"
 chmod 755 "$app/Contents/MacOS/Target"

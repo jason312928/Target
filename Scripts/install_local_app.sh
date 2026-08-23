@@ -119,7 +119,7 @@ build_number="$(git rev-list --count HEAD)"
 printf 'repository: %s\ncommit: %s\nderived data: %s\ncanonical path: %s\n' "$repo_root" "$commit" "$derived_data_path" "$canonical_app"
 
 if [ "$dry_run" = true ]; then
-    printf 'would build unsigned Debug Target with isolated .noindex DerivedData\n'
+    printf 'would build unsigned Release Target with isolated .noindex DerivedData\n'
     collect_old_apps
     collect_stale_launchservices_paths
     printf 'would locally import Spotlight metadata: %s\n' "$canonical_app"
@@ -133,7 +133,7 @@ mkdir -p "$derived_data_path"
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer "$installer_xcodebuild" \
     -project 'Target.xcodeproj' \
     -scheme 'Target' \
-    -configuration Debug \
+    -configuration Release \
     -destination 'platform=macOS' \
     -derivedDataPath "$derived_data_path" \
     CODE_SIGNING_ALLOWED=NO \
@@ -144,7 +144,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer "$installer_xcodebuild"
     CURRENT_PROJECT_VERSION="$build_number" \
     build
 
-built_app="$derived_data_path/Build/Products/Debug/Target.app"
+built_app="$derived_data_path/Build/Products/Release/Target.app"
 verify_built_app "$built_app" "$commit" "$build_number"
 install_canonical_app "$built_app" "$commit" "$build_number"
 collect_old_apps

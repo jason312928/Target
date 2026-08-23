@@ -1,4 +1,5 @@
 import SwiftUI
+import MapKit
 
 struct ProfilePolicyWorkspaceView: View {
     let catalog: PolicyCatalog?
@@ -273,6 +274,7 @@ private struct SelectorDetail: View {
     let exposesSelectorAccessibilityIdentity: Bool
     let select: (String, String) -> Void
     let restart: () -> Void
+    @Environment(\.locale) private var locale
     @State private var pendingSelection: String?
 
     var body: some View {
@@ -280,7 +282,7 @@ private struct SelectorDetail: View {
             VStack(alignment: .leading, spacing: 22) {
                 currentRoute
                 runtimeSummary
-                members
+                destinations
             }
             .frame(maxWidth: 900, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
@@ -307,9 +309,19 @@ private struct SelectorDetail: View {
                 Text("policy.workspace.current-selection")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(pendingSelection ?? selector.desiredSelection ?? "—")
+                if let currentCountry {
+                    HStack(spacing: 7) {
+                        Text(currentCountry.flag)
+                        Text(currentCountry.displayName(localeIdentifier: locale.identifier))
+                    }
                     .font(.title3.weight(.semibold))
                     .lineLimit(1)
+                    .help(Text(verbatim: selectedMemberTag ?? currentCountry.englishName))
+                } else {
+                    Text(selectedMemberTag ?? "—")
+                        .font(.title3.weight(.semibold))
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 12)
             if isSelecting {
@@ -383,13 +395,36 @@ private struct SelectorDetail: View {
         }
     }
 
-    private var members: some View {
+    private var selectedMemberTag: String? {
+        pendingSelection ?? selector.desiredSelection
+    }
+
+    private var currentCountry: PolicyRouteCountry? {
+        guard let selectedMemberTag else { return nil }
+        return PolicyRouteCountry.recognize(in: selectedMemberTag)
+    }
+
+    private var filteredCountryRoutes: [PolicyCountryRoute] {
+        selector.countryRoutes.filter { $0.matches(query: query) }
+    }
+
+    private var filteredUnclassifiedMembers: [PolicyMemberPresentation] {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return selector.unclassifiedMembers }
+        return selector.unclassifiedMembers.filter {
+            $0.tag.lowercased().contains(normalized)
+                || ($0.type?.lowercased().contains(normalized) == true)
+        }
+    }
+
+    private var destinations: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("policy.workspace.choose-route")
+                    Text(selector.countryRoutes.isEmpty ? "policy.workspace.choose-route" : "policy.workspace.choose-country")
                         .font(.headline)
-                    (Text("policy.workspace.nodes") + Text(" · \(filteredMembers.count)"))
+                    (Text(selector.countryRoutes.isEmpty ? "policy.workspace.nodes" : "policy.workspace.countries")
+                        + Text(" · \(selector.countryRoutes.isEmpty ? filteredMembers.count : filteredCountryRoutes.count)"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -403,34 +438,205 @@ private struct SelectorDetail: View {
                 )
                 .frame(maxWidth: .infinity, minHeight: 180)
                 .accessibilityIdentifier("policy.workspace.members.empty")
-            } else if filteredMembers.isEmpty {
+            } else if filteredCountryRoutes.isEmpty && filteredUnclassifiedMembers.isEmpty {
                 ContentUnavailableView.search(text: query)
                     .frame(maxWidth: .infinity, minHeight: 180)
                     .accessibilityIdentifier("policy.workspace.members.empty")
-            } else {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 280, maximum: 430), spacing: 22)],
-                    alignment: .leading,
-                    spacing: 2
-                ) {
-                    ForEach(filteredMembers) { member in
-                        MemberRow(
-                            member: member,
-                            selectorID: selector.id,
-                            isDesired: (pendingSelection ?? selector.desiredSelection) == member.tag,
-                            isSelecting: isSelecting,
-                            choose: {
-                                guard let selectorTag = selector.tag, member.isSelectable else { return }
-                                pendingSelection = member.tag
-                                select(selectorTag, member.tag)
-                            }
-                        )
-                    }
+            } else if !filteredCountryRoutes.isEmpty {
+                CountryRouteMap(
+                    routes: filteredCountryRoutes,
+                    selectedMemberTag: selectedMemberTag,
+                    choose: chooseCountry
+                )
+                if !filteredUnclassifiedMembers.isEmpty {
+                    unclassifiedMembers
                 }
+            } else {
+                memberGrid(filteredMembers)
             }
         }
     }
 
+    private var unclassifiedMembers: some View {
+        DisclosureGroup {
+            memberGrid(filteredUnclassifiedMembers)
+                .padding(.top, 6)
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "questionmark.circle")
+                Text("policy.workspace.other-nodes")
+                Text("\(filteredUnclassifiedMembers.count)")
+                    .foregroundStyle(.tertiary)
+            }
+            .font(.callout.weight(.medium))
+        }
+        .padding(.top, 8)
+    }
+
+    private func memberGrid(_ members: [PolicyMemberPresentation]) -> some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 280, maximum: 430), spacing: 22)],
+            alignment: .leading,
+            spacing: 2
+        ) {
+            ForEach(members) { member in
+                MemberRow(
+                    member: member,
+                    selectorID: selector.id,
+                    isDesired: selectedMemberTag == member.tag,
+                    isSelecting: isSelecting,
+                    choose: { chooseMember(member) }
+                )
+            }
+        }
+    }
+
+    private func chooseCountry(_ route: PolicyCountryRoute) {
+        guard let member = route.bestMember else { return }
+        chooseMember(member)
+    }
+
+    private func chooseMember(_ member: PolicyMemberPresentation) {
+        guard let selectorTag = selector.tag, member.isSelectable else { return }
+        pendingSelection = member.tag
+        select(selectorTag, member.tag)
+    }
+
+}
+
+private struct CountryRouteMap: View {
+    let routes: [PolicyCountryRoute]
+    let selectedMemberTag: String?
+    let choose: (PolicyCountryRoute) -> Void
+    @Environment(\.locale) private var locale
+    @State private var hoveredCountryCode: String?
+
+    var body: some View {
+        Map(
+            initialPosition: .region(Self.region(for: routes)),
+            interactionModes: [.pan, .zoom]
+        ) {
+            ForEach(routes) { route in
+                Annotation(
+                    route.country.englishName,
+                    coordinate: CLLocationCoordinate2D(
+                        latitude: route.country.latitude,
+                        longitude: route.country.longitude
+                    ),
+                    anchor: .bottom
+                ) {
+                    countryButton(route)
+                }
+            }
+        }
+        .mapStyle(.standard(
+            elevation: .flat,
+            pointsOfInterest: .excludingAll,
+            showsTraffic: false
+        ))
+        .mapControlVisibility(.hidden)
+        .frame(height: 330)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.08))
+        }
+        .accessibilityIdentifier("policy.workspace.country-map")
+    }
+
+    private func countryButton(_ route: PolicyCountryRoute) -> some View {
+        let isSelected = route.members.contains(where: { $0.tag == selectedMemberTag })
+        let isHovered = hoveredCountryCode == route.id
+        return Button {
+            choose(route)
+        } label: {
+            VStack(spacing: 4) {
+                ZStack(alignment: .topTrailing) {
+                    Circle()
+                        .fill(isSelected ? Color.accentColor : Color(nsColor: .windowBackgroundColor))
+                        .frame(width: isSelected ? 48 : 42, height: isSelected ? 48 : 42)
+                        .shadow(color: .black.opacity(0.18), radius: 5, y: 2)
+                    Text(route.country.flag)
+                        .font(.system(size: isSelected ? 23 : 20))
+                        .frame(width: isSelected ? 48 : 42, height: isSelected ? 48 : 42)
+                    Text("\(route.members.count)")
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 17, minHeight: 17)
+                        .background(Color.accentColor, in: Circle())
+                        .offset(x: 5, y: -4)
+                }
+                if isSelected || isHovered {
+                    VStack(spacing: 1) {
+                        Text(route.country.displayName(localeIdentifier: locale.identifier))
+                            .font(.caption.weight(.semibold))
+                        if let latency = route.bestLatencyMilliseconds {
+                            Text("\(latency) ms")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(latencyTint(latency))
+                        }
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .fixedSize()
+                }
+            }
+            .animation(.easeOut(duration: 0.15), value: isSelected)
+            .animation(.easeOut(duration: 0.15), value: isHovered)
+        }
+        .buttonStyle(.plain)
+        .disabled(route.bestMember == nil)
+        .onHover { hovering in
+            hoveredCountryCode = hovering ? route.id : nil
+        }
+        .help(route.country.displayName(localeIdentifier: locale.identifier))
+        .accessibilityLabel(Text(verbatim: route.country.displayName(localeIdentifier: locale.identifier)))
+        .accessibilityValue(countryAccessibilityValue(route, selected: isSelected))
+        .accessibilityHint(Text("policy.workspace.country.choose.hint"))
+        .accessibilityIdentifier("policy.workspace.country.\(route.id)")
+    }
+
+    private func countryAccessibilityValue(_ route: PolicyCountryRoute, selected: Bool) -> Text {
+        var value = Text("policy.workspace.member-count") + Text(verbatim: ": \(route.members.count)")
+        if let latency = route.bestLatencyMilliseconds {
+            value = value + Text(verbatim: ", ") + Text("policy.health.latency")
+                + Text(verbatim: ": \(latency) ") + Text("policy.health.milliseconds")
+        }
+        if selected {
+            value = value + Text(verbatim: ", ") + Text("policy.workspace.filter.selected")
+        }
+        return value
+    }
+
+    private func latencyTint(_ latency: Int) -> Color {
+        if latency < 160 { return .green }
+        if latency < 360 { return .orange }
+        return .red
+    }
+
+    private static func region(for routes: [PolicyCountryRoute]) -> MKCoordinateRegion {
+        guard let first = routes.first else {
+            return MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 18, longitude: 12),
+                span: MKCoordinateSpan(latitudeDelta: 145, longitudeDelta: 330)
+            )
+        }
+        let latitudes = routes.map(\.country.latitude)
+        let longitudes = routes.map(\.country.longitude)
+        let latitudeBounds = (latitudes.min() ?? first.country.latitude, latitudes.max() ?? first.country.latitude)
+        let longitudeBounds = (longitudes.min() ?? first.country.longitude, longitudes.max() ?? first.country.longitude)
+        let latitudeSpan = min(max((latitudeBounds.1 - latitudeBounds.0) * 1.45, 24), 145)
+        let longitudeSpan = min(max((longitudeBounds.1 - longitudeBounds.0) * 1.35, 42), 330)
+
+        return MKCoordinateRegion(
+            center: CLLocationCoordinate2D(
+                latitude: (latitudeBounds.0 + latitudeBounds.1) / 2,
+                longitude: (longitudeBounds.0 + longitudeBounds.1) / 2
+            ),
+            span: MKCoordinateSpan(latitudeDelta: latitudeSpan, longitudeDelta: longitudeSpan)
+        )
+    }
 }
 
 private struct MemberRow: View {

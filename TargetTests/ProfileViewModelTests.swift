@@ -231,6 +231,73 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         )
     }
 
+    func testPolicyRouteCountryRecognizesNamesCodesCitiesAndFlags() {
+        XCTAssertEqual(PolicyRouteCountry.recognize(in: "Hong Kong 03")?.code, "HK")
+        XCTAssertEqual(PolicyRouteCountry.recognize(in: "东京 IPLC")?.code, "JP")
+        XCTAssertEqual(PolicyRouteCountry.recognize(in: "US West 01")?.code, "US")
+        XCTAssertEqual(PolicyRouteCountry.recognize(in: "🇸🇬 Premium")?.code, "SG")
+        XCTAssertEqual(PolicyRouteCountry.recognize(in: "印度尼西亚 01")?.code, "ID")
+        XCTAssertNil(PolicyRouteCountry.recognize(in: "Automatic Route"))
+    }
+
+    func testCountryRoutesChooseLowestMeasuredLatencyAndKeepUnknownNodesSeparate() throws {
+        let selector = PolicyCatalogSelector(
+            identity: 0,
+            tag: "Proxy",
+            status: .available,
+            configuredDefault: "Japan 02",
+            targetOverride: nil,
+            overrideValid: true,
+            effectiveDesired: "Japan 02",
+            runningSelection: nil,
+            runtimeConvergence: .notRunning,
+            restartRequired: false,
+            members: [
+                PolicyCatalogMember(identity: 0, tag: "Japan 01", type: "vmess", status: .available),
+                PolicyCatalogMember(identity: 1, tag: "Japan 02", type: "vmess", status: .available),
+                PolicyCatalogMember(identity: 2, tag: "Manual Route", type: "direct", status: .available)
+            ]
+        )
+        let fast = try XCTUnwrap(RuntimeProxyHealth.reachable(
+            tag: "Japan 01", latencyMilliseconds: 42, observedAt: .now
+        ))
+        let slow = try XCTUnwrap(RuntimeProxyHealth.reachable(
+            tag: "Japan 02", latencyMilliseconds: 126, observedAt: .now
+        ))
+        let presentation = PolicySelectorPresentation(
+            selector,
+            health: ["Japan 01": fast, "Japan 02": slow]
+        )
+
+        let japan = try XCTUnwrap(presentation.countryRoutes.first(where: { $0.country.code == "JP" }))
+        XCTAssertEqual(japan.members.count, 2)
+        XCTAssertEqual(japan.bestMember?.tag, "Japan 01")
+        XCTAssertEqual(japan.bestLatencyMilliseconds, 42)
+        XCTAssertEqual(presentation.unclassifiedMembers.map(\.tag), ["Manual Route"])
+    }
+
+    func testCountryRouteWithoutMeasurementsPrefersCurrentDesiredNode() throws {
+        let selector = PolicyCatalogSelector(
+            identity: 0,
+            tag: "Proxy",
+            status: .available,
+            configuredDefault: "Singapore 01",
+            targetOverride: "Singapore 02",
+            overrideValid: true,
+            effectiveDesired: "Singapore 02",
+            runningSelection: nil,
+            runtimeConvergence: .notRunning,
+            restartRequired: false,
+            members: [
+                PolicyCatalogMember(identity: 0, tag: "Singapore 01", type: "vmess", status: .available),
+                PolicyCatalogMember(identity: 1, tag: "Singapore 02", type: "vmess", status: .available)
+            ]
+        )
+        let route = try XCTUnwrap(PolicySelectorPresentation(selector).countryRoutes.first)
+
+        XCTAssertEqual(route.bestMember?.tag, "Singapore 02")
+    }
+
     func testPolicyMemberHealthDoesNotAlterSelectionRoles() {
         let source = selector(runtime: .restartRequired)
         let health = [

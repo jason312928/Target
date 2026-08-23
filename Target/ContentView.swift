@@ -51,6 +51,12 @@ struct ContentView: View {
     .frame(width: 1180, height: 760)
 }
 
+#Preview("Proxies - Country Routing") {
+    CountryRoutingPreview()
+        .environment(\.locale, .init(identifier: "zh-Hans"))
+        .frame(width: 960, height: 680)
+}
+
 #Preview("Profiles - Narrow Window") {
     ProfileWorkspaceView(
         lifecycle: nil,
@@ -180,6 +186,78 @@ private enum TargetPreviewFixtures {
             onboardingPreferences: TargetPreviewOnboardingPreferences(),
             loginItemManager: TargetPreviewLoginItemManager()
         )
+    }
+}
+
+@MainActor
+private struct CountryRoutingPreview: View {
+    @State private var selectedMember = "Japan 02"
+
+    private let nodes: [(tag: String, latency: Int?)] = [
+        ("Hong Kong 01", 58),
+        ("Hong Kong 02", 46),
+        ("Japan 01", 83),
+        ("Japan 02", 41),
+        ("Singapore 01", 92),
+        ("United States West", 138),
+        ("Germany 01", 176),
+        ("Taiwan 01", 52),
+        ("Automatic Route", nil)
+    ]
+
+    var body: some View {
+        ProfilePolicyWorkspaceView(
+            catalog: catalog,
+            unavailable: false,
+            isSelecting: false,
+            healthBySelector: [0: health],
+            testingSelectorID: nil,
+            lifecycle: TargetPreviewFixtures.lifecycle(engineState: .running),
+            select: { _, member in selectedMember = member },
+            probeLatency: { _, _ in },
+            reset: { selectedMember = "Japan 02" },
+            refresh: {},
+            openConfiguration: {}
+        )
+    }
+
+    private var catalog: PolicyCatalog {
+        PolicyCatalog(
+            formatVersion: 2,
+            profileID: UUID(uuidString: "AEB472B0-23E7-472E-86D2-68D4CD9402B1"),
+            profileRevision: 3,
+            sourceFingerprint: "preview-country-routing",
+            storedOverrideCount: selectedMember == "Japan 02" ? 0 : 1,
+            selectors: [
+                PolicyCatalogSelector(
+                    identity: 0,
+                    tag: "Proxy",
+                    status: .available,
+                    configuredDefault: "Japan 02",
+                    targetOverride: selectedMember == "Japan 02" ? nil : selectedMember,
+                    overrideValid: true,
+                    effectiveDesired: selectedMember,
+                    runningSelection: selectedMember,
+                    runtimeConvergence: .converged,
+                    restartRequired: false,
+                    members: nodes.enumerated().map { index, node in
+                        PolicyCatalogMember(identity: index, tag: node.tag, type: "vmess", status: .available)
+                    }
+                )
+            ]
+        )
+    }
+
+    private var health: [String: RuntimeProxyHealth] {
+        Dictionary(uniqueKeysWithValues: nodes.compactMap { node in
+            guard let latency = node.latency,
+                  let result = RuntimeProxyHealth.reachable(
+                    tag: node.tag,
+                    latencyMilliseconds: latency,
+                    observedAt: Date(timeIntervalSince1970: 1)
+                  ) else { return nil }
+            return (node.tag, result)
+        })
     }
 }
 
