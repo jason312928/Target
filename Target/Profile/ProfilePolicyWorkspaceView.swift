@@ -279,9 +279,13 @@ private struct SelectorDetail: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                currentRoute
-                runtimeSummary
-                destinations
+                if selector.members.isEmpty {
+                    emptySelectorState
+                } else {
+                    currentRoute
+                    runtimeSummary
+                    destinations
+                }
             }
             .frame(maxWidth: 900, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
@@ -292,6 +296,17 @@ private struct SelectorDetail: View {
                 pendingSelection = nil
             }
         }
+    }
+
+    private var emptySelectorState: some View {
+        ContentUnavailableView(
+            "policy.workspace.members.empty.title",
+            systemImage: "server.rack",
+            description: Text("policy.workspace.members.empty.description")
+        )
+        .frame(maxWidth: .infinity, minHeight: 280)
+        .padding(.vertical, 30)
+        .accessibilityIdentifier("policy.workspace.members.empty")
     }
 
     private var currentRoute: some View {
@@ -448,6 +463,11 @@ private struct SelectorDetail: View {
                     selectedMemberTag: selectedMemberTag,
                     choose: chooseCountry
                 )
+                CountryRouteGrid(
+                    routes: filteredCountryRoutes,
+                    selectedMemberTag: selectedMemberTag,
+                    choose: chooseCountry
+                )
                 if !filteredUnclassifiedMembers.isEmpty {
                     unclassifiedMembers
                 }
@@ -515,18 +535,25 @@ private struct CountryRouteMap: View {
         GeometryReader { proxy in
             ZStack {
                 FlatWorldArtwork()
-                ForEach(routes) { route in
+                ForEach(Array(routes.enumerated()), id: \.element.id) { index, route in
                     countryButton(route)
-                        .position(Self.point(for: route.country, in: proxy.size))
+                        .position(Self.point(for: route.country, index: index, routes: routes, in: proxy.size))
                 }
             }
         }
-        .frame(height: 330)
-        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .frame(height: 218)
+        .background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.primary.opacity(0.08))
+                .stroke(Color.primary.opacity(0.07))
+        }
+        .overlay(alignment: .topLeading) {
+            Label("policy.workspace.map.overview", systemImage: "map")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
         }
         .accessibilityIdentifier("policy.workspace.country-map")
     }
@@ -537,47 +564,27 @@ private struct CountryRouteMap: View {
         return Button {
             choose(route)
         } label: {
-            VStack(spacing: 4) {
-                ZStack(alignment: .topTrailing) {
-                    Circle()
-                        .fill(isSelected ? Color.accentColor : Color(nsColor: .windowBackgroundColor))
-                        .frame(width: isSelected ? 48 : 42, height: isSelected ? 48 : 42)
-                        .shadow(color: .black.opacity(0.18), radius: 5, y: 2)
-                    Text(route.country.flag)
-                        .font(.system(size: isSelected ? 23 : 20))
-                        .frame(width: isSelected ? 48 : 42, height: isSelected ? 48 : 42)
-                    Text("\(route.members.count)")
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .frame(minWidth: 17, minHeight: 17)
-                        .background(Color.accentColor, in: Circle())
-                        .offset(x: 5, y: -4)
-                }
-                if isSelected || isHovered {
-                    VStack(spacing: 1) {
-                        Text(route.country.displayName(localeIdentifier: locale.identifier))
-                            .font(.caption.weight(.semibold))
-                        if let latency = route.bestLatencyMilliseconds {
-                            Text("\(latency) ms")
-                                .font(.caption2.monospacedDigit())
-                                .foregroundStyle(latencyTint(latency))
-                        }
-                    }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .fixedSize()
-                }
+            ZStack {
+                Circle()
+                    .fill(isSelected ? Color.accentColor : Color(nsColor: .windowBackgroundColor))
+                    .frame(width: 30, height: 30)
+                    .shadow(color: .black.opacity(isHovered ? 0.16 : 0.08), radius: 3, y: 1)
+                Text(route.country.flag)
+                    .font(.system(size: 15))
+            }
+            .overlay {
+                Circle()
+                    .stroke(isSelected ? Color.accentColor : Color.primary.opacity(isHovered ? 0.22 : 0.08), lineWidth: isSelected ? 2 : 1)
+                    .frame(width: 36, height: 36)
             }
             .animation(.easeOut(duration: 0.15), value: isSelected)
-            .animation(.easeOut(duration: 0.15), value: isHovered)
         }
         .buttonStyle(.plain)
         .disabled(route.bestMember == nil)
         .onHover { hovering in
             hoveredCountryCode = hovering ? route.id : nil
         }
-        .help(route.country.displayName(localeIdentifier: locale.identifier))
+        .help("\(route.country.displayName(localeIdentifier: locale.identifier)) · \(route.members.count) \(String(localized: "policy.workspace.nodes"))")
         .accessibilityLabel(Text(verbatim: route.country.displayName(localeIdentifier: locale.identifier)))
         .accessibilityValue(countryAccessibilityValue(route, selected: isSelected))
         .accessibilityHint(Text("policy.workspace.country.choose.hint"))
@@ -596,21 +603,136 @@ private struct CountryRouteMap: View {
         return value
     }
 
+    private static func point(
+        for country: PolicyRouteCountry,
+        index: Int,
+        routes: [PolicyCountryRoute],
+        in size: CGSize
+    ) -> CGPoint {
+        let horizontalInset = min(size.width * 0.035, 24)
+        let verticalInset = min(size.height * 0.12, 28)
+        let usableWidth = max(size.width - horizontalInset * 2, 1)
+        let usableHeight = max(size.height - verticalInset * 2, 1)
+        let base = CGPoint(
+            x: horizontalInset + ((country.longitude + 180) / 360) * usableWidth,
+            y: verticalInset + ((90 - country.latitude) / 180) * usableHeight
+        )
+        let nearbyBefore = routes.prefix(index).filter { other in
+            let otherPoint = CGPoint(
+                x: horizontalInset + ((other.country.longitude + 180) / 360) * usableWidth,
+                y: verticalInset + ((90 - other.country.latitude) / 180) * usableHeight
+            )
+            return abs(otherPoint.x - base.x) < 42 && abs(otherPoint.y - base.y) < 28
+        }.count
+        let offsets: [CGSize] = [
+            .zero, CGSize(width: 24, height: -16), CGSize(width: -24, height: 16),
+            CGSize(width: 26, height: 18), CGSize(width: -26, height: -18),
+            CGSize(width: 0, height: 28)
+        ]
+        let offset = offsets[min(nearbyBefore, offsets.count - 1)]
+        return CGPoint(
+            x: min(max(base.x + offset.width, 22), size.width - 22),
+            y: min(max(base.y + offset.height, 25), size.height - 24)
+        )
+    }
+}
+
+private struct CountryRouteGrid: View {
+    let routes: [PolicyCountryRoute]
+    let selectedMemberTag: String?
+    let choose: (PolicyCountryRoute) -> Void
+    @Environment(\.locale) private var locale
+
+    var body: some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 220, maximum: 310), spacing: 10)],
+            alignment: .leading,
+            spacing: 10
+        ) {
+            ForEach(routes) { route in
+                CountryRouteCard(
+                    route: route,
+                    selectedMemberTag: selectedMemberTag,
+                    localeIdentifier: locale.identifier,
+                    choose: { choose(route) }
+                )
+            }
+        }
+        .accessibilityIdentifier("policy.workspace.country-list")
+    }
+}
+
+private struct CountryRouteCard: View {
+    let route: PolicyCountryRoute
+    let selectedMemberTag: String?
+    let localeIdentifier: String
+    let choose: () -> Void
+    @State private var isHovering = false
+
+    private var isSelected: Bool {
+        route.members.contains(where: { $0.tag == selectedMemberTag })
+    }
+
+    var body: some View {
+        Button(action: choose) {
+            HStack(spacing: 11) {
+                Text(route.country.flag)
+                    .font(.system(size: 22))
+                    .frame(width: 34, height: 34)
+                    .background(Color.accentColor.opacity(isSelected ? 0.16 : 0.08), in: Circle())
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text(route.country.displayName(localeIdentifier: localeIdentifier))
+                            .font(.callout.weight(isSelected ? .semibold : .medium))
+                            .lineLimit(1)
+                        if isSelected {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    HStack(spacing: 8) {
+                        Text("\(route.members.count) \(String(localized: "policy.workspace.nodes"))")
+                        if let latency = route.bestLatencyMilliseconds {
+                            Text("·")
+                                .foregroundStyle(.tertiary)
+                            Label("\(latency) ms", systemImage: "gauge.with.dots.needle.33percent")
+                                .foregroundStyle(latencyTint(latency))
+                        }
+                    }
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(isHovering || isSelected ? Color.accentColor : Color.secondary.opacity(0.35))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
+            .background(
+                isSelected ? Color.accentColor.opacity(0.08) : (isHovering ? Color.primary.opacity(0.045) : Color.clear),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isSelected ? Color.accentColor.opacity(0.55) : Color.primary.opacity(0.09), lineWidth: isSelected ? 1.5 : 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help(Text("policy.workspace.country.choose.hint"))
+        .accessibilityLabel(Text(verbatim: route.country.displayName(localeIdentifier: localeIdentifier)))
+        .accessibilityValue(Text("\(route.members.count) \(String(localized: "policy.workspace.nodes"))"))
+        .accessibilityHint(Text("policy.workspace.country.choose.hint"))
+        .accessibilityIdentifier("policy.workspace.country-card.\(route.id)")
+    }
+
     private func latencyTint(_ latency: Int) -> Color {
         if latency < 160 { return .green }
         if latency < 360 { return .orange }
         return .red
-    }
-
-    private static func point(for country: PolicyRouteCountry, in size: CGSize) -> CGPoint {
-        let horizontalInset = min(size.width * 0.035, 24)
-        let verticalInset = min(size.height * 0.09, 26)
-        let usableWidth = max(size.width - horizontalInset * 2, 1)
-        let usableHeight = max(size.height - verticalInset * 2, 1)
-        return CGPoint(
-            x: horizontalInset + ((country.longitude + 180) / 360) * usableWidth,
-            y: verticalInset + ((90 - country.latitude) / 180) * usableHeight
-        )
     }
 }
 
