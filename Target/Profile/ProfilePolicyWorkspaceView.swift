@@ -81,7 +81,7 @@ struct ProfilePolicyWorkspaceView: View {
     private var routeToolbar: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
-                selectorMenu
+                routeTitle
                 Spacer(minLength: 12)
                 searchField.frame(width: 220)
                 latencyButton
@@ -89,7 +89,7 @@ struct ProfilePolicyWorkspaceView: View {
             }
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 12) {
-                    selectorMenu
+                    routeTitle
                     Spacer(minLength: 8)
                     latencyButton
                     policyActionsMenu
@@ -100,8 +100,20 @@ struct ProfilePolicyWorkspaceView: View {
         .frame(maxWidth: ProfileWorkspaceLayout.contentMaxWidth)
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        .background(.bar)
+        .padding(.top, 4)
+        .padding(.bottom, 8)
+    }
+
+    private var routeTitle: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "globe.asia.australia.fill")
+                .foregroundStyle(Color.accentColor)
+            Text("policy.workspace.choose-country")
+                .font(.headline)
+            Text("\(participatingCountryRoutes?.count ?? selectedSelector?.countryRoutes.count ?? 0)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
     }
 
     private var searchField: some View {
@@ -147,61 +159,6 @@ struct ProfilePolicyWorkspaceView: View {
         .fixedSize()
         .accessibilityLabel(Text("policy.workspace.actions"))
         .accessibilityIdentifier("policy.workspace.actions")
-    }
-
-    @ViewBuilder
-    private var selectorMenu: some View {
-        if let selector = selectedSelector {
-            Group {
-                if presentation.selectors.count > 1 {
-                    Menu {
-                        ForEach(presentation.selectors) { selector in
-                            Button {
-                                selectedSelectorID = selector.id
-                            } label: {
-                                if selectedSelectorID == selector.id {
-                                    Label(selector.displayTag, systemImage: "checkmark")
-                                } else {
-                                    Text(selector.displayTag)
-                                }
-                            }
-                            .accessibilityIdentifier("policy.catalog.selector.\(selector.id)")
-                        }
-                    } label: {
-                        selectorLabel(selector, showsDisclosure: true)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                } else {
-                    selectorLabel(selector, showsDisclosure: false)
-                }
-            }
-            .accessibilityIdentifier("policy.workspace.selectors")
-            .accessibilityLabel(Text(verbatim: selector.displayTag))
-            .accessibilityValue(selector.accessibilityValue(isSelected: true))
-        }
-    }
-
-    private func selectorLabel(
-        _ selector: PolicySelectorPresentation,
-        showsDisclosure: Bool
-    ) -> some View {
-        HStack(spacing: 9) {
-            Image(systemName: "point.3.connected.trianglepath.dotted")
-                .foregroundStyle(Color.accentColor)
-            Text(selector.displayTag)
-                .font(.headline)
-                .lineLimit(1)
-            Text("\(selector.memberCount)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.tertiary)
-            if showsDisclosure {
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .contentShape(Rectangle())
     }
 
     private func latencyActionIsAvailable(for selector: PolicySelectorPresentation) -> Bool {
@@ -291,8 +248,9 @@ private struct SelectorDetail: View {
                 if selector.members.isEmpty {
                     emptySelectorState
                 } else {
-                    currentRoute
-                    runtimeSummary
+                    if selector.restartRequired || selector.runtime.state == .unavailable {
+                        runtimeSummary
+                    }
                     destinations
                 }
             }
@@ -323,69 +281,6 @@ private struct SelectorDetail: View {
         .frame(maxWidth: .infinity, minHeight: 280)
         .padding(.vertical, 30)
         .accessibilityIdentifier("policy.workspace.members.empty")
-    }
-
-    private var currentRoute: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                Circle()
-                    .fill(Color.accentColor.opacity(0.14))
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-            }
-            .frame(width: 38, height: 38)
-            VStack(alignment: .leading, spacing: 3) {
-                Text("policy.workspace.current-selection")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if let currentCountry {
-                    HStack(spacing: 7) {
-                        Text(currentCountry.flag)
-                        Text(currentCountry.displayName(localeIdentifier: locale.identifier))
-                    }
-                    .font(.title3.weight(.semibold))
-                    .lineLimit(1)
-                    .help(Text(verbatim: selectedMemberTag ?? currentCountry.englishName))
-                } else {
-                    Text(selectedMemberTag ?? "—")
-                        .font(.title3.weight(.semibold))
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: 12)
-            if isSelecting {
-                ProgressView()
-                    .controlSize(.small)
-                    .accessibilityLabel(Text("policy.catalog.selection.saving"))
-            } else if let statusKey = selector.statusKey {
-                Label(LocalizedStringKey(statusKey), systemImage: selector.statusSymbol)
-                    .font(.caption)
-                    .foregroundStyle(selector.statusLevel.tint)
-            } else {
-                Label(LocalizedStringKey(selector.runtime.titleKey), systemImage: selector.runtime.symbolName)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(selector.runtime.level.tint)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .background(Color.accentColor.opacity(0.055), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(alignment: .leading) {
-            Capsule()
-                .fill(Color.accentColor)
-                .frame(width: 3, height: 34)
-                .padding(.leading, 1)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier(
-            exposesSelectorAccessibilityIdentity
-                ? "policy.catalog.selector.\(selector.id)"
-                : "policy.workspace.selector-detail"
-        )
-        .accessibilityLabel(Text(verbatim: selector.displayTag))
-        .accessibilityValue(selector.accessibilityValue(isSelected: true))
-        .animation(accessibilityReduceMotion ? nil : .easeInOut(duration: 0.2), value: selectedMemberTag)
     }
 
     @ViewBuilder
@@ -430,14 +325,9 @@ private struct SelectorDetail: View {
         pendingSelection ?? selector.desiredSelection
     }
 
-    private var currentCountry: PolicyRouteCountry? {
-        guard let selectedMemberTag else { return nil }
-        let member = selector.members.first(where: { $0.tag == selectedMemberTag })
-        return PolicyRouteCountry.recognize(in: selectedMemberTag, endpoint: member?.endpoint)
-    }
-
     private var filteredCountryRoutes: [PolicyCountryRoute] {
-        selector.countryRoutes.filter { $0.matches(query: query) }
+        let routes = participatingCountryRoutes ?? selector.countryRoutes
+        return routes.filter { $0.matches(query: query) }
     }
 
     private var filteredMapCountryRoutes: [PolicyCountryRoute] {
@@ -456,17 +346,6 @@ private struct SelectorDetail: View {
 
     private var destinations: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(selector.countryRoutes.isEmpty ? "policy.workspace.choose-route" : "policy.workspace.choose-country")
-                        .font(.headline)
-                    (Text(selector.countryRoutes.isEmpty ? "policy.workspace.nodes" : "policy.workspace.countries")
-                        + Text(" · \(selector.countryRoutes.isEmpty ? filteredMembers.count : filteredMapCountryRoutes.count)"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
             if selector.members.isEmpty {
                 ContentUnavailableView(
                     "policy.workspace.members.empty.title",
@@ -508,7 +387,13 @@ private struct SelectorDetail: View {
             CountryRouteGrid(
                 routes: filteredCountryRoutes,
                 selectedMemberTag: selectedMemberTag,
-                choose: chooseCountry
+                choose: { route in
+                    if let chooseParticipatingCountry {
+                        chooseParticipatingCountry(route.id)
+                    } else {
+                        chooseCountry(route)
+                    }
+                }
             )
             .padding(.top, 6)
         } label: {

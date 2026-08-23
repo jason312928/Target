@@ -136,6 +136,7 @@ struct ProfileWorkspaceView: View {
                 requestDelete: { deleteTarget = profile.id },
                 requestExport: { model.requestExport() },
                 lifecycle: lifecycle,
+                participatingProfileCount: participatingProfileIDs.count,
                 participatingCountryRoutes: participatingRoutes,
                 chooseParticipatingCountry: { countryCode in
                     model.requestCountrySelection(
@@ -155,7 +156,8 @@ struct ProfileWorkspaceView: View {
     @ToolbarContentBuilder
     private var profileToolbar: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
-            profileMenu
+            Label("profile.smart-routing.title", systemImage: "location.north.circle.fill")
+                .font(.headline)
         }
         ToolbarItemGroup(placement: .primaryAction) {
             participationMenu
@@ -181,37 +183,6 @@ struct ProfileWorkspaceView: View {
         }
         .accessibilityLabel(Text("profile.actions.title"))
         .accessibilityIdentifier("profile.actions.menu")
-    }
-
-    private var profileMenu: some View {
-        Menu {
-            ForEach(model.profiles) { profile in
-                Button {
-                    model.requestSelection(profile.id)
-                } label: {
-                    if profile.id == model.selectedID {
-                        Label(profile.name, systemImage: "checkmark")
-                    } else {
-                        Text(profile.name)
-                    }
-                }
-                .accessibilityIdentifier("profile.row.\(profile.id.uuidString)")
-            }
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: "doc.text")
-                Text(model.selectedProfile?.name ?? String(localized: "profile.list.title"))
-                    .font(.headline)
-                    .lineLimit(1)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .disabled(model.profiles.isEmpty)
-        .accessibilityIdentifier("profile.selector")
     }
 
     private var participationMenu: some View {
@@ -342,6 +313,7 @@ private struct ProfileWorkspaceDetailView: View {
     let requestDelete: () -> Void
     let requestExport: () -> Void
     let lifecycle: BackendLifecycleModel?
+    let participatingProfileCount: Int
     let participatingCountryRoutes: [PolicyCountryRoute]
     let chooseParticipatingCountry: (String) -> Void
     @State private var section: ProfileWorkspaceSection = .proxies
@@ -353,13 +325,14 @@ private struct ProfileWorkspaceDetailView: View {
             ProfileSummaryHeader(
                 profile: profile,
                 model: model,
-                presentation: presentation,
                 showRename: showRename,
                 requestDelete: requestDelete,
                 requestExport: requestExport,
                 showOverview: { section = .overview },
                 showConfiguration: { section = .configuration },
-                lifecycle: lifecycle
+                lifecycle: lifecycle,
+                participatingProfileCount: participatingProfileCount,
+                countryCount: participatingCountryRoutes.count
             )
                 .frame(maxWidth: ProfileWorkspaceLayout.contentMaxWidth, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -373,7 +346,7 @@ private struct ProfileWorkspaceDetailView: View {
             sectionContent
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .navigationTitle("profile.list.title")
+        .navigationTitle("profile.smart-routing.title")
         .overlay(alignment: .top) {
             if model.isPreparingImport || model.isCommittingImport {
                 ProgressView(model.isCommittingImport ? "profile.import.committing" : "profile.import.preparing")
@@ -625,40 +598,40 @@ private struct ProfileConfigurationView: View {
 private struct ProfileSummaryHeader: View {
     let profile: Profile
     @Bindable var model: ProfileViewModel
-    let presentation: ProfileWorkspacePresentation
     let showRename: () -> Void
     let requestDelete: () -> Void
     let requestExport: () -> Void
     let showOverview: () -> Void
     let showConfiguration: () -> Void
     let lifecycle: BackendLifecycleModel?
+    let participatingProfileCount: Int
+    let countryCount: Int
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 14) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(profile.name)
+                    Text("profile.smart-routing.title")
                         .font(.title2.weight(.semibold))
                         .lineLimit(1)
                         .accessibilityIdentifier("profile.summary.name")
-                    HStack(spacing: 10) {
-                        Label(sourceKey, systemImage: sourceSymbol)
+                    HStack(spacing: 8) {
+                        Text(String(
+                            format: String(localized: "profile.smart-routing.summary.format"),
+                            participatingProfileCount,
+                            countryCount
+                        ))
+                        Text("·")
+                            .foregroundStyle(.tertiary)
+                        Label(profile.name, systemImage: "point.3.connected.trianglepath.dotted")
+                            .lineLimit(1)
+                            .help(profile.name)
                             .accessibilityIdentifier("profile.summary.source")
-                        Label {
-                            Text(profile.updatedAt, style: .relative)
-                        } icon: {
-                            Image(systemName: "clock")
-                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
-                Spacer(minLength: 8)
-                if let lifecycle {
-                    ProfileRuntimeControls(lifecycle: lifecycle)
-                }
-                ProfileStatusBadge(level: presentation.validationLevel, titleKey: presentation.validationTitleKey)
-                    .accessibilityIdentifier("profile.summary.validation")
+                Spacer(minLength: 12)
                 ProfileMoreActions(
                     profile: profile,
                     model: model,
@@ -669,17 +642,12 @@ private struct ProfileSummaryHeader: View {
                     showConfiguration: showConfiguration
                 )
             }
+            if let lifecycle {
+                ProfileRuntimeControls(lifecycle: lifecycle)
+            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("profile.workspace.summary")
-    }
-
-    private var sourceKey: LocalizedStringKey {
-        presentation.source == .remote ? "profile.source.remote" : "profile.source.local"
-    }
-
-    private var sourceSymbol: String {
-        presentation.source == .remote ? "link" : "doc.text"
     }
 }
 
@@ -691,25 +659,70 @@ private struct ProfileRuntimeControls: View {
     }
 
     var body: some View {
-        ControlGroup {
-            Button(action: performEngineAction) {
-                Image(systemName: engineSymbol)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                engineButton
+                systemProxyButton
+                Spacer(minLength: 0)
             }
-            .disabled(lifecycle.isBusy || !hasEngineAction)
-            .help(Text(engineActionKey))
-            .accessibilityLabel(Text(engineActionKey))
-            .accessibilityIdentifier("profile.engine-action")
-
-            Button(action: toggleSystemProxy) {
-                Image(systemName: systemProxyEnabled ? "network.badge.shield.half.filled" : "network")
-                    .foregroundStyle(systemProxyEnabled ? Color.green : Color.primary)
+            VStack(spacing: 10) {
+                engineButton
+                systemProxyButton
             }
-            .disabled(systemProxyEnabled ? !lifecycle.canDisableSystemProxy : !lifecycle.canEnableSystemProxy)
-            .help(Text(systemProxyEnabled ? "system-proxy.action.disable" : "system-proxy.action.enable"))
-            .accessibilityLabel(Text(systemProxyEnabled ? "system-proxy.action.disable" : "system-proxy.action.enable"))
-            .accessibilityIdentifier("profile.system-proxy-action")
         }
-        .controlSize(.small)
+    }
+
+    private var engineButton: some View {
+        Button(action: performEngineAction) {
+            HStack(spacing: 11) {
+                Image(systemName: engineSymbol)
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(engineActionKey)
+                        .font(.callout.weight(.semibold))
+                    Text(lifecycle.isEngineRunning ? "engine.status.running" : "engine.status.stopped")
+                        .font(.caption)
+                        .opacity(0.78)
+                }
+                Spacer(minLength: 10)
+            }
+            .frame(minWidth: 190, minHeight: 42, alignment: .leading)
+            .padding(.horizontal, 5)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .disabled(lifecycle.isBusy || !hasEngineAction)
+        .help(Text(engineActionKey))
+        .accessibilityIdentifier("profile.engine-action")
+    }
+
+    private var systemProxyButton: some View {
+        Button(action: toggleSystemProxy) {
+            HStack(spacing: 11) {
+                Image(systemName: systemProxyEnabled ? "network.badge.shield.half.filled" : "network")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("system-proxy.action.toggle")
+                        .font(.callout.weight(.semibold))
+                    Text(systemProxyEnabled ? "system-proxy.status.enabled" : "system-proxy.status.disabled")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 10)
+                Image(systemName: systemProxyEnabled ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(systemProxyEnabled ? Color.green : Color.secondary)
+            }
+            .frame(minWidth: 210, minHeight: 42, alignment: .leading)
+            .padding(.horizontal, 5)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .tint(systemProxyEnabled ? .green : .accentColor)
+        .disabled(systemProxyEnabled ? !lifecycle.canDisableSystemProxy : !lifecycle.canEnableSystemProxy)
+        .help(Text(systemProxyEnabled ? "system-proxy.action.disable" : "system-proxy.action.enable"))
+        .accessibilityIdentifier("profile.system-proxy-action")
     }
 
     private var hasEngineAction: Bool {
@@ -724,10 +737,10 @@ private struct ProfileRuntimeControls: View {
     }
 
     private var engineActionKey: LocalizedStringKey {
-        if lifecycle.canStop { return "backend.action.stop" }
+        if lifecycle.canStop { return "profile.connection.stop" }
         if lifecycle.canRestart { return "dashboard.action.restart" }
         if lifecycle.canInstallEngine { return "engine.action.install" }
-        return "backend.action.start"
+        return "profile.connection.start"
     }
 
     private func performEngineAction() {
