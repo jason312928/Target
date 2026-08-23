@@ -95,7 +95,7 @@ struct ProfilePolicyWorkspaceView: View {
                 searchField.frame(maxWidth: .infinity)
             }
         }
-        .frame(maxWidth: 900)
+        .frame(maxWidth: ProfileWorkspaceLayout.contentMaxWidth)
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -289,7 +289,7 @@ private struct SelectorDetail: View {
                     destinations
                 }
             }
-            .frame(maxWidth: 900, alignment: .leading)
+            .frame(maxWidth: ProfileWorkspaceLayout.contentMaxWidth, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(20)
         }
@@ -574,10 +574,6 @@ private struct CountryRouteMap: View {
         .frame(minHeight: 210, idealHeight: 244, maxHeight: 280)
         .background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.primary.opacity(0.07))
-        }
         .overlay(alignment: .topLeading) {
             Label("policy.workspace.map.overview", systemImage: "map")
                 .font(.caption.weight(.medium))
@@ -994,7 +990,6 @@ private struct FlatWorldArtwork: View {
 
     var body: some View {
         Canvas { context, size in
-            let mapBounds = FlatMapProjection.rect(in: size, focus: focus)
             let fillColor = Color.primary.opacity(0.045)
             let polygons = WorldMapGeometry.rings.isEmpty ? Self.fallbackContinents : WorldMapGeometry.rings
             for polygon in polygons {
@@ -1012,12 +1007,8 @@ private struct FlatWorldArtwork: View {
                 context.fill(path, with: .color(fillColor))
             }
 
-            // Keep the map as a quiet silhouette. Country borders and grid
-            // lines add visual noise without helping a country-level choice.
-            context.fill(
-                Path(roundedRect: mapBounds, cornerRadius: 10),
-                with: .color(Color.primary.opacity(0.012))
-            )
+            // Keep the map as a quiet silhouette. Country borders, frames, and
+            // grid lines add visual noise without helping a country-level choice.
         }
         .accessibilityHidden(true)
     }

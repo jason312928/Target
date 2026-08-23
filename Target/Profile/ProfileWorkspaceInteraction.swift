@@ -65,6 +65,7 @@ enum ProfileWorkspaceStatusLevel: Equatable {
 }
 
 enum ProfileWorkspaceLayout {
+    static let contentMaxWidth: CGFloat = 900
     static let minimumEditorHeight: CGFloat = 180
     static let preferredEditorHeight: CGFloat = 260
     static let sidebarMinimumWidth: CGFloat = 140

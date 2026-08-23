@@ -280,16 +280,14 @@ private struct ProfileWorkspaceDetailView: View {
                 showOverview: { section = .overview },
                 showConfiguration: { section = .configuration }
             )
-                .frame(maxWidth: 760, alignment: .leading)
+                .frame(maxWidth: ProfileWorkspaceLayout.contentMaxWidth, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.horizontal, 20)
                 .padding(.top, 16)
                 .padding(.bottom, 14)
 
-            Divider()
             if section != .proxies {
                 auxiliaryNavigation
-                Divider()
             }
             sectionContent
         }
@@ -322,7 +320,7 @@ private struct ProfileWorkspaceDetailView: View {
             Label(LocalizedStringKey(section.titleKey), systemImage: section.symbolName)
                 .font(.callout.weight(.semibold))
         }
-        .frame(maxWidth: 760)
+        .frame(maxWidth: ProfileWorkspaceLayout.contentMaxWidth)
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
@@ -412,7 +410,7 @@ private struct ProfileOverviewView: View {
                 }
                 policySummary
             }
-            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: ProfileWorkspaceLayout.contentMaxWidth, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(20)
         }
