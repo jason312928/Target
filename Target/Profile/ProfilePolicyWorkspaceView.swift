@@ -610,19 +610,9 @@ private struct CountryRouteMap: View {
         routes: [PolicyCountryRoute],
         in size: CGSize
     ) -> CGPoint {
-        let horizontalInset = min(size.width * 0.035, 24)
-        let verticalInset = min(size.height * 0.12, 28)
-        let usableWidth = max(size.width - horizontalInset * 2, 1)
-        let usableHeight = max(size.height - verticalInset * 2, 1)
-        let base = CGPoint(
-            x: horizontalInset + ((country.longitude + 180) / 360) * usableWidth,
-            y: verticalInset + ((90 - country.latitude) / 180) * usableHeight
-        )
+        let base = FlatMapProjection.point(for: country, in: size)
         let nearbyBefore = routes.prefix(index).filter { other in
-            let otherPoint = CGPoint(
-                x: horizontalInset + ((other.country.longitude + 180) / 360) * usableWidth,
-                y: verticalInset + ((90 - other.country.latitude) / 180) * usableHeight
-            )
+            let otherPoint = FlatMapProjection.point(for: other.country, in: size)
             return abs(otherPoint.x - base.x) < 42 && abs(otherPoint.y - base.y) < 28
         }.count
         let offsets: [CGSize] = [
@@ -631,9 +621,10 @@ private struct CountryRouteMap: View {
             CGSize(width: 0, height: 28)
         ]
         let offset = offsets[min(nearbyBefore, offsets.count - 1)]
+        let mapBounds = FlatMapProjection.rect(in: size)
         return CGPoint(
-            x: min(max(base.x + offset.width, 22), size.width - 22),
-            y: min(max(base.y + offset.height, 25), size.height - 24)
+            x: min(max(base.x + offset.width, mapBounds.minX + 22), mapBounds.maxX - 22),
+            y: min(max(base.y + offset.height, mapBounds.minY + 25), mapBounds.maxY - 24)
         )
     }
 }
@@ -742,6 +733,50 @@ private struct FlatMapCoordinate {
     let longitude: Double
 }
 
+private enum FlatMapProjection {
+    // Keep the map's natural 2:1 world ratio. Stretching it to the full
+    // workspace width made the countries look visibly flattened in Preview.
+    private static let worldAspectRatio = 2.0
+
+    static func rect(in size: CGSize) -> CGRect {
+        let horizontalPadding = min(size.width * 0.03, 22)
+        let verticalPadding = min(size.height * 0.12, 24)
+        let availableWidth = max(size.width - horizontalPadding * 2, 1)
+        let availableHeight = max(size.height - verticalPadding * 2, 1)
+        let availableAspectRatio = availableWidth / availableHeight
+        if availableAspectRatio > worldAspectRatio {
+            let height = availableHeight
+            let width = height * worldAspectRatio
+            return CGRect(
+                x: (size.width - width) / 2,
+                y: verticalPadding,
+                width: width,
+                height: height
+            )
+        }
+        let width = availableWidth
+        let height = width / worldAspectRatio
+        return CGRect(
+            x: horizontalPadding,
+            y: (size.height - height) / 2,
+            width: width,
+            height: height
+        )
+    }
+
+    static func point(for country: PolicyRouteCountry, in size: CGSize) -> CGPoint {
+        point(latitude: country.latitude, longitude: country.longitude, in: size)
+    }
+
+    static func point(latitude: Double, longitude: Double, in size: CGSize) -> CGPoint {
+        let bounds = rect(in: size)
+        return CGPoint(
+            x: bounds.minX + ((longitude + 180) / 360) * bounds.width,
+            y: bounds.minY + ((90 - latitude) / 180) * bounds.height
+        )
+    }
+}
+
 /// Loads country boundaries from world-atlas/Natural Earth once at runtime.
 /// The resource is bundled locally, so rendering never depends on a network map.
 private enum WorldMapGeometry {
@@ -846,36 +881,32 @@ private enum WorldMapGeometry {
 private struct FlatWorldArtwork: View {
     var body: some View {
         Canvas { context, size in
-            let gridColor = Color.primary.opacity(0.065)
-            var grid = Path()
-            for longitude in stride(from: -180.0, through: 180.0, by: 30.0) {
-                let x = ((longitude + 180) / 360) * size.width
-                grid.move(to: CGPoint(x: x, y: 0))
-                grid.addLine(to: CGPoint(x: x, y: size.height))
-            }
-            for latitude in stride(from: -60.0, through: 60.0, by: 30.0) {
-                let y = ((90 - latitude) / 180) * size.height
-                grid.move(to: CGPoint(x: 0, y: y))
-                grid.addLine(to: CGPoint(x: size.width, y: y))
-            }
-            context.stroke(grid, with: .color(gridColor), lineWidth: 0.6)
-
-            let fillColor = Color.primary.opacity(0.018)
-            let outlineColor = Color.primary.opacity(0.13)
+            let mapBounds = FlatMapProjection.rect(in: size)
+            let fillColor = Color.primary.opacity(0.028)
+            let outlineColor = Color.primary.opacity(0.12)
             let polygons = WorldMapGeometry.rings.isEmpty ? Self.fallbackContinents : WorldMapGeometry.rings
             for polygon in polygons {
                 var path = Path()
                 for (index, coordinate) in polygon.enumerated() {
-                    let point = CGPoint(
-                        x: ((coordinate.longitude + 180) / 360) * size.width,
-                        y: ((90 - coordinate.latitude) / 180) * size.height
+                    let point = FlatMapProjection.point(
+                        latitude: coordinate.latitude,
+                        longitude: coordinate.longitude,
+                        in: size
                     )
                     if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
                 }
                 path.closeSubpath()
                 context.fill(path, with: .color(fillColor))
-                context.stroke(path, with: .color(outlineColor), lineWidth: 0.75)
+                context.stroke(path, with: .color(outlineColor), lineWidth: 0.55)
             }
+
+            // A quiet frame keeps the artwork legible without implying a
+            // geographic coordinate system or adding chart-like decoration.
+            context.stroke(
+                Path(roundedRect: mapBounds, cornerRadius: 10),
+                with: .color(Color.primary.opacity(0.045)),
+                lineWidth: 0.8
+            )
         }
         .accessibilityHidden(true)
     }

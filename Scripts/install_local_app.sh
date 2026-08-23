@@ -141,6 +141,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer "$installer_xcodebuild"
     TARGET_SOURCE_COMMIT="$commit" \
     TARGET_SOURCE_COMMIT_SHORT="${commit:0:12}" \
     TARGET_BUILD_CHANNEL='Local' \
+    CONFIGURATION_BUILD_DIR="$derived_data_path/Build/Products/Release" \
     CURRENT_PROJECT_VERSION="$build_number" \
     build
 
