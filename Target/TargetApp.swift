@@ -78,7 +78,11 @@ struct TargetApp: App {
         .defaultSize(width: 980, height: 680)
 
         Settings {
-            SettingsView(preferences: preferences, updateController: updateController)
+            SettingsView(
+                lifecycle: lifecycle,
+                preferences: preferences,
+                updateController: updateController
+            )
         }
 
         .commands {

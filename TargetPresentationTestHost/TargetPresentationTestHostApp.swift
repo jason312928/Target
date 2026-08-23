@@ -46,8 +46,7 @@ struct TargetPresentationTestHostApp: App {
                 lifecycle: fixture.lifecycle,
                 profileModel: fixture.model,
                 preferences: preferences,
-                refreshOnTask: false,
-                restoredDestination: PresentationShellState.restoredDestination
+                refreshOnTask: false
             )
         } else {
             ProfileWorkspaceView(lifecycle: nil, model: fixture.model)
@@ -75,12 +74,6 @@ private enum PresentationShellState {
         guard ProcessInfo.processInfo.arguments.contains("--presentation-reset-shell-destination") else { return }
         UserDefaults.standard.removeObject(forKey: "app-shell.destination")
         UserDefaults.standard.removeObject(forKey: "app-shell.profiles-expanded")
-    }
-
-    static var restoredDestination: AppDestination? {
-        guard let index = ProcessInfo.processInfo.arguments.firstIndex(of: "--presentation-restored-destination"),
-              ProcessInfo.processInfo.arguments.indices.contains(index + 1) else { return nil }
-        return AppDestination(rawValue: ProcessInfo.processInfo.arguments[index + 1])
     }
 
 }

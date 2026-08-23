@@ -8,6 +8,8 @@ struct ProfilePolicyWorkspaceView: View {
     let healthBySelector: [Int: [String: RuntimeProxyHealth]]
     let testingSelectorID: Int?
     let lifecycle: BackendLifecycleModel?
+    var participatingCountryRoutes: [PolicyCountryRoute]? = nil
+    var chooseParticipatingCountry: ((String) -> Void)? = nil
     let select: (String, String) -> Void
     let probeLatency: (Int, String) -> Void
     let reset: () -> Void
@@ -222,6 +224,8 @@ struct ProfilePolicyWorkspaceView: View {
                 lifecycleBusy: lifecycle?.isBusy == true,
                 query: query,
                 exposesSelectorAccessibilityIdentity: presentation.selectors.count == 1,
+                participatingCountryRoutes: participatingCountryRoutes,
+                chooseParticipatingCountry: chooseParticipatingCountry,
                 select: select,
                 restart: { lifecycle?.restartWithCurrentProfile() }
             )
@@ -272,6 +276,8 @@ private struct SelectorDetail: View {
     let lifecycleBusy: Bool
     let query: String
     let exposesSelectorAccessibilityIdentity: Bool
+    let participatingCountryRoutes: [PolicyCountryRoute]?
+    let chooseParticipatingCountry: ((String) -> Void)?
     let select: (String, String) -> Void
     let restart: () -> Void
     @Environment(\.locale) private var locale
@@ -434,6 +440,11 @@ private struct SelectorDetail: View {
         selector.countryRoutes.filter { $0.matches(query: query) }
     }
 
+    private var filteredMapCountryRoutes: [PolicyCountryRoute] {
+        let routes = participatingCountryRoutes ?? selector.countryRoutes
+        return routes.filter { $0.matches(query: query) }
+    }
+
     private var filteredUnclassifiedMembers: [PolicyMemberPresentation] {
         let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return selector.unclassifiedMembers }
@@ -450,7 +461,7 @@ private struct SelectorDetail: View {
                     Text(selector.countryRoutes.isEmpty ? "policy.workspace.choose-route" : "policy.workspace.choose-country")
                         .font(.headline)
                     (Text(selector.countryRoutes.isEmpty ? "policy.workspace.nodes" : "policy.workspace.countries")
-                        + Text(" · \(selector.countryRoutes.isEmpty ? filteredMembers.count : filteredCountryRoutes.count)"))
+                        + Text(" · \(selector.countryRoutes.isEmpty ? filteredMembers.count : filteredMapCountryRoutes.count)"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -464,17 +475,25 @@ private struct SelectorDetail: View {
                 )
                 .frame(maxWidth: .infinity, minHeight: 180)
                 .accessibilityIdentifier("policy.workspace.members.empty")
-            } else if filteredCountryRoutes.isEmpty && filteredUnclassifiedMembers.isEmpty {
+            } else if filteredMapCountryRoutes.isEmpty && filteredUnclassifiedMembers.isEmpty {
                 ContentUnavailableView.search(text: query)
                     .frame(maxWidth: .infinity, minHeight: 180)
                     .accessibilityIdentifier("policy.workspace.members.empty")
-            } else if !filteredCountryRoutes.isEmpty {
+            } else if !filteredMapCountryRoutes.isEmpty {
                 CountryRouteMap(
-                    routes: filteredCountryRoutes,
+                    routes: filteredMapCountryRoutes,
                     selectedMemberTag: selectedMemberTag,
-                    choose: chooseCountry
+                    choose: { route in
+                        if let chooseParticipatingCountry {
+                            chooseParticipatingCountry(route.id)
+                        } else {
+                            chooseCountry(route)
+                        }
+                    }
                 )
-                countryRoutesSection
+                if !filteredCountryRoutes.isEmpty {
+                    countryRoutesSection
+                }
                 if !filteredUnclassifiedMembers.isEmpty {
                     unclassifiedMembers
                 }

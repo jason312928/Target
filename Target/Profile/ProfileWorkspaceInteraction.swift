@@ -79,6 +79,7 @@ enum ProfileWorkspaceLayout {
 /// carries data, not arbitrary deferred closures.
 enum ProfileWorkspaceOperation {
     case select(UUID)
+    case selectPolicy(profileID: UUID, selectorTag: String, outboundTag: String)
     case create(name: String)
     case duplicate(UUID)
     case delete(UUID)

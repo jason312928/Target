@@ -383,6 +383,66 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
     }
 
     @MainActor
+    func testParticipatingProfilesMergeTheirNodesByCountry() throws {
+        let store = try makeStore()
+        let first = try store.create(name: "YOUTU")
+        try store.save(
+            json: policyConfiguration(
+                configuredDefault: "United States 01",
+                members: ["United States 01"]
+            ),
+            for: first.id
+        )
+        let second = try store.create(name: "SSRDOG")
+        try store.save(
+            json: policyConfiguration(
+                configuredDefault: "United States 02",
+                members: ["United States 02", "Japan 01"]
+            ),
+            for: second.id
+        )
+        let model = ProfileViewModel(store: store)
+
+        let allRoutes = model.participatingCountryRoutes(profileIDs: [first.id, second.id])
+        XCTAssertEqual(allRoutes.first(where: { $0.id == "US" })?.members.count, 2)
+        XCTAssertEqual(allRoutes.first(where: { $0.id == "JP" })?.members.count, 1)
+
+        let firstOnly = model.participatingCountryRoutes(profileIDs: [first.id])
+        XCTAssertEqual(firstOnly.map(\.id), ["US"])
+    }
+
+    @MainActor
+    func testCountrySelectionSwitchesToParticipatingProfileAndPersistsItsNode() async throws {
+        let store = try makeStore()
+        let japan = try store.create(name: "YOUTU")
+        try store.save(
+            json: policyConfiguration(configuredDefault: "Japan 01", members: ["Japan 01"]),
+            for: japan.id
+        )
+        let unitedStates = try store.create(name: "SSRDOG")
+        try store.save(
+            json: policyConfiguration(
+                configuredDefault: "United States 01",
+                members: ["United States 01", "United States 02"]
+            ),
+            for: unitedStates.id
+        )
+        try store.select(japan.id)
+        let model = ProfileViewModel(store: store)
+
+        model.requestCountrySelection("US", participatingProfileIDs: [japan.id, unitedStates.id])
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while model.isSelectingPolicy, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        XCTAssertEqual(model.selectedID, unitedStates.id)
+        XCTAssertEqual(model.policyCatalog?.selectors.first?.effectiveDesired, "United States 01")
+        XCTAssertFalse(model.isSelectingPolicy)
+    }
+
+    @MainActor
     func testRuntimeChangeInvalidatesHealthAndRejectsInFlightLatencyResult() async throws {
         let store = try makeStore()
         let profile = try store.create(name: "Runtime")

@@ -348,6 +348,19 @@ final class ProfileStore {
         return try validVersion(for: profile, revision: profile.validRevision)
     }
 
+    /// Reads the allowlisted routing catalog for a specific Profile without
+    /// changing the active Profile or exposing its raw configuration.
+    func policyCatalog(for id: UUID) throws -> PolicyCatalog {
+        guard let profile = try profile(id) else { throw ProfileStoreError.profileNotFound }
+        let source = try versionData(for: id, revision: profile.validRevision)
+        return PolicyCatalogParser.parse(
+            source,
+            profileID: id,
+            profileRevision: profile.validRevision,
+            overrides: profile.policyOverrides
+        )
+    }
+
     /// Commits only Target-owned selector metadata. The expected Profile and
     /// revision are rechecked immediately before the encrypted manifest write so
     /// a concurrent Profile replacement cannot receive a stale override.

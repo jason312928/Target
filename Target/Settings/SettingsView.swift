@@ -1,11 +1,27 @@
 import SwiftUI
 
 struct SettingsView: View {
+    @Bindable var lifecycle: BackendLifecycleModel
     @Bindable var preferences: ApplicationPreferencesModel
     @Bindable var updateController: TargetUpdateController
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
+        TabView {
+            generalSettings
+                .tabItem { Label("settings.general", systemImage: "gearshape") }
+
+            AdvancedSettingsView(lifecycle: lifecycle)
+                .tabItem { Label("dashboard.section.advanced", systemImage: "wrench.and.screwdriver") }
+        }
+        .frame(width: 580, height: 520)
+        .task {
+            preferences.refreshLaunchAtLoginStatus()
+            updateController.refreshPreferences()
+        }
+    }
+
+    private var generalSettings: some View {
         Form {
             Section("settings.general") {
                 Toggle("settings.launch-at-login.title", isOn: launchAtLoginBinding)
@@ -61,11 +77,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460)
-        .task {
-            preferences.refreshLaunchAtLoginStatus()
-            updateController.refreshPreferences()
-        }
+        .scenePadding()
     }
 
     private var automaticChecksBinding: Binding<Bool> {
@@ -87,5 +99,78 @@ struct SettingsView: View {
         if !TargetMainWindowActivation.activateExistingWindow() {
             openWindow(id: TargetMainWindowActivation.windowID)
         }
+    }
+}
+
+private struct AdvancedSettingsView: View {
+    @Bindable var lifecycle: BackendLifecycleModel
+
+    private var presentation: DashboardPresentation {
+        DashboardPresentation(
+            status: lifecycle.status,
+            lifecycleState: lifecycle.lifecycleState,
+            serviceInstallation: lifecycle.serviceInstallation,
+            xpcState: lifecycle.xpcState,
+            error: lifecycle.error,
+            systemProxyStatus: lifecycle.systemProxyStatus,
+            isBusy: lifecycle.isBusy,
+            isHostSafeMode: lifecycle.isHostSafeMode,
+            isUTMValidation: lifecycle.isUTMValidationMode
+        )
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                TargetStatusRow(labelKey: "engine.label.installation", valueKey: presentation.engineInstallationKey, value: nil)
+                TargetStatusRow(labelKey: "engine.label.version", valueKey: nil, value: presentation.engineVersion)
+                TargetStatusRow(labelKey: "backend.label.engine", valueKey: presentation.engineStateKey, value: nil)
+                if let endpoint = presentation.endpoint {
+                    TargetStatusRow(labelKey: "dashboard.label.endpoint", valueKey: nil, value: endpoint)
+                }
+                if let revision = presentation.runningRevision {
+                    TargetStatusRow(labelKey: "dashboard.label.revision", valueKey: nil, value: String(revision))
+                }
+                Button("engine.action.validate") { lifecycle.validateConfiguration() }
+                    .disabled(lifecycle.isBusy || lifecycle.status.engineInstallation != .installed)
+            } header: {
+                Label("dashboard.section.runtime", systemImage: "bolt")
+            }
+
+            Section {
+                TargetStatusRow(labelKey: "backend.label.service", valueKey: presentation.serviceInstallationKey, value: nil)
+                TargetStatusRow(labelKey: "xpc.label.status", valueKey: presentation.xpcStateKey, value: nil)
+                HStack(spacing: 10) {
+                    Button("service.action.install") { lifecycle.installService() }
+                        .disabled(!lifecycle.canManageService || lifecycle.serviceInstallation == .enabled)
+                    Button("service.action.remove", role: .destructive) { lifecycle.removeService() }
+                        .disabled(!lifecycle.canManageService || lifecycle.serviceInstallation == .notRegistered)
+                }
+            } header: {
+                Label("dashboard.section.service", systemImage: "shield")
+            }
+
+            Section {
+                TargetStatusRow(labelKey: "system-proxy.label.status", valueKey: presentation.systemProxyStateKey, value: nil)
+                TargetStatusRow(labelKey: "system-proxy.label.engine", valueKey: presentation.systemProxyEngineKey, value: nil)
+                HStack(spacing: 10) {
+                    Button("system-proxy.action.refresh") { lifecycle.refreshSystemProxyStatus() }
+                        .disabled(lifecycle.isBusy)
+                    Button("system-proxy.action.recover") { lifecycle.recoverSystemProxy() }
+                        .disabled(!lifecycle.canRecoverSystemProxy)
+                }
+            } header: {
+                Label("dashboard.section.network", systemImage: "network")
+            }
+
+            if presentation.isHostSafeMode {
+                Section {
+                    TargetNotice(level: .warning, messageKey: presentation.hostSafetyNoticeKey)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .scenePadding()
+        .task { lifecycle.refresh() }
     }
 }

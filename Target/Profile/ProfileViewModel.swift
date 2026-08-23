@@ -79,6 +79,75 @@ final class ProfileViewModel {
         request(.select(id))
     }
 
+    func participatingCountryRoutes(profileIDs: Set<UUID>) -> [PolicyCountryRoute] {
+        let eligible = profiles
+            .filter { profileIDs.contains($0.id) && $0.validation.status != .invalid }
+            .sorted {
+                if $0.name != $1.name { return $0.name < $1.name }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+        var grouped: [PolicyRouteCountry: [PolicyMemberPresentation]] = [:]
+        var seenMembers = Set<String>()
+
+        for profile in eligible {
+            guard let catalog = try? store.policyCatalog(for: profile.id) else { continue }
+            for selector in catalog.selectors where selector.isMutable {
+                let health = profile.id == selectedID ? policyHealthBySelector[selector.id] ?? [:] : [:]
+                for route in PolicySelectorPresentation(selector, health: health).countryRoutes {
+                    let uniqueMembers = route.members.filter { member in
+                        seenMembers.insert("\(profile.id.uuidString)|\(member.tag)|\(member.endpoint ?? "")").inserted
+                    }
+                    grouped[route.country, default: []].append(contentsOf: uniqueMembers)
+                }
+            }
+        }
+
+        return grouped.map { PolicyCountryRoute(country: $0.key, members: $0.value) }
+            .sorted { $0.country.englishName < $1.country.englishName }
+    }
+
+    func requestCountrySelection(_ countryCode: String, participatingProfileIDs: Set<UUID>) {
+        let eligible = profiles
+            .filter { participatingProfileIDs.contains($0.id) && $0.validation.status != .invalid }
+            .sorted {
+                if $0.name != $1.name { return $0.name < $1.name }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+        var candidates: [(profile: Profile, selector: PolicyCatalogSelector, member: PolicyCatalogMember, latency: Int?)] = []
+
+        for profile in eligible {
+            guard let catalog = try? store.policyCatalog(for: profile.id) else { continue }
+            for selector in catalog.selectors where selector.isMutable {
+                let health = profile.id == selectedID ? policyHealthBySelector[selector.id] ?? [:] : [:]
+                for member in selector.members where member.status == .available {
+                    guard PolicyRouteCountry.recognize(in: member.tag, endpoint: member.endpoint)?.code == countryCode,
+                          selector.tag != nil else { continue }
+                    candidates.append((profile, selector, member, health[member.tag]?.latencyMilliseconds))
+                }
+            }
+        }
+
+        let chosen = candidates.min { lhs, rhs in
+            switch (lhs.latency, rhs.latency) {
+            case let (left?, right?) where left != right: return left < right
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default:
+                let leftCurrent = lhs.profile.id == selectedID
+                let rightCurrent = rhs.profile.id == selectedID
+                if leftCurrent != rightCurrent { return leftCurrent }
+                if lhs.profile.name != rhs.profile.name { return lhs.profile.name < rhs.profile.name }
+                return lhs.member.tag < rhs.member.tag
+            }
+        }
+        guard let chosen, let selectorTag = chosen.selector.tag else { return }
+        request(.selectPolicy(
+            profileID: chosen.profile.id,
+            selectorTag: selectorTag,
+            outboundTag: chosen.member.tag
+        ))
+    }
+
     func requestCreate(name: String, subscriptionURL: URL? = nil) {
         if let subscriptionURL { prepareSubscription(name: name, url: subscriptionURL) }
         else { request(.create(name: name)) }
@@ -577,6 +646,17 @@ final class ProfileViewModel {
                 cancelPreparedImport()
                 loadSelectedText()
                 markReadinessChanged()
+            case .selectPolicy(let profileID, let selectorTag, let outboundTag):
+                if selectedID != profileID {
+                    cancelSubscriptionOperation(clearCandidate: true)
+                    subscriptionFailureDiagnostic = nil
+                    try store.select(profileID)
+                    selectedID = profileID
+                    cancelPreparedImport()
+                    loadSelectedText()
+                    markReadinessChanged()
+                }
+                selectPolicy(selectorTag: selectorTag, outboundTag: outboundTag)
             case .create(let name):
                 subscriptionFailureDiagnostic = nil
                 let profile = try store.create(name: name)

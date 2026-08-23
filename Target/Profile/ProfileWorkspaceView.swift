@@ -7,34 +7,17 @@ struct ProfileWorkspaceView: View {
     @Bindable var model: ProfileViewModel
     @State private var sheet: ProfileSheet?
     @State private var deleteTarget: UUID?
-    private let showsProfileList: Bool
+    @State private var participatingRoutes: [PolicyCountryRoute] = []
+    @AppStorage("profiles.smart-participants") private var participationRawValue = "*"
 
-    init(lifecycle: BackendLifecycleModel?, model: ProfileViewModel, showsProfileList: Bool = true) {
+    init(lifecycle: BackendLifecycleModel?, model: ProfileViewModel) {
         self.lifecycle = lifecycle
         self.model = model
-        self.showsProfileList = showsProfileList
     }
 
     var body: some View {
-        Group {
-            if showsProfileList {
-                HStack(spacing: 0) {
-                    profileList
-                        .frame(
-                            minWidth: ProfileWorkspaceLayout.sidebarMinimumWidth,
-                            idealWidth: ProfileWorkspaceLayout.sidebarIdealWidth,
-                            maxWidth: ProfileWorkspaceLayout.sidebarMaximumWidth,
-                            maxHeight: .infinity
-                        )
-                    Divider()
-                    workspaceDetail
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
-            } else {
-                workspaceDetail
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            }
-        }
+        workspaceDetail
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .toolbar { profileToolbar }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .sheet(item: $sheet) { sheet in
@@ -79,8 +62,21 @@ struct ProfileWorkspaceView: View {
                 }
             }
         }
-        .task { model.refreshPolicyState() }
-        .onChange(of: model.readinessChangeGeneration) { _, _ in lifecycle?.refresh() }
+        .task {
+            model.refreshPolicyState()
+            normalizeParticipation()
+            refreshParticipatingRoutes()
+        }
+        .onChange(of: participationRawValue) { _, _ in refreshParticipatingRoutes() }
+        .onChange(of: model.profiles.map { "\($0.id.uuidString):\($0.validRevision)" }) { _, _ in
+            normalizeParticipation()
+            refreshParticipatingRoutes()
+        }
+        .onChange(of: model.policyHealthBySelector) { _, _ in refreshParticipatingRoutes() }
+        .onChange(of: model.readinessChangeGeneration) { _, _ in
+            lifecycle?.refresh()
+            refreshParticipatingRoutes()
+        }
         .onChange(of: lifecycle?.runtimeChangeGeneration) { _, _ in
             model.refreshPolicyState()
         }
@@ -139,7 +135,14 @@ struct ProfileWorkspaceView: View {
                 showRename: { sheet = .rename(profile.id, profile.name) },
                 requestDelete: { deleteTarget = profile.id },
                 requestExport: { model.requestExport() },
-                lifecycle: lifecycle
+                lifecycle: lifecycle,
+                participatingCountryRoutes: participatingRoutes,
+                chooseParticipatingCountry: { countryCode in
+                    model.requestCountrySelection(
+                        countryCode,
+                        participatingProfileIDs: participatingProfileIDs
+                    )
+                }
             )
         } else {
             ProfileWorkspaceEmptyState(
@@ -149,47 +152,122 @@ struct ProfileWorkspaceView: View {
         }
     }
 
-    private var profileList: some View {
-        List(selection: Binding(get: { model.selectedID }, set: model.requestSelection)) {
-            Section {
-                ForEach(model.profiles) { profile in
-                    ProfileRow(profile: profile)
-                        .accessibilityElement(children: .combine)
-                        .accessibilityIdentifier("profile.row.\(profile.id.uuidString)")
-                        .tag(profile.id)
-                        .contextMenu {
-                            Button("profile.action.duplicate") { model.requestDuplicate(profile.id) }
-                            Button("profile.action.rename") { sheet = .rename(profile.id, profile.name) }
-                            Divider()
-                            Button("profile.action.delete", role: .destructive) { deleteTarget = profile.id }
-                        }
-                }
-            } header: {
-                Text("profile.list.section")
-            }
-        }
-        .listStyle(.sidebar)
-        .navigationTitle("profile.list.title")
-        .accessibilityIdentifier("profile.list")
-    }
-
     @ToolbarContentBuilder
     private var profileToolbar: some ToolbarContent {
-        ToolbarItemGroup {
+        ToolbarItem(placement: .navigation) {
+            profileMenu
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            participationMenu
             Button("profile.action.create", systemImage: "plus") { sheet = .create }
                 .accessibilityIdentifier("profile.action.create")
+            profileManagementMenu
+        }
+    }
+
+    private var profileManagementMenu: some View {
+        Menu {
             Button("profile.subscription.add", systemImage: "link.badge.plus") { sheet = .subscription }
                 .disabled(model.isUpdatingSubscription)
                 .accessibilityIdentifier("profile.action.add-subscription")
             Button("profile.action.import", systemImage: "square.and.arrow.down") { presentImportPanel() }
                 .disabled(model.isPreparingImport || model.isCommittingImport)
                 .accessibilityIdentifier("profile.action.import")
-                .accessibilityLabel(Text("profile.accessibility.import"))
             Button("profile.action.export", systemImage: "square.and.arrow.up") { model.requestExport() }
                 .disabled(!model.canExport)
                 .accessibilityIdentifier("profile.action.export")
-                .accessibilityLabel(Text("profile.accessibility.export"))
+        } label: {
+            Image(systemName: "ellipsis.circle")
         }
+        .accessibilityLabel(Text("profile.actions.title"))
+        .accessibilityIdentifier("profile.actions.menu")
+    }
+
+    private var profileMenu: some View {
+        Menu {
+            ForEach(model.profiles) { profile in
+                Button {
+                    model.requestSelection(profile.id)
+                } label: {
+                    if profile.id == model.selectedID {
+                        Label(profile.name, systemImage: "checkmark")
+                    } else {
+                        Text(profile.name)
+                    }
+                }
+                .accessibilityIdentifier("profile.row.\(profile.id.uuidString)")
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "doc.text")
+                Text(model.selectedProfile?.name ?? String(localized: "profile.list.title"))
+                    .font(.headline)
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(model.profiles.isEmpty)
+        .accessibilityIdentifier("profile.selector")
+    }
+
+    private var participationMenu: some View {
+        Menu {
+            ForEach(eligibleProfiles) { profile in
+                Toggle(profile.name, isOn: participationBinding(for: profile.id))
+            }
+            if !eligibleProfiles.isEmpty {
+                Divider()
+                Button("profile.participation.all") { participationRawValue = "*" }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "scope")
+                Text("profile.participation.short")
+                Text("\(participatingProfileIDs.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .help(Text("profile.participation.help"))
+        .accessibilityLabel(Text("profile.participation.title"))
+        .accessibilityIdentifier("profile.participation.menu")
+    }
+
+    private var eligibleProfiles: [Profile] {
+        model.profiles.filter { $0.validation.status != .invalid }
+    }
+
+    private var participatingProfileIDs: Set<UUID> {
+        if participationRawValue == "*" { return Set(eligibleProfiles.map(\.id)) }
+        return Set(participationRawValue.split(separator: ",").compactMap { UUID(uuidString: String($0)) })
+    }
+
+    private func participationBinding(for id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { participatingProfileIDs.contains(id) },
+            set: { participates in
+                var ids = participatingProfileIDs
+                if participates { ids.insert(id) } else { ids.remove(id) }
+                guard !ids.isEmpty else { return }
+                participationRawValue = ids.map(\.uuidString).sorted().joined(separator: ",")
+            }
+        )
+    }
+
+    private func normalizeParticipation() {
+        guard !eligibleProfiles.isEmpty else { return }
+        let eligibleIDs = Set(eligibleProfiles.map(\.id))
+        guard participationRawValue != "*",
+              participatingProfileIDs.intersection(eligibleIDs).isEmpty else { return }
+        participationRawValue = "*"
+    }
+
+    private func refreshParticipatingRoutes() {
+        participatingRoutes = model.participatingCountryRoutes(profileIDs: participatingProfileIDs)
     }
 
     private func presentImportPanel() {
@@ -264,6 +342,8 @@ private struct ProfileWorkspaceDetailView: View {
     let requestDelete: () -> Void
     let requestExport: () -> Void
     let lifecycle: BackendLifecycleModel?
+    let participatingCountryRoutes: [PolicyCountryRoute]
+    let chooseParticipatingCountry: (String) -> Void
     @State private var section: ProfileWorkspaceSection = .proxies
 
     private var presentation: ProfileWorkspacePresentation { ProfileWorkspacePresentation(profile: profile) }
@@ -278,7 +358,8 @@ private struct ProfileWorkspaceDetailView: View {
                 requestDelete: requestDelete,
                 requestExport: requestExport,
                 showOverview: { section = .overview },
-                showConfiguration: { section = .configuration }
+                showConfiguration: { section = .configuration },
+                lifecycle: lifecycle
             )
                 .frame(maxWidth: ProfileWorkspaceLayout.contentMaxWidth, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -344,6 +425,8 @@ private struct ProfileWorkspaceDetailView: View {
                 healthBySelector: model.policyHealthBySelector,
                 testingSelectorID: model.testingPolicySelectorID,
                 lifecycle: lifecycle,
+                participatingCountryRoutes: participatingCountryRoutes,
+                chooseParticipatingCountry: chooseParticipatingCountry,
                 select: model.selectPolicy,
                 probeLatency: model.probePolicyLatency,
                 reset: model.resetPolicy,
@@ -548,6 +631,7 @@ private struct ProfileSummaryHeader: View {
     let requestExport: () -> Void
     let showOverview: () -> Void
     let showConfiguration: () -> Void
+    let lifecycle: BackendLifecycleModel?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -570,6 +654,9 @@ private struct ProfileSummaryHeader: View {
                     .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
+                if let lifecycle {
+                    ProfileRuntimeControls(lifecycle: lifecycle)
+                }
                 ProfileStatusBadge(level: presentation.validationLevel, titleKey: presentation.validationTitleKey)
                     .accessibilityIdentifier("profile.summary.validation")
                 ProfileMoreActions(
@@ -593,6 +680,66 @@ private struct ProfileSummaryHeader: View {
 
     private var sourceSymbol: String {
         presentation.source == .remote ? "link" : "doc.text"
+    }
+}
+
+private struct ProfileRuntimeControls: View {
+    let lifecycle: BackendLifecycleModel
+
+    private var systemProxyEnabled: Bool {
+        [.enabling, .enabled].contains(lifecycle.systemProxyStatus.state)
+    }
+
+    var body: some View {
+        ControlGroup {
+            Button(action: performEngineAction) {
+                Image(systemName: engineSymbol)
+            }
+            .disabled(lifecycle.isBusy || !hasEngineAction)
+            .help(Text(engineActionKey))
+            .accessibilityLabel(Text(engineActionKey))
+            .accessibilityIdentifier("profile.engine-action")
+
+            Button(action: toggleSystemProxy) {
+                Image(systemName: systemProxyEnabled ? "network.badge.shield.half.filled" : "network")
+                    .foregroundStyle(systemProxyEnabled ? Color.green : Color.primary)
+            }
+            .disabled(systemProxyEnabled ? !lifecycle.canDisableSystemProxy : !lifecycle.canEnableSystemProxy)
+            .help(Text(systemProxyEnabled ? "system-proxy.action.disable" : "system-proxy.action.enable"))
+            .accessibilityLabel(Text(systemProxyEnabled ? "system-proxy.action.disable" : "system-proxy.action.enable"))
+            .accessibilityIdentifier("profile.system-proxy-action")
+        }
+        .controlSize(.small)
+    }
+
+    private var hasEngineAction: Bool {
+        lifecycle.canStart || lifecycle.canStop || lifecycle.canRestart || lifecycle.canInstallEngine
+    }
+
+    private var engineSymbol: String {
+        if lifecycle.canStop { return "stop.fill" }
+        if lifecycle.canRestart { return "arrow.clockwise" }
+        if lifecycle.canInstallEngine { return "arrow.down.circle" }
+        return "play.fill"
+    }
+
+    private var engineActionKey: LocalizedStringKey {
+        if lifecycle.canStop { return "backend.action.stop" }
+        if lifecycle.canRestart { return "dashboard.action.restart" }
+        if lifecycle.canInstallEngine { return "engine.action.install" }
+        return "backend.action.start"
+    }
+
+    private func performEngineAction() {
+        if lifecycle.canStop { lifecycle.stop() }
+        else if lifecycle.canRestart { lifecycle.restartWithCurrentProfile() }
+        else if lifecycle.canStart { lifecycle.start() }
+        else if lifecycle.canInstallEngine { lifecycle.installEngine() }
+    }
+
+    private func toggleSystemProxy() {
+        if systemProxyEnabled { lifecycle.disableSystemProxy() }
+        else { lifecycle.enableSystemProxy() }
     }
 }
 

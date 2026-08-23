@@ -1,31 +1,19 @@
 import SwiftUI
 
-/// Compatibility entry point for the existing app shell.
+/// Compatibility entry point for the single Profiles workspace.
 struct ContentView: View {
     @Bindable var lifecycle: BackendLifecycleModel
+    @State private var model = ProfileViewModel()
 
     var body: some View {
-        DashboardView(lifecycle: lifecycle)
+        ProfileWorkspaceView(lifecycle: lifecycle, model: model)
     }
-}
-
-#Preview("Dashboard - Disconnected") {
-    DashboardView(lifecycle: TargetPreviewFixtures.lifecycle(engineState: .stopped))
-        .environment(\.locale, .init(identifier: "zh-Hans"))
-        .frame(width: 820, height: 620)
-}
-
-#Preview("Dashboard - Running") {
-    DashboardView(lifecycle: TargetPreviewFixtures.lifecycle(engineState: .running))
-        .environment(\.locale, .init(identifier: "zh-Hans"))
-        .frame(width: 820, height: 620)
 }
 
 #Preview("Profiles - Single Node") {
     ProfileWorkspaceView(
         lifecycle: nil,
-        model: TargetPreviewFixtures.profileModel(.singleNode),
-        showsProfileList: true
+        model: TargetPreviewFixtures.profileModel(.singleNode)
     )
     .environment(\.locale, .init(identifier: "zh-Hans"))
     .frame(width: 980, height: 680)
@@ -34,8 +22,7 @@ struct ContentView: View {
 #Preview("Profiles - 36 Nodes") {
     ProfileWorkspaceView(
         lifecycle: nil,
-        model: TargetPreviewFixtures.profileModel(.manyNodes),
-        showsProfileList: true
+        model: TargetPreviewFixtures.profileModel(.manyNodes)
     )
     .environment(\.locale, .init(identifier: "zh-Hans"))
     .frame(width: 1180, height: 760)
@@ -44,8 +31,7 @@ struct ContentView: View {
 #Preview("Profiles - Multiple Groups") {
     ProfileWorkspaceView(
         lifecycle: TargetPreviewFixtures.lifecycle(engineState: .running),
-        model: TargetPreviewFixtures.profileModel(.multipleGroups),
-        showsProfileList: true
+        model: TargetPreviewFixtures.profileModel(.multipleGroups)
     )
     .environment(\.locale, .init(identifier: "zh-Hans"))
     .frame(width: 1180, height: 760)
@@ -60,8 +46,7 @@ struct ContentView: View {
 #Preview("Profiles - Narrow Window") {
     ProfileWorkspaceView(
         lifecycle: nil,
-        model: TargetPreviewFixtures.profileModel(.manyNodes),
-        showsProfileList: true
+        model: TargetPreviewFixtures.profileModel(.manyNodes)
     )
     .environment(\.locale, .init(identifier: "zh-Hans"))
     .frame(width: 740, height: 620)
@@ -70,20 +55,18 @@ struct ContentView: View {
 #Preview("Profiles - Empty") {
     ProfileWorkspaceView(
         lifecycle: nil,
-        model: TargetPreviewFixtures.profileModel(.empty),
-        showsProfileList: true
+        model: TargetPreviewFixtures.profileModel(.empty)
     )
     .environment(\.locale, .init(identifier: "zh-Hans"))
     .frame(width: 980, height: 680)
 }
 
-#Preview("Full App Shell") {
+#Preview("Profiles - Full Window") {
     AppShellView(
         lifecycle: TargetPreviewFixtures.lifecycle(engineState: .running),
         profileModel: TargetPreviewFixtures.profileModel(.severalProfiles),
         preferences: TargetPreviewFixtures.preferences(),
-        refreshOnTask: false,
-        restoredDestination: .dashboard
+        refreshOnTask: false
     )
     .environment(\.locale, .init(identifier: "zh-Hans"))
     .frame(width: 980, height: 680)

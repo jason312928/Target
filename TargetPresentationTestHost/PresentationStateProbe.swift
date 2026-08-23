@@ -44,6 +44,7 @@ struct PresentationStateProbe: View {
         switch fixture.model.pendingOperation {
         case .none: "none"
         case .select(let id): id == fixture.second.id ? "select-second" : "select"
+        case .selectPolicy: "select-policy"
         case .create: "create"
         case .duplicate: "duplicate"
         case .delete: "delete"
