@@ -562,17 +562,42 @@ private struct CountryRouteMap: View {
     var body: some View {
         GeometryReader { proxy in
             let focus = FlatMapFocus.world
-            let positions = Self.markerPositions(for: routes, in: proxy.size, focus: focus)
+            let placements = Self.markerPlacements(
+                for: routes,
+                selectedMemberTag: selectedMemberTag,
+                in: proxy.size,
+                focus: focus
+            )
             ZStack {
                 FlatWorldArtwork(focus: focus)
+                markerConnectors(placements)
                 ForEach(routes) { route in
                     countryButton(route)
-                        .position(positions[route.id] ?? Self.point(for: route.country, in: proxy.size, focus: focus))
+                        .position(placements[route.id]?.marker ?? Self.point(for: route.country, in: proxy.size, focus: focus))
                 }
             }
         }
-        .frame(minHeight: 210, idealHeight: 244, maxHeight: 280)
+        .frame(maxWidth: 860)
+        .frame(height: 360)
+        .frame(maxWidth: .infinity, alignment: .center)
         .accessibilityIdentifier("policy.workspace.country-map")
+    }
+
+    private func markerConnectors(_ placements: [String: MapMarkerPlacement]) -> some View {
+        Canvas { context, _ in
+            for placement in placements.values where placement.isDisplaced {
+                var path = Path()
+                path.move(to: placement.anchor)
+                path.addLine(to: placement.marker)
+                context.stroke(path, with: .color(Color.primary.opacity(0.13)), lineWidth: 0.8)
+                context.fill(
+                    Path(ellipseIn: CGRect(x: placement.anchor.x - 1.5, y: placement.anchor.y - 1.5, width: 3, height: 3)),
+                    with: .color(Color.primary.opacity(0.24))
+                )
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private func countryButton(_ route: PolicyCountryRoute) -> some View {
@@ -584,15 +609,16 @@ private struct CountryRouteMap: View {
             ZStack {
                 Circle()
                     .fill(isSelected ? Color.accentColor : Color(nsColor: .windowBackgroundColor))
-                    .frame(width: 30, height: 30)
+                    .frame(width: isSelected ? 28 : 24, height: isSelected ? 28 : 24)
                     .shadow(color: .black.opacity(isHovered ? 0.16 : 0.08), radius: 3, y: 1)
                 Text(route.country.flag)
-                    .font(.system(size: 15))
+                    .font(.system(size: isSelected ? 14 : 12))
             }
+            .frame(width: 34, height: 34)
             .overlay {
                 Circle()
                     .stroke(isSelected ? Color.accentColor : Color.primary.opacity(isHovered ? 0.22 : 0.08), lineWidth: isSelected ? 2 : 1)
-                    .frame(width: 36, height: 36)
+                    .frame(width: isSelected ? 34 : 28, height: isSelected ? 34 : 28)
             }
             .animation(.easeOut(duration: 0.15), value: isSelected)
         }
@@ -624,43 +650,58 @@ private struct CountryRouteMap: View {
         FlatMapProjection.point(for: country, in: size, focus: focus)
     }
 
-    private static func markerPositions(
+    private static func markerPlacements(
         for routes: [PolicyCountryRoute],
+        selectedMemberTag: String?,
         in size: CGSize,
         focus: FlatMapFocus
-    ) -> [String: CGPoint] {
+    ) -> [String: MapMarkerPlacement] {
         var placed: [CGPoint] = []
-        var positions: [String: CGPoint] = [:]
+        var placements: [String: MapMarkerPlacement] = [:]
         let offsets: [CGSize] = [
             .zero,
-            CGSize(width: 38, height: -28), CGSize(width: -38, height: -28),
-            CGSize(width: 38, height: 28), CGSize(width: -38, height: 28),
-            CGSize(width: 0, height: -48), CGSize(width: 0, height: 48),
-            CGSize(width: 72, height: -22), CGSize(width: -72, height: -22),
-            CGSize(width: 72, height: 22), CGSize(width: -72, height: 22),
-            CGSize(width: 42, height: -68), CGSize(width: -42, height: -68),
-            CGSize(width: 42, height: 68), CGSize(width: -42, height: 68)
+            CGSize(width: 30, height: 0), CGSize(width: -30, height: 0),
+            CGSize(width: 22, height: -24), CGSize(width: -22, height: -24),
+            CGSize(width: 22, height: 24), CGSize(width: -22, height: 24),
+            CGSize(width: 0, height: -32), CGSize(width: 0, height: 32),
+            CGSize(width: 44, height: -16), CGSize(width: -44, height: -16),
+            CGSize(width: 44, height: 16), CGSize(width: -44, height: 16)
         ]
         let mapBounds = FlatMapProjection.rect(in: size)
-        for route in routes {
+        let orderedRoutes = routes.sorted { lhs, rhs in
+            let lhsSelected = lhs.members.contains(where: { $0.tag == selectedMemberTag })
+            let rhsSelected = rhs.members.contains(where: { $0.tag == selectedMemberTag })
+            if lhsSelected != rhsSelected { return lhsSelected }
+            return lhs.country.englishName < rhs.country.englishName
+        }
+        for route in orderedRoutes {
             let base = point(for: route.country, in: size, focus: focus)
             let candidate = offsets.map { offset in
                 CGPoint(
-                    x: min(max(base.x + offset.width, mapBounds.minX + 22), mapBounds.maxX - 22),
-                    y: min(max(base.y + offset.height, mapBounds.minY + 25), mapBounds.maxY - 24)
+                    x: min(max(base.x + offset.width, mapBounds.minX + 18), mapBounds.maxX - 18),
+                    y: min(max(base.y + offset.height, mapBounds.minY + 18), mapBounds.maxY - 18)
                 )
             }.first { candidate in
                 placed.allSatisfy { other in
-                    abs(other.x - candidate.x) >= 35 || abs(other.y - candidate.y) >= 31
+                    hypot(other.x - candidate.x, other.y - candidate.y) >= 31
                 }
             } ?? CGPoint(
-                x: min(max(base.x, mapBounds.minX + 22), mapBounds.maxX - 22),
-                y: min(max(base.y, mapBounds.minY + 25), mapBounds.maxY - 24)
+                x: min(max(base.x, mapBounds.minX + 18), mapBounds.maxX - 18),
+                y: min(max(base.y, mapBounds.minY + 18), mapBounds.maxY - 18)
             )
-            positions[route.id] = candidate
+            placements[route.id] = MapMarkerPlacement(anchor: base, marker: candidate)
             placed.append(candidate)
         }
-        return positions
+        return placements
+    }
+}
+
+private struct MapMarkerPlacement {
+    let anchor: CGPoint
+    let marker: CGPoint
+
+    var isDisplaced: Bool {
+        hypot(marker.x - anchor.x, marker.y - anchor.y) > 2
     }
 }
 
