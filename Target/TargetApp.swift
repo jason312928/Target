@@ -67,11 +67,15 @@ struct TargetApp: App {
     }
 
     var body: some Scene {
-        Window("Target", id: TargetMainWindowActivation.windowID) {
+        // WindowGroup creates the main window on launch. A plain Window scene
+        // can stay unopened until an explicit openWindow action is sent, which
+        // made the Debug app appear empty when launched from Xcode.
+        WindowGroup("Target", id: TargetMainWindowActivation.windowID) {
             AppShellView(lifecycle: lifecycle, profileModel: profileModel, preferences: preferences)
                 .onAppear { TargetApplicationDelegate.shared.lifecycle = lifecycle }
                 .background(TargetMainWindowMarker())
         }
+        .defaultSize(width: 980, height: 680)
 
         Settings {
             SettingsView(preferences: preferences, updateController: updateController)
