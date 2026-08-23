@@ -276,6 +276,7 @@ private struct SelectorDetail: View {
     let restart: () -> Void
     @Environment(\.locale) private var locale
     @State private var pendingSelection: String?
+    @SceneStorage("policy.workspace.countries-expanded") private var countriesExpanded = true
 
     var body: some View {
         ScrollView {
@@ -295,6 +296,11 @@ private struct SelectorDetail: View {
         .onChange(of: isSelecting) { wasSelecting, selecting in
             if wasSelecting && !selecting {
                 pendingSelection = nil
+            }
+        }
+        .onChange(of: query) { _, value in
+            if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                countriesExpanded = true
             }
         }
     }
@@ -464,11 +470,7 @@ private struct SelectorDetail: View {
                     selectedMemberTag: selectedMemberTag,
                     choose: chooseCountry
                 )
-                CountryRouteGrid(
-                    routes: filteredCountryRoutes,
-                    selectedMemberTag: selectedMemberTag,
-                    choose: chooseCountry
-                )
+                countryRoutesSection
                 if !filteredUnclassifiedMembers.isEmpty {
                     unclassifiedMembers
                 }
@@ -476,6 +478,31 @@ private struct SelectorDetail: View {
                 memberGrid(filteredMembers)
             }
         }
+    }
+
+    private var countryRoutesSection: some View {
+        DisclosureGroup(isExpanded: $countriesExpanded) {
+            CountryRouteGrid(
+                routes: filteredCountryRoutes,
+                selectedMemberTag: selectedMemberTag,
+                choose: chooseCountry
+            )
+            .padding(.top, 6)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "globe.europe.africa")
+                    .foregroundStyle(Color.accentColor)
+                Text("policy.workspace.country-list")
+                    .font(.callout.weight(.semibold))
+                Text("\(filteredCountryRoutes.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+            }
+            .contentShape(Rectangle())
+        }
+        .padding(.top, 4)
+        .accessibilityIdentifier("policy.workspace.country-list.disclosure")
     }
 
     private var unclassifiedMembers: some View {
@@ -968,8 +995,7 @@ private struct FlatWorldArtwork: View {
     var body: some View {
         Canvas { context, size in
             let mapBounds = FlatMapProjection.rect(in: size, focus: focus)
-            let fillColor = Color.primary.opacity(0.028)
-            let outlineColor = Color.primary.opacity(0.12)
+            let fillColor = Color.primary.opacity(0.045)
             let polygons = WorldMapGeometry.rings.isEmpty ? Self.fallbackContinents : WorldMapGeometry.rings
             for polygon in polygons {
                 var path = Path()
@@ -984,15 +1010,13 @@ private struct FlatWorldArtwork: View {
                 }
                 path.closeSubpath()
                 context.fill(path, with: .color(fillColor))
-                context.stroke(path, with: .color(outlineColor), lineWidth: 0.55)
             }
 
-            // A quiet frame keeps the artwork legible without implying a
-            // geographic coordinate system or adding chart-like decoration.
-            context.stroke(
+            // Keep the map as a quiet silhouette. Country borders and grid
+            // lines add visual noise without helping a country-level choice.
+            context.fill(
                 Path(roundedRect: mapBounds, cornerRadius: 10),
-                with: .color(Color.primary.opacity(0.045)),
-                lineWidth: 0.8
+                with: .color(Color.primary.opacity(0.012))
             )
         }
         .accessibilityHidden(true)
