@@ -10,6 +10,8 @@
 		A10000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* ContentView.swift */; };
 		A10000000000000000000003 /* BackendLifecycleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* BackendLifecycleModel.swift */; };
 		A10000000000000000000004 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014 /* Localizable.xcstrings */; };
+		A10000000000000000000261 /* countries-110m.json in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000260 /* countries-110m.json */; };
+		F00100000000000000000010 /* countries-110m.json in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000260 /* countries-110m.json */; };
 		A100000000000000000000230 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000231 /* Assets.xcassets */; };
 		A10000000000000000000005 /* BackendTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* BackendTypes.swift */; };
 		A10000000000000000000006 /* MockBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* MockBackend.swift */; };
@@ -156,6 +158,7 @@
 		A10000000000000000000012 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A10000000000000000000013 /* BackendLifecycleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendLifecycleModel.swift; sourceTree = "<group>"; };
 		A10000000000000000000014 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		A10000000000000000000260 /* countries-110m.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = countries-110m.json; sourceTree = "<group>"; };
 		A100000000000000000000233 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A100000000000000000000231 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000000000000000000015 /* BackendTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendTypes.swift; sourceTree = "<group>"; };
@@ -273,7 +276,7 @@
 		A100000000000000000000A6 /* Backend */ = {isa = PBXGroup; children = (A10000000000000000000013 /* BackendLifecycleModel.swift */, A10000000000000000000015 /* BackendTypes.swift */, D20000000000000000000011 /* TargetRuntimeOperations.swift */, D30000000000000000000011 /* TargetSystemProxyOperations.swift */, A10000000000000000000016 /* MockBackend.swift */, A10000000000000000000019 /* SingBoxBackend.swift */, A1000000000000000000002A /* EngineRuntimeOwnership.swift */, A100000000000000000000241 /* RuntimeControl.swift */, A100000000000000000000245 /* RuntimeActivity.swift */); path = Backend; sourceTree = "<group>"; };
 		A100000000000000000000248 /* Activity */ = {isa = PBXGroup; children = (A100000000000000000000247 /* RuntimeActivityViews.swift */); path = Activity; sourceTree = "<group>"; };
 		A100000000000000000000A7 /* Service */ = {isa = PBXGroup; children = (A10000000000000000000017 /* TargetServiceXPCProtocol.swift */, A10000000000000000000018 /* TargetServiceClient.swift */, A10000000000000000000024 /* SystemProxyController.swift */, A10000000000000000000027 /* HostNetworkSafety.swift */); path = Service; sourceTree = "<group>"; };
-		A100000000000000000000A8 /* Resources */ = {isa = PBXGroup; children = (A10000000000000000000014 /* Localizable.xcstrings */, A1000000000000000000001A /* install_sing_box.sh */); path = Resources; sourceTree = "<group>"; };
+		A100000000000000000000A8 /* Resources */ = {isa = PBXGroup; children = (A10000000000000000000014 /* Localizable.xcstrings */, A10000000000000000000260 /* countries-110m.json */, A1000000000000000000001A /* install_sing_box.sh */); path = Resources; sourceTree = "<group>"; };
 		A100000000000000000000A9 /* Profile */ = {isa = PBXGroup; children = (A10000000000000000000034 /* ProfileModels.swift */, A10000000000000000000251 /* SmartPolicyEngine.swift */, A10000000000000000000036 /* ProfileStore.swift */, A100000000000000000000AB /* ProfileEncryptedStorage.swift */, A100000000000000000000AD /* ProfileTransfer.swift */, A10000000000000000000038 /* SingBoxConfigurationChecker.swift */, A10000000000000000000045 /* ProfileRuntimeConfiguration.swift */, A10000000000000000000047 /* ProfileSubscription.swift */, E50000000000000000000011 /* SubscriptionIntake.swift */, A100000000000000000000221 /* ProfileWorkspaceInteraction.swift */, A1000000000000000000003A /* ProfileViewModel.swift */, D40000000000000000000021 /* PolicyWorkspacePresentation.swift */, D40000000000000000000022 /* ProfilePolicyWorkspaceView.swift */, A1000000000000000000003C /* JSONCodeEditor.swift */, A1000000000000000000003E /* ProfileWorkspaceView.swift */); path = Profile; sourceTree = "<group>"; };
 		A100000000000000000000209 /* Dashboard */ = {isa = PBXGroup; children = (A100000000000000000000202 /* DashboardPresentation.swift */, A100000000000000000000206 /* DashboardView.swift */); path = Dashboard; sourceTree = "<group>"; };
 		E60000000000000000000014 /* MenuBar */ = {isa = PBXGroup; children = (E60000000000000000000011 /* MenuBarPresentation.swift */, E60000000000000000000012 /* MenuBarView.swift */); path = MenuBar; sourceTree = "<group>"; };
@@ -301,8 +304,8 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		A10000000000000000000095 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000004 /* Localizable.xcstrings in Resources */, A100000000000000000000230 /* Assets.xcassets in Resources */, A10000000000000000000020 /* install_sing_box.sh in Resources */); runOnlyForDeploymentPostprocessing = 0; };
-		F00100000000000000000093 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (F00100000000000000000005 /* Localizable.xcstrings in Resources */, ); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000095 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000004 /* Localizable.xcstrings in Resources */, A10000000000000000000261 /* countries-110m.json in Resources */, A100000000000000000000230 /* Assets.xcassets in Resources */, A10000000000000000000020 /* install_sing_box.sh in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+		F00100000000000000000093 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (F00100000000000000000005 /* Localizable.xcstrings in Resources */, F00100000000000000000010 /* countries-110m.json in Resources */, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */

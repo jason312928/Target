@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct ProfilePolicyWorkspaceView: View {
@@ -736,6 +737,112 @@ private struct CountryRouteCard: View {
     }
 }
 
+private struct FlatMapCoordinate {
+    let latitude: Double
+    let longitude: Double
+}
+
+/// Loads country boundaries from world-atlas/Natural Earth once at runtime.
+/// The resource is bundled locally, so rendering never depends on a network map.
+private enum WorldMapGeometry {
+    static let rings: [[FlatMapCoordinate]] = load()
+
+    private static func load() -> [[FlatMapCoordinate]] {
+        guard let url = Bundle.main.url(forResource: "countries-110m", withExtension: "json"),
+              let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let transform = root["transform"] as? [String: Any] else {
+            return []
+        }
+        let scale = numbers(transform["scale"])
+        let translate = numbers(transform["translate"])
+        guard scale.count == 2, translate.count == 2 else { return [] }
+
+        let arcs = arrays(root["arcs"]).map { rawArc in
+            arrays(rawArc).compactMap { point -> [Double]? in
+                let values = numbers(point)
+                guard values.count >= 2 else { return nil }
+                return values
+            }
+        }
+        guard !arcs.isEmpty,
+              let objects = root["objects"] as? [String: Any],
+              let countries = objects["countries"] as? [String: Any] else {
+            return []
+        }
+
+        var rings: [[FlatMapCoordinate]] = []
+        for geometry in arrays(countries["geometries"]) {
+            guard let geometry = geometry as? [String: Any],
+                  let type = geometry["type"] as? String else { continue }
+            let rawGeometry = arrays(geometry["arcs"])
+            switch type {
+            case "Polygon":
+                for rawRing in rawGeometry {
+                    let indexes = numbers(rawRing).map { Int($0.rounded()) }
+                    let ring = decode(indexes, arcs: arcs, scale: scale, translate: translate)
+                    if ring.count >= 3 { rings.append(ring) }
+                }
+            case "MultiPolygon":
+                for rawPolygon in rawGeometry {
+                    for rawRing in arrays(rawPolygon) {
+                        let indexes = numbers(rawRing).map { Int($0.rounded()) }
+                        let ring = decode(indexes, arcs: arcs, scale: scale, translate: translate)
+                        if ring.count >= 3 { rings.append(ring) }
+                    }
+                }
+            default:
+                continue
+            }
+        }
+        return rings
+    }
+
+    private static func decode(
+        _ indexes: [Int],
+        arcs: [[[Double]]],
+        scale: [Double],
+        translate: [Double]
+    ) -> [FlatMapCoordinate] {
+        var points: [FlatMapCoordinate] = []
+        for (position, encodedIndex) in indexes.enumerated() {
+            let reversed = encodedIndex < 0
+            let index = reversed ? ~encodedIndex : encodedIndex
+            guard arcs.indices.contains(index) else { continue }
+            let arc = arcs[index]
+            var previousX = 0.0
+            var previousY = 0.0
+            var decodedArc: [FlatMapCoordinate] = []
+            for rawPoint in arc {
+                guard rawPoint.count >= 2 else { continue }
+                previousX += rawPoint[0]
+                previousY += rawPoint[1]
+                decodedArc.append(FlatMapCoordinate(
+                    latitude: previousY * scale[1] + translate[1],
+                    longitude: previousX * scale[0] + translate[0]
+                ))
+            }
+            if reversed { decodedArc.reverse() }
+            if position > 0, !decodedArc.isEmpty { decodedArc.removeFirst() }
+            points.append(contentsOf: decodedArc)
+        }
+        return points
+    }
+
+    private static func arrays(_ value: Any?) -> [Any] {
+        value as? [Any] ?? []
+    }
+
+    private static func numbers(_ value: Any?) -> [Double] {
+        arrays(value).compactMap { item in
+            if let number = item as? NSNumber { return number.doubleValue }
+            if let number = item as? Double { return number }
+            if let number = item as? Int { return Double(number) }
+            return nil
+        }
+    }
+}
+
 private struct FlatWorldArtwork: View {
     var body: some View {
         Canvas { context, size in
@@ -753,8 +860,10 @@ private struct FlatWorldArtwork: View {
             }
             context.stroke(grid, with: .color(gridColor), lineWidth: 0.6)
 
-            let outlineColor = Color.primary.opacity(0.19)
-            for polygon in Self.continents {
+            let fillColor = Color.primary.opacity(0.018)
+            let outlineColor = Color.primary.opacity(0.13)
+            let polygons = WorldMapGeometry.rings.isEmpty ? Self.fallbackContinents : WorldMapGeometry.rings
+            for polygon in polygons {
                 var path = Path()
                 for (index, coordinate) in polygon.enumerated() {
                     let point = CGPoint(
@@ -764,41 +873,62 @@ private struct FlatWorldArtwork: View {
                     if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
                 }
                 path.closeSubpath()
-                context.stroke(path, with: .color(outlineColor), lineWidth: 1.1)
+                context.fill(path, with: .color(fillColor))
+                context.stroke(path, with: .color(outlineColor), lineWidth: 0.75)
             }
         }
         .accessibilityHidden(true)
     }
 
-    private static let continents: [[(latitude: Double, longitude: Double)]] = [
+    private static let fallbackContinents: [[FlatMapCoordinate]] = [
         [
-            (72, -168), (70, -140), (61, -128), (55, -125), (48, -124),
-            (30, -117), (16, -90), (20, -82), (30, -82), (44, -67),
-            (51, -58), (60, -64), (70, -76), (75, -105), (72, -168)
+            FlatMapCoordinate(latitude: 72, longitude: -168), FlatMapCoordinate(latitude: 70, longitude: -140),
+            FlatMapCoordinate(latitude: 61, longitude: -128), FlatMapCoordinate(latitude: 55, longitude: -125),
+            FlatMapCoordinate(latitude: 48, longitude: -124), FlatMapCoordinate(latitude: 30, longitude: -117),
+            FlatMapCoordinate(latitude: 16, longitude: -90), FlatMapCoordinate(latitude: 20, longitude: -82),
+            FlatMapCoordinate(latitude: 30, longitude: -82), FlatMapCoordinate(latitude: 44, longitude: -67),
+            FlatMapCoordinate(latitude: 51, longitude: -58), FlatMapCoordinate(latitude: 60, longitude: -64),
+            FlatMapCoordinate(latitude: 70, longitude: -76), FlatMapCoordinate(latitude: 75, longitude: -105),
+            FlatMapCoordinate(latitude: 72, longitude: -168)
         ],
         [
-            (13, -81), (5, -77), (-12, -78), (-23, -70), (-38, -73),
-            (-55, -68), (-52, -58), (-35, -54), (-10, -35), (4, -52),
-            (13, -81)
+            FlatMapCoordinate(latitude: 13, longitude: -81), FlatMapCoordinate(latitude: 5, longitude: -77),
+            FlatMapCoordinate(latitude: -12, longitude: -78), FlatMapCoordinate(latitude: -23, longitude: -70),
+            FlatMapCoordinate(latitude: -38, longitude: -73), FlatMapCoordinate(latitude: -55, longitude: -68),
+            FlatMapCoordinate(latitude: -52, longitude: -58), FlatMapCoordinate(latitude: -35, longitude: -54),
+            FlatMapCoordinate(latitude: -10, longitude: -35), FlatMapCoordinate(latitude: 4, longitude: -52),
+            FlatMapCoordinate(latitude: 13, longitude: -81)
         ],
         [
-            (37, -10), (44, -8), (50, -5), (59, 3), (70, 32),
-            (67, 58), (72, 100), (67, 145), (54, 168), (42, 141),
-            (27, 122), (18, 108), (10, 80), (24, 55), (35, 35),
-            (36, 15), (37, -10)
+            FlatMapCoordinate(latitude: 37, longitude: -10), FlatMapCoordinate(latitude: 44, longitude: -8),
+            FlatMapCoordinate(latitude: 50, longitude: -5), FlatMapCoordinate(latitude: 59, longitude: 3),
+            FlatMapCoordinate(latitude: 70, longitude: 32), FlatMapCoordinate(latitude: 67, longitude: 58),
+            FlatMapCoordinate(latitude: 72, longitude: 100), FlatMapCoordinate(latitude: 67, longitude: 145),
+            FlatMapCoordinate(latitude: 54, longitude: 168), FlatMapCoordinate(latitude: 42, longitude: 141),
+            FlatMapCoordinate(latitude: 27, longitude: 122), FlatMapCoordinate(latitude: 18, longitude: 108),
+            FlatMapCoordinate(latitude: 10, longitude: 80), FlatMapCoordinate(latitude: 24, longitude: 55),
+            FlatMapCoordinate(latitude: 35, longitude: 35), FlatMapCoordinate(latitude: 36, longitude: 15),
+            FlatMapCoordinate(latitude: 37, longitude: -10)
         ],
         [
-            (37, -18), (35, 10), (29, 33), (13, 42), (-5, 51),
-            (-22, 42), (-35, 27), (-34, 17), (-20, 10), (2, -5),
-            (20, -17), (37, -18)
+            FlatMapCoordinate(latitude: 37, longitude: -18), FlatMapCoordinate(latitude: 35, longitude: 10),
+            FlatMapCoordinate(latitude: 29, longitude: 33), FlatMapCoordinate(latitude: 13, longitude: 42),
+            FlatMapCoordinate(latitude: -5, longitude: 51), FlatMapCoordinate(latitude: -22, longitude: 42),
+            FlatMapCoordinate(latitude: -35, longitude: 27), FlatMapCoordinate(latitude: -34, longitude: 17),
+            FlatMapCoordinate(latitude: -20, longitude: 10), FlatMapCoordinate(latitude: 2, longitude: -5),
+            FlatMapCoordinate(latitude: 20, longitude: -17), FlatMapCoordinate(latitude: 37, longitude: -18)
         ],
         [
-            (-11, 112), (-18, 129), (-35, 153), (-41, 146),
-            (-38, 122), (-25, 113), (-11, 112)
+            FlatMapCoordinate(latitude: -11, longitude: 112), FlatMapCoordinate(latitude: -18, longitude: 129),
+            FlatMapCoordinate(latitude: -35, longitude: 153), FlatMapCoordinate(latitude: -41, longitude: 146),
+            FlatMapCoordinate(latitude: -38, longitude: 122), FlatMapCoordinate(latitude: -25, longitude: 113),
+            FlatMapCoordinate(latitude: -11, longitude: 112)
         ],
         [
-            (83, -74), (76, -63), (70, -50), (60, -43), (66, -22),
-            (76, -20), (83, -38), (83, -74)
+            FlatMapCoordinate(latitude: 83, longitude: -74), FlatMapCoordinate(latitude: 76, longitude: -63),
+            FlatMapCoordinate(latitude: 70, longitude: -50), FlatMapCoordinate(latitude: 60, longitude: -43),
+            FlatMapCoordinate(latitude: 66, longitude: -22), FlatMapCoordinate(latitude: 76, longitude: -20),
+            FlatMapCoordinate(latitude: 83, longitude: -38), FlatMapCoordinate(latitude: 83, longitude: -74)
         ]
     ]
 }
