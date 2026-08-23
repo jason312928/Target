@@ -561,7 +561,7 @@ private struct CountryRouteMap: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let focus = FlatMapFocus(routes: routes).fitted(to: proxy.size)
+            let focus = FlatMapFocus.world
             let positions = Self.markerPositions(for: routes, in: proxy.size, focus: focus)
             ZStack {
                 FlatWorldArtwork(focus: focus)
@@ -641,7 +641,7 @@ private struct CountryRouteMap: View {
             CGSize(width: 42, height: -68), CGSize(width: -42, height: -68),
             CGSize(width: 42, height: 68), CGSize(width: -42, height: 68)
         ]
-        let mapBounds = FlatMapProjection.rect(in: size, focus: focus)
+        let mapBounds = FlatMapProjection.rect(in: size)
         for route in routes {
             let base = point(for: route.country, in: size, focus: focus)
             let candidate = offsets.map { offset in
@@ -768,96 +768,25 @@ private struct FlatMapCoordinate {
     let longitude: Double
 }
 
-private struct FlatMapFocus: Equatable {
+private struct FlatMapFocus {
     let latitude: ClosedRange<Double>
     let longitude: ClosedRange<Double>
 
-    private static let latitudeLimits = -84.0...84.0
-    private static let longitudeLimits = -180.0...180.0
+    static let world = FlatMapFocus(latitude: -90...90, longitude: -180...180)
 
     var latitudeSpan: Double { latitude.upperBound - latitude.lowerBound }
     var longitudeSpan: Double { longitude.upperBound - longitude.lowerBound }
-
-    init(routes: [PolicyCountryRoute]) {
-        guard let first = routes.first else {
-            latitude = -90...90
-            longitude = -180...180
-            return
-        }
-        let latitudes = routes.map(\.country.latitude)
-        let longitudes = routes.map(\.country.longitude)
-        let rawLatitudeSpan = (latitudes.max() ?? first.country.latitude) - (latitudes.min() ?? first.country.latitude)
-        let rawLongitudeSpan = (longitudes.max() ?? first.country.longitude) - (longitudes.min() ?? first.country.longitude)
-        let latitudeSpan = max(rawLatitudeSpan * 1.35, 28)
-        let longitudeSpan = max(rawLongitudeSpan * 1.18, 48)
-        let latitudeCenter = ((latitudes.min() ?? 0) + (latitudes.max() ?? 0)) / 2
-        let longitudeCenter = ((longitudes.min() ?? 0) + (longitudes.max() ?? 0)) / 2
-        latitude = Self.range(center: latitudeCenter, span: latitudeSpan, limits: Self.latitudeLimits)
-        longitude = Self.range(center: longitudeCenter, span: longitudeSpan, limits: Self.longitudeLimits)
-    }
-
-    private init(latitude: ClosedRange<Double>, longitude: ClosedRange<Double>) {
-        self.latitude = latitude
-        self.longitude = longitude
-    }
-
-    func fitted(to size: CGSize) -> Self {
-        let availableWidth = max(size.width - 32, 1)
-        let availableHeight = max(size.height - 32, 1)
-        return fitted(to: availableWidth / availableHeight)
-    }
-
-    func fitted(to aspectRatio: Double) -> Self {
-        guard aspectRatio.isFinite, aspectRatio > 0 else { return self }
-        var latitudeSpan = self.latitudeSpan
-        var longitudeSpan = self.longitudeSpan
-        if longitudeSpan / latitudeSpan < aspectRatio {
-            longitudeSpan = min(Self.longitudeLimits.upperBound - Self.longitudeLimits.lowerBound, latitudeSpan * aspectRatio)
-        } else if longitudeSpan / latitudeSpan > aspectRatio {
-            latitudeSpan = min(Self.latitudeLimits.upperBound - Self.latitudeLimits.lowerBound, longitudeSpan / aspectRatio)
-        }
-        return FlatMapFocus(
-            latitude: Self.range(center: latitude.midpoint, span: latitudeSpan, limits: Self.latitudeLimits),
-            longitude: Self.range(center: longitude.midpoint, span: longitudeSpan, limits: Self.longitudeLimits)
-        )
-    }
-
-    private static func range(center: Double, span: Double, limits: ClosedRange<Double>) -> ClosedRange<Double> {
-        let boundedSpan = min(max(span, 1), limits.upperBound - limits.lowerBound)
-        let half = boundedSpan / 2
-        let lower = min(max(center - half, limits.lowerBound), limits.upperBound - boundedSpan)
-        return lower...(lower + boundedSpan)
-    }
-}
-
-private extension ClosedRange where Bound == Double {
-    var midpoint: Double { lowerBound + (upperBound - lowerBound) / 2 }
 }
 
 private enum FlatMapProjection {
-    static func rect(in size: CGSize, focus: FlatMapFocus? = nil) -> CGRect {
+    static func rect(in size: CGSize) -> CGRect {
         let horizontalPadding = min(size.width * 0.03, 22)
         let verticalPadding = min(size.height * 0.12, 24)
-        let availableWidth = max(size.width - horizontalPadding * 2, 1)
-        let availableHeight = max(size.height - verticalPadding * 2, 1)
-        let availableAspectRatio = availableWidth / availableHeight
-        let mapFocus = focus ?? FlatMapFocus(routes: []).fitted(to: CGSize(width: availableWidth, height: availableHeight))
-        let mapAspectRatio = max(mapFocus.longitudeSpan / mapFocus.latitudeSpan, 0.1)
-        if availableAspectRatio > mapAspectRatio {
-            let width = availableHeight * mapAspectRatio
-            return CGRect(
-                x: (size.width - width) / 2,
-                y: verticalPadding,
-                width: width,
-                height: availableHeight
-            )
-        }
-        let height = availableWidth / mapAspectRatio
         return CGRect(
             x: horizontalPadding,
-            y: (size.height - height) / 2,
-            width: availableWidth,
-            height: height
+            y: verticalPadding,
+            width: max(size.width - horizontalPadding * 2, 1),
+            height: max(size.height - verticalPadding * 2, 1)
         )
     }
 
@@ -866,12 +795,111 @@ private enum FlatMapProjection {
     }
 
     static func point(latitude: Double, longitude: Double, in size: CGSize, focus: FlatMapFocus? = nil) -> CGPoint {
-        let mapFocus = focus ?? FlatMapFocus(routes: []).fitted(to: size)
-        let bounds = rect(in: size, focus: mapFocus)
+        let mapFocus = focus ?? .world
+        let bounds = rect(in: size)
         return CGPoint(
             x: bounds.minX + ((longitude - mapFocus.longitude.lowerBound) / mapFocus.longitudeSpan) * bounds.width,
             y: bounds.minY + ((mapFocus.latitude.upperBound - latitude) / mapFocus.latitudeSpan) * bounds.height
         )
+    }
+}
+
+/// Loads the bundled Natural Earth topology once. Rendering all rings in one
+/// fill keeps the detailed coastline while avoiding per-country seam artifacts.
+private enum WorldMapGeometry {
+    static let rings: [[FlatMapCoordinate]] = load()
+
+    private static func load() -> [[FlatMapCoordinate]] {
+        guard let url = Bundle.main.url(forResource: "countries-110m", withExtension: "json"),
+              let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let transform = root["transform"] as? [String: Any] else {
+            return []
+        }
+        let scale = numbers(transform["scale"])
+        let translate = numbers(transform["translate"])
+        guard scale.count == 2, translate.count == 2 else { return [] }
+
+        let arcs = arrays(root["arcs"]).map { rawArc in
+            arrays(rawArc).compactMap { point -> [Double]? in
+                let values = numbers(point)
+                return values.count >= 2 ? values : nil
+            }
+        }
+        guard !arcs.isEmpty,
+              let objects = root["objects"] as? [String: Any],
+              let countries = objects["countries"] as? [String: Any] else {
+            return []
+        }
+
+        var rings: [[FlatMapCoordinate]] = []
+        for rawGeometry in arrays(countries["geometries"]) {
+            guard let geometry = rawGeometry as? [String: Any],
+                  let type = geometry["type"] as? String else { continue }
+            let rawGeometryArcs = arrays(geometry["arcs"])
+            switch type {
+            case "Polygon":
+                appendRings(rawGeometryArcs, arcs: arcs, scale: scale, translate: translate, to: &rings)
+            case "MultiPolygon":
+                for rawPolygon in rawGeometryArcs {
+                    appendRings(arrays(rawPolygon), arcs: arcs, scale: scale, translate: translate, to: &rings)
+                }
+            default:
+                continue
+            }
+        }
+        return rings
+    }
+
+    private static func appendRings(
+        _ rawRings: [Any],
+        arcs: [[[Double]]],
+        scale: [Double],
+        translate: [Double],
+        to rings: inout [[FlatMapCoordinate]]
+    ) {
+        for rawRing in rawRings {
+            let indexes = numbers(rawRing).map { Int($0.rounded()) }
+            let ring = decode(indexes, arcs: arcs, scale: scale, translate: translate)
+            if ring.count >= 3 { rings.append(ring) }
+        }
+    }
+
+    private static func decode(
+        _ indexes: [Int],
+        arcs: [[[Double]]],
+        scale: [Double],
+        translate: [Double]
+    ) -> [FlatMapCoordinate] {
+        var points: [FlatMapCoordinate] = []
+        for (position, encodedIndex) in indexes.enumerated() {
+            let reversed = encodedIndex < 0
+            let index = reversed ? ~encodedIndex : encodedIndex
+            guard arcs.indices.contains(index) else { continue }
+            var previousX = 0.0
+            var previousY = 0.0
+            var decodedArc: [FlatMapCoordinate] = []
+            for rawPoint in arcs[index] where rawPoint.count >= 2 {
+                previousX += rawPoint[0]
+                previousY += rawPoint[1]
+                decodedArc.append(FlatMapCoordinate(
+                    latitude: previousY * scale[1] + translate[1],
+                    longitude: previousX * scale[0] + translate[0]
+                ))
+            }
+            if reversed { decodedArc.reverse() }
+            if position > 0, !decodedArc.isEmpty { decodedArc.removeFirst() }
+            points.append(contentsOf: decodedArc)
+        }
+        return points
+    }
+
+    private static func arrays(_ value: Any?) -> [Any] {
+        value as? [Any] ?? []
+    }
+
+    private static func numbers(_ value: Any?) -> [Double] {
+        arrays(value).compactMap { ($0 as? NSNumber)?.doubleValue }
     }
 }
 
@@ -881,22 +909,91 @@ private struct FlatWorldArtwork: View {
     var body: some View {
         Canvas { context, size in
             let fillColor = Color.primary.opacity(0.045)
+            let polygons = WorldMapGeometry.rings.isEmpty ? Self.fallbackContinents : WorldMapGeometry.rings
             var land = Path()
-            for polygon in Self.fallbackContinents {
-                for (index, coordinate) in polygon.enumerated() {
-                    let point = FlatMapProjection.point(
-                        latitude: coordinate.latitude,
-                        longitude: coordinate.longitude,
-                        in: size,
-                        focus: focus
-                    )
-                    if index == 0 { land.move(to: point) } else { land.addLine(to: point) }
-                }
-                land.closeSubpath()
+            for polygon in polygons {
+                Self.append(polygon, to: &land, in: size, focus: focus)
             }
+            context.clip(to: Path(FlatMapProjection.rect(in: size)))
             context.fill(land, with: .color(fillColor), style: FillStyle(eoFill: true))
         }
         .accessibilityHidden(true)
+    }
+
+    private static func append(
+        _ polygon: [FlatMapCoordinate],
+        to path: inout Path,
+        in size: CGSize,
+        focus: FlatMapFocus
+    ) {
+        guard let first = polygon.first else { return }
+        var unwrapped = [first]
+        for coordinate in polygon.dropFirst() {
+            var longitude = coordinate.longitude
+            guard let previousLongitude = unwrapped.last?.longitude else { continue }
+            while longitude - previousLongitude > 180 { longitude -= 360 }
+            while longitude - previousLongitude < -180 { longitude += 360 }
+            unwrapped.append(FlatMapCoordinate(latitude: coordinate.latitude, longitude: longitude))
+        }
+
+        let closureDelta = (unwrapped.last?.longitude ?? first.longitude) - first.longitude
+        if abs(closureDelta) > 180 {
+            appendPolarRing(unwrapped, closureDelta: closureDelta, to: &path, in: size, focus: focus)
+            return
+        }
+
+        // Dateline-crossing islands and coastlines are drawn on both sides of
+        // the flat map, then clipped. No segment ever connects +180 to -180.
+        for offset in [-360.0, 0, 360.0] {
+            appendRing(unwrapped, longitudeOffset: offset, to: &path, in: size, focus: focus)
+        }
+    }
+
+    private static func appendPolarRing(
+        _ polygon: [FlatMapCoordinate],
+        closureDelta: Double,
+        to path: inout Path,
+        in size: CGSize,
+        focus: FlatMapFocus
+    ) {
+        guard let first = polygon.first else { return }
+        let pole = polygon.map(\.latitude).reduce(0, +) / Double(polygon.count) < 0 ? -90.0 : 90.0
+        appendOpenRing(polygon, longitudeOffset: 0, to: &path, in: size, focus: focus)
+        let endingEdge = closureDelta > 0 ? 180.0 : -180.0
+        let startingEdge = closureDelta > 0 ? -180.0 : 180.0
+        path.addLine(to: FlatMapProjection.point(latitude: pole, longitude: endingEdge, in: size, focus: focus))
+        path.addLine(to: FlatMapProjection.point(latitude: pole, longitude: startingEdge, in: size, focus: focus))
+        path.addLine(to: FlatMapProjection.point(latitude: first.latitude, longitude: first.longitude, in: size, focus: focus))
+        path.closeSubpath()
+    }
+
+    private static func appendRing(
+        _ polygon: [FlatMapCoordinate],
+        longitudeOffset: Double,
+        to path: inout Path,
+        in size: CGSize,
+        focus: FlatMapFocus
+    ) {
+        appendOpenRing(polygon, longitudeOffset: longitudeOffset, to: &path, in: size, focus: focus)
+        path.closeSubpath()
+    }
+
+    private static func appendOpenRing(
+        _ polygon: [FlatMapCoordinate],
+        longitudeOffset: Double,
+        to path: inout Path,
+        in size: CGSize,
+        focus: FlatMapFocus
+    ) {
+        for (index, coordinate) in polygon.enumerated() {
+            let point = FlatMapProjection.point(
+                latitude: coordinate.latitude,
+                longitude: coordinate.longitude + longitudeOffset,
+                in: size,
+                focus: focus
+            )
+            if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+        }
     }
 
     private static let fallbackContinents: [[FlatMapCoordinate]] = [
