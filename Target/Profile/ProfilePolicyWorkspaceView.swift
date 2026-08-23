@@ -85,14 +85,14 @@ struct ProfilePolicyWorkspaceView: View {
                 Spacer(minLength: 12)
                 searchField.frame(width: 220)
                 latencyButton
-                policyActionsMenu
+                automaticSelectionButton
             }
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 12) {
                     routeTitle
                     Spacer(minLength: 8)
                     latencyButton
-                    policyActionsMenu
+                    automaticSelectionButton
                 }
                 searchField.frame(maxWidth: .infinity)
             }
@@ -141,24 +141,15 @@ struct ProfilePolicyWorkspaceView: View {
         }
     }
 
-    private var policyActionsMenu: some View {
-        Menu {
-            Button("policy.workspace.refresh", systemImage: "arrow.clockwise", action: refresh)
-                .disabled(isSelecting || lifecycle?.isBusy == true)
-                .accessibilityIdentifier("policy.workspace.refresh")
-            if presentation.overrideCount > 0 {
-                Divider()
-                Button("policy.catalog.reset", systemImage: "arrow.uturn.backward", action: reset)
-                    .disabled(isSelecting)
-                    .accessibilityIdentifier("policy.catalog.reset")
-            }
-        } label: {
-            Image(systemName: "ellipsis.circle")
+    @ViewBuilder
+    private var automaticSelectionButton: some View {
+        if presentation.overrideCount > 0 {
+            Button("policy.workspace.automatic-selection", systemImage: "sparkles", action: reset)
+                .buttonStyle(.borderless)
+                .disabled(isSelecting)
+                .help(Text("policy.catalog.reset"))
+                .accessibilityIdentifier("policy.catalog.reset")
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .accessibilityLabel(Text("policy.workspace.actions"))
-        .accessibilityIdentifier("policy.workspace.actions")
     }
 
     private func latencyActionIsAvailable(for selector: PolicySelectorPresentation) -> Bool {
@@ -501,8 +492,8 @@ private struct CountryRouteMap: View {
             }
             .animation(selectionAnimation, value: selectedCountryCode)
         }
-        .frame(maxWidth: 860)
-        .frame(height: 360)
+        .aspectRatio(1.9, contentMode: .fit)
+        .frame(maxWidth: 820)
         .frame(maxWidth: .infinity, alignment: .center)
         .accessibilityIdentifier("policy.workspace.country-map")
     }

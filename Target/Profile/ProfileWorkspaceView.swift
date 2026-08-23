@@ -8,6 +8,7 @@ struct ProfileWorkspaceView: View {
     @State private var sheet: ProfileSheet?
     @State private var deleteTarget: UUID?
     @State private var participatingRoutes: [PolicyCountryRoute] = []
+    @State private var section: ProfileWorkspaceSection = .proxies
     @AppStorage("profiles.smart-participants") private var participationRawValue = "*"
 
     init(lifecycle: BackendLifecycleModel?, model: ProfileViewModel) {
@@ -68,6 +69,7 @@ struct ProfileWorkspaceView: View {
             refreshParticipatingRoutes()
         }
         .onChange(of: participationRawValue) { _, _ in refreshParticipatingRoutes() }
+        .onChange(of: model.selectedID) { _, _ in section = .proxies }
         .onChange(of: model.profiles.map { "\($0.id.uuidString):\($0.validRevision)" }) { _, _ in
             normalizeParticipation()
             refreshParticipatingRoutes()
@@ -132,10 +134,8 @@ struct ProfileWorkspaceView: View {
             ProfileWorkspaceDetailView(
                 profile: profile,
                 model: model,
-                showRename: { sheet = .rename(profile.id, profile.name) },
-                requestDelete: { deleteTarget = profile.id },
-                requestExport: { model.requestExport() },
                 lifecycle: lifecycle,
+                section: $section,
                 participatingProfileCount: participatingProfileIDs.count,
                 participatingCountryRoutes: participatingRoutes,
                 chooseParticipatingCountry: { countryCode in
@@ -155,19 +155,13 @@ struct ProfileWorkspaceView: View {
 
     @ToolbarContentBuilder
     private var profileToolbar: some ToolbarContent {
-        ToolbarItem(placement: .navigation) {
-            Label("profile.smart-routing.title", systemImage: "location.north.circle.fill")
-                .font(.headline)
-        }
         ToolbarItemGroup(placement: .primaryAction) {
             participationMenu
-            Button("profile.action.create", systemImage: "plus") { sheet = .create }
-                .accessibilityIdentifier("profile.action.create")
-            profileManagementMenu
+            profileLibraryMenu
         }
     }
 
-    private var profileManagementMenu: some View {
+    private var profileLibraryMenu: some View {
         Menu {
             Button("profile.subscription.add", systemImage: "link.badge.plus") { sheet = .subscription }
                 .disabled(model.isUpdatingSubscription)
@@ -175,14 +169,44 @@ struct ProfileWorkspaceView: View {
             Button("profile.action.import", systemImage: "square.and.arrow.down") { presentImportPanel() }
                 .disabled(model.isPreparingImport || model.isCommittingImport)
                 .accessibilityIdentifier("profile.action.import")
-            Button("profile.action.export", systemImage: "square.and.arrow.up") { model.requestExport() }
-                .disabled(!model.canExport)
-                .accessibilityIdentifier("profile.action.export")
+            Button("profile.action.create", systemImage: "doc.badge.plus") { sheet = .create }
+                .accessibilityIdentifier("profile.action.create")
+            if let profile = model.selectedProfile {
+                Divider()
+                Menu(profile.name, systemImage: "doc.text") {
+                    Button("profile.workspace.section.overview", systemImage: "info.circle") {
+                        section = .overview
+                    }
+                    Button("profile.action.edit-configuration", systemImage: "curlybraces") {
+                        section = .configuration
+                    }
+                    Divider()
+                    Button("profile.action.rename", systemImage: "pencil") {
+                        sheet = .rename(profile.id, profile.name)
+                    }
+                    Button("profile.action.duplicate", systemImage: "plus.square.on.square") {
+                        model.requestDuplicate(profile.id)
+                    }
+                    Button("profile.action.restore", systemImage: "clock.arrow.circlepath") {
+                        model.requestRestore(profile.id)
+                    }
+                    .disabled(profile.validRevision <= 1)
+                    Button("profile.action.export", systemImage: "square.and.arrow.up") {
+                        model.requestExport()
+                    }
+                    .disabled(!model.canExport)
+                    Divider()
+                    Button("profile.action.delete", systemImage: "trash", role: .destructive) {
+                        deleteTarget = profile.id
+                    }
+                }
+            }
         } label: {
-            Image(systemName: "ellipsis.circle")
+            Label("profile.library.short", systemImage: "folder")
         }
+        .help(Text("profile.actions.title"))
         .accessibilityLabel(Text("profile.actions.title"))
-        .accessibilityIdentifier("profile.actions.menu")
+        .accessibilityIdentifier("profile.library.menu")
     }
 
     private var participationMenu: some View {
@@ -309,27 +333,17 @@ private struct ProfileWorkspaceEmptyState: View {
 private struct ProfileWorkspaceDetailView: View {
     let profile: Profile
     @Bindable var model: ProfileViewModel
-    let showRename: () -> Void
-    let requestDelete: () -> Void
-    let requestExport: () -> Void
     let lifecycle: BackendLifecycleModel?
+    @Binding var section: ProfileWorkspaceSection
     let participatingProfileCount: Int
     let participatingCountryRoutes: [PolicyCountryRoute]
     let chooseParticipatingCountry: (String) -> Void
-    @State private var section: ProfileWorkspaceSection = .proxies
-
     private var presentation: ProfileWorkspacePresentation { ProfileWorkspacePresentation(profile: profile) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ProfileSummaryHeader(
                 profile: profile,
-                model: model,
-                showRename: showRename,
-                requestDelete: requestDelete,
-                requestExport: requestExport,
-                showOverview: { section = .overview },
-                showConfiguration: { section = .configuration },
                 lifecycle: lifecycle,
                 participatingProfileCount: participatingProfileCount,
                 countryCount: participatingCountryRoutes.count
@@ -409,10 +423,7 @@ private struct ProfileWorkspaceDetailView: View {
         case .configuration:
             ProfileConfigurationView(
                 profile: profile,
-                model: model,
-                showRename: showRename,
-                requestDelete: requestDelete,
-                requestExport: requestExport
+                model: model
             )
         }
     }
@@ -533,9 +544,6 @@ private struct ProfileOverviewView: View {
 private struct ProfileConfigurationView: View {
     let profile: Profile
     @Bindable var model: ProfileViewModel
-    let showRename: () -> Void
-    let requestDelete: () -> Void
-    let requestExport: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -579,10 +587,7 @@ private struct ProfileConfigurationView: View {
             Divider()
             ProfileEditorActions(
                 profile: profile,
-                model: model,
-                showRename: showRename,
-                requestDelete: requestDelete,
-                requestExport: requestExport
+                model: model
             )
         }
         // Keep the Configuration workspace's AX frame aligned with its detail
@@ -597,12 +602,6 @@ private struct ProfileConfigurationView: View {
 
 private struct ProfileSummaryHeader: View {
     let profile: Profile
-    @Bindable var model: ProfileViewModel
-    let showRename: () -> Void
-    let requestDelete: () -> Void
-    let requestExport: () -> Void
-    let showOverview: () -> Void
-    let showConfiguration: () -> Void
     let lifecycle: BackendLifecycleModel?
     let participatingProfileCount: Int
     let countryCount: Int
@@ -632,15 +631,6 @@ private struct ProfileSummaryHeader: View {
                     .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 12)
-                ProfileMoreActions(
-                    profile: profile,
-                    model: model,
-                    showRename: showRename,
-                    requestDelete: requestDelete,
-                    requestExport: requestExport,
-                    showOverview: showOverview,
-                    showConfiguration: showConfiguration
-                )
             }
             if let lifecycle {
                 ProfileRuntimeControls(lifecycle: lifecycle)
@@ -919,9 +909,6 @@ private struct SubscriptionFailureView: View {
 private struct ProfileEditorActions: View {
     let profile: Profile
     @Bindable var model: ProfileViewModel
-    let showRename: () -> Void
-    let requestDelete: () -> Void
-    let requestExport: () -> Void
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
@@ -931,13 +918,6 @@ private struct ProfileEditorActions: View {
                     Button("profile.action.format") { model.format() }
                         .accessibilityIdentifier("profile.action.format")
                         .disabled(!model.canEditConfiguration)
-                    ProfileMoreActions(
-                        profile: profile,
-                        model: model,
-                        showRename: showRename,
-                        requestDelete: requestDelete,
-                        requestExport: requestExport
-                    )
                     Spacer()
                     saveButton
                 }
@@ -958,13 +938,6 @@ private struct ProfileEditorActions: View {
             .font(.caption)
             .foregroundStyle(.secondary)
         Spacer(minLength: 8)
-        ProfileMoreActions(
-            profile: profile,
-            model: model,
-            showRename: showRename,
-            requestDelete: requestDelete,
-            requestExport: requestExport
-        )
         saveButton
     }
 
@@ -974,43 +947,6 @@ private struct ProfileEditorActions: View {
             .keyboardShortcut("s")
             .disabled(!model.isDirty || !model.canEditConfiguration)
             .accessibilityIdentifier("profile.action.save")
-    }
-}
-
-private struct ProfileMoreActions: View {
-    let profile: Profile
-    @Bindable var model: ProfileViewModel
-    let showRename: () -> Void
-    let requestDelete: () -> Void
-    let requestExport: () -> Void
-    var showOverview: (() -> Void)? = nil
-    var showConfiguration: (() -> Void)? = nil
-
-    var body: some View {
-        Menu {
-            if let showOverview, let showConfiguration {
-                Button("profile.workspace.section.overview", systemImage: "info.circle", action: showOverview)
-                Button("profile.action.edit-configuration", systemImage: "curlybraces", action: showConfiguration)
-                Divider()
-            }
-            Button("profile.action.rename", action: showRename)
-            Button("profile.action.duplicate") { model.requestDuplicate(profile.id) }
-            Button("profile.action.restore") { model.requestRestore(profile.id) }
-                .disabled(profile.validRevision <= 1)
-            Divider()
-            Button("profile.action.export", action: requestExport)
-                .disabled(!model.canExport)
-            Divider()
-            Button("profile.action.delete", role: .destructive, action: requestDelete)
-        } label: {
-            Image(systemName: "ellipsis.circle")
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help(Text("profile.actions.more"))
-        .accessibilityLabel(Text("profile.actions.more"))
-        .accessibilityIdentifier("profile.actions.more")
-        .accessibilityHint(Text("profile.actions.more.hint"))
     }
 }
 
