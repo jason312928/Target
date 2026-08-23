@@ -219,7 +219,10 @@ struct PolicyRouteCountry: Identifiable, Equatable, Hashable {
                     containsAlias = paddedName.contains(" \(normalizedAlias) ")
                 }
                 guard containsAlias else { continue }
-                if bestMatch.map({ normalizedAlias.count > $0.length }) != false {
+                // Equal-length aliases keep the earlier supported country.
+                // This prevents a broad later alias such as "中国" from
+                // overriding the explicit Taiwan match in "中国台湾".
+                if bestMatch.map({ normalizedAlias.count > $0.length }) ?? true {
                     bestMatch = (country, normalizedAlias.count)
                 }
             }

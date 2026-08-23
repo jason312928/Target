@@ -572,15 +572,6 @@ private struct CountryRouteMap: View {
             }
         }
         .frame(minHeight: 210, idealHeight: 244, maxHeight: 280)
-        .background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(alignment: .topLeading) {
-            Label("policy.workspace.map.overview", systemImage: "map")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-        }
         .accessibilityIdentifier("policy.workspace.country-map")
     }
 
@@ -884,116 +875,14 @@ private enum FlatMapProjection {
     }
 }
 
-/// Loads country boundaries from world-atlas/Natural Earth once at runtime.
-/// The resource is bundled locally, so rendering never depends on a network map.
-private enum WorldMapGeometry {
-    static let rings: [[FlatMapCoordinate]] = load()
-
-    private static func load() -> [[FlatMapCoordinate]] {
-        guard let url = Bundle.main.url(forResource: "countries-110m", withExtension: "json"),
-              let data = try? Data(contentsOf: url),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let transform = root["transform"] as? [String: Any] else {
-            return []
-        }
-        let scale = numbers(transform["scale"])
-        let translate = numbers(transform["translate"])
-        guard scale.count == 2, translate.count == 2 else { return [] }
-
-        let arcs = arrays(root["arcs"]).map { rawArc in
-            arrays(rawArc).compactMap { point -> [Double]? in
-                let values = numbers(point)
-                guard values.count >= 2 else { return nil }
-                return values
-            }
-        }
-        guard !arcs.isEmpty,
-              let objects = root["objects"] as? [String: Any],
-              let countries = objects["countries"] as? [String: Any] else {
-            return []
-        }
-
-        var rings: [[FlatMapCoordinate]] = []
-        for geometry in arrays(countries["geometries"]) {
-            guard let geometry = geometry as? [String: Any],
-                  let type = geometry["type"] as? String else { continue }
-            let rawGeometry = arrays(geometry["arcs"])
-            switch type {
-            case "Polygon":
-                for rawRing in rawGeometry {
-                    let indexes = numbers(rawRing).map { Int($0.rounded()) }
-                    let ring = decode(indexes, arcs: arcs, scale: scale, translate: translate)
-                    if ring.count >= 3 { rings.append(ring) }
-                }
-            case "MultiPolygon":
-                for rawPolygon in rawGeometry {
-                    for rawRing in arrays(rawPolygon) {
-                        let indexes = numbers(rawRing).map { Int($0.rounded()) }
-                        let ring = decode(indexes, arcs: arcs, scale: scale, translate: translate)
-                        if ring.count >= 3 { rings.append(ring) }
-                    }
-                }
-            default:
-                continue
-            }
-        }
-        return rings
-    }
-
-    private static func decode(
-        _ indexes: [Int],
-        arcs: [[[Double]]],
-        scale: [Double],
-        translate: [Double]
-    ) -> [FlatMapCoordinate] {
-        var points: [FlatMapCoordinate] = []
-        for (position, encodedIndex) in indexes.enumerated() {
-            let reversed = encodedIndex < 0
-            let index = reversed ? ~encodedIndex : encodedIndex
-            guard arcs.indices.contains(index) else { continue }
-            let arc = arcs[index]
-            var previousX = 0.0
-            var previousY = 0.0
-            var decodedArc: [FlatMapCoordinate] = []
-            for rawPoint in arc {
-                guard rawPoint.count >= 2 else { continue }
-                previousX += rawPoint[0]
-                previousY += rawPoint[1]
-                decodedArc.append(FlatMapCoordinate(
-                    latitude: previousY * scale[1] + translate[1],
-                    longitude: previousX * scale[0] + translate[0]
-                ))
-            }
-            if reversed { decodedArc.reverse() }
-            if position > 0, !decodedArc.isEmpty { decodedArc.removeFirst() }
-            points.append(contentsOf: decodedArc)
-        }
-        return points
-    }
-
-    private static func arrays(_ value: Any?) -> [Any] {
-        value as? [Any] ?? []
-    }
-
-    private static func numbers(_ value: Any?) -> [Double] {
-        arrays(value).compactMap { item in
-            if let number = item as? NSNumber { return number.doubleValue }
-            if let number = item as? Double { return number }
-            if let number = item as? Int { return Double(number) }
-            return nil
-        }
-    }
-}
-
 private struct FlatWorldArtwork: View {
     let focus: FlatMapFocus
 
     var body: some View {
         Canvas { context, size in
             let fillColor = Color.primary.opacity(0.045)
-            let polygons = WorldMapGeometry.rings.isEmpty ? Self.fallbackContinents : WorldMapGeometry.rings
-            for polygon in polygons {
-                var path = Path()
+            var land = Path()
+            for polygon in Self.fallbackContinents {
                 for (index, coordinate) in polygon.enumerated() {
                     let point = FlatMapProjection.point(
                         latitude: coordinate.latitude,
@@ -1001,14 +890,11 @@ private struct FlatWorldArtwork: View {
                         in: size,
                         focus: focus
                     )
-                    if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+                    if index == 0 { land.move(to: point) } else { land.addLine(to: point) }
                 }
-                path.closeSubpath()
-                context.fill(path, with: .color(fillColor))
+                land.closeSubpath()
             }
-
-            // Keep the map as a quiet silhouette. Country borders, frames, and
-            // grid lines add visual noise without helping a country-level choice.
+            context.fill(land, with: .color(fillColor), style: FillStyle(eoFill: true))
         }
         .accessibilityHidden(true)
     }
