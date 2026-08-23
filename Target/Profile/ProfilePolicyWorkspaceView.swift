@@ -534,15 +534,17 @@ private struct CountryRouteMap: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let focus = FlatMapFocus(routes: routes).fitted(to: proxy.size)
+            let positions = Self.markerPositions(for: routes, in: proxy.size, focus: focus)
             ZStack {
-                FlatWorldArtwork()
-                ForEach(Array(routes.enumerated()), id: \.element.id) { index, route in
+                FlatWorldArtwork(focus: focus)
+                ForEach(routes) { route in
                     countryButton(route)
-                        .position(Self.point(for: route.country, index: index, routes: routes, in: proxy.size))
+                        .position(positions[route.id] ?? Self.point(for: route.country, in: proxy.size, focus: focus))
                 }
             }
         }
-        .frame(height: 218)
+        .frame(minHeight: 210, idealHeight: 244, maxHeight: 280)
         .background(Color.primary.opacity(0.018), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
@@ -604,28 +606,47 @@ private struct CountryRouteMap: View {
         return value
     }
 
-    private static func point(
-        for country: PolicyRouteCountry,
-        index: Int,
-        routes: [PolicyCountryRoute],
-        in size: CGSize
-    ) -> CGPoint {
-        let base = FlatMapProjection.point(for: country, in: size)
-        let nearbyBefore = routes.prefix(index).filter { other in
-            let otherPoint = FlatMapProjection.point(for: other.country, in: size)
-            return abs(otherPoint.x - base.x) < 42 && abs(otherPoint.y - base.y) < 28
-        }.count
+    private static func point(for country: PolicyRouteCountry, in size: CGSize, focus: FlatMapFocus) -> CGPoint {
+        FlatMapProjection.point(for: country, in: size, focus: focus)
+    }
+
+    private static func markerPositions(
+        for routes: [PolicyCountryRoute],
+        in size: CGSize,
+        focus: FlatMapFocus
+    ) -> [String: CGPoint] {
+        var placed: [CGPoint] = []
+        var positions: [String: CGPoint] = [:]
         let offsets: [CGSize] = [
-            .zero, CGSize(width: 24, height: -16), CGSize(width: -24, height: 16),
-            CGSize(width: 26, height: 18), CGSize(width: -26, height: -18),
-            CGSize(width: 0, height: 28)
+            .zero,
+            CGSize(width: 38, height: -28), CGSize(width: -38, height: -28),
+            CGSize(width: 38, height: 28), CGSize(width: -38, height: 28),
+            CGSize(width: 0, height: -48), CGSize(width: 0, height: 48),
+            CGSize(width: 72, height: -22), CGSize(width: -72, height: -22),
+            CGSize(width: 72, height: 22), CGSize(width: -72, height: 22),
+            CGSize(width: 42, height: -68), CGSize(width: -42, height: -68),
+            CGSize(width: 42, height: 68), CGSize(width: -42, height: 68)
         ]
-        let offset = offsets[min(nearbyBefore, offsets.count - 1)]
-        let mapBounds = FlatMapProjection.rect(in: size)
-        return CGPoint(
-            x: min(max(base.x + offset.width, mapBounds.minX + 22), mapBounds.maxX - 22),
-            y: min(max(base.y + offset.height, mapBounds.minY + 25), mapBounds.maxY - 24)
-        )
+        let mapBounds = FlatMapProjection.rect(in: size, focus: focus)
+        for route in routes {
+            let base = point(for: route.country, in: size, focus: focus)
+            let candidate = offsets.map { offset in
+                CGPoint(
+                    x: min(max(base.x + offset.width, mapBounds.minX + 22), mapBounds.maxX - 22),
+                    y: min(max(base.y + offset.height, mapBounds.minY + 25), mapBounds.maxY - 24)
+                )
+            }.first { candidate in
+                placed.allSatisfy { other in
+                    abs(other.x - candidate.x) >= 35 || abs(other.y - candidate.y) >= 31
+                }
+            } ?? CGPoint(
+                x: min(max(base.x, mapBounds.minX + 22), mapBounds.maxX - 22),
+                y: min(max(base.y, mapBounds.minY + 25), mapBounds.maxY - 24)
+            )
+            positions[route.id] = candidate
+            placed.append(candidate)
+        }
+        return positions
     }
 }
 
@@ -733,46 +754,109 @@ private struct FlatMapCoordinate {
     let longitude: Double
 }
 
-private enum FlatMapProjection {
-    // Keep the map's natural 2:1 world ratio. Stretching it to the full
-    // workspace width made the countries look visibly flattened in Preview.
-    private static let worldAspectRatio = 2.0
+private struct FlatMapFocus: Equatable {
+    let latitude: ClosedRange<Double>
+    let longitude: ClosedRange<Double>
 
-    static func rect(in size: CGSize) -> CGRect {
+    private static let latitudeLimits = -84.0...84.0
+    private static let longitudeLimits = -180.0...180.0
+
+    var latitudeSpan: Double { latitude.upperBound - latitude.lowerBound }
+    var longitudeSpan: Double { longitude.upperBound - longitude.lowerBound }
+
+    init(routes: [PolicyCountryRoute]) {
+        guard let first = routes.first else {
+            latitude = -90...90
+            longitude = -180...180
+            return
+        }
+        let latitudes = routes.map(\.country.latitude)
+        let longitudes = routes.map(\.country.longitude)
+        let rawLatitudeSpan = (latitudes.max() ?? first.country.latitude) - (latitudes.min() ?? first.country.latitude)
+        let rawLongitudeSpan = (longitudes.max() ?? first.country.longitude) - (longitudes.min() ?? first.country.longitude)
+        let latitudeSpan = max(rawLatitudeSpan * 1.35, 28)
+        let longitudeSpan = max(rawLongitudeSpan * 1.18, 48)
+        let latitudeCenter = ((latitudes.min() ?? 0) + (latitudes.max() ?? 0)) / 2
+        let longitudeCenter = ((longitudes.min() ?? 0) + (longitudes.max() ?? 0)) / 2
+        latitude = Self.range(center: latitudeCenter, span: latitudeSpan, limits: Self.latitudeLimits)
+        longitude = Self.range(center: longitudeCenter, span: longitudeSpan, limits: Self.longitudeLimits)
+    }
+
+    private init(latitude: ClosedRange<Double>, longitude: ClosedRange<Double>) {
+        self.latitude = latitude
+        self.longitude = longitude
+    }
+
+    func fitted(to size: CGSize) -> Self {
+        let availableWidth = max(size.width - 32, 1)
+        let availableHeight = max(size.height - 32, 1)
+        return fitted(to: availableWidth / availableHeight)
+    }
+
+    func fitted(to aspectRatio: Double) -> Self {
+        guard aspectRatio.isFinite, aspectRatio > 0 else { return self }
+        var latitudeSpan = self.latitudeSpan
+        var longitudeSpan = self.longitudeSpan
+        if longitudeSpan / latitudeSpan < aspectRatio {
+            longitudeSpan = min(Self.longitudeLimits.upperBound - Self.longitudeLimits.lowerBound, latitudeSpan * aspectRatio)
+        } else if longitudeSpan / latitudeSpan > aspectRatio {
+            latitudeSpan = min(Self.latitudeLimits.upperBound - Self.latitudeLimits.lowerBound, longitudeSpan / aspectRatio)
+        }
+        return FlatMapFocus(
+            latitude: Self.range(center: latitude.midpoint, span: latitudeSpan, limits: Self.latitudeLimits),
+            longitude: Self.range(center: longitude.midpoint, span: longitudeSpan, limits: Self.longitudeLimits)
+        )
+    }
+
+    private static func range(center: Double, span: Double, limits: ClosedRange<Double>) -> ClosedRange<Double> {
+        let boundedSpan = min(max(span, 1), limits.upperBound - limits.lowerBound)
+        let half = boundedSpan / 2
+        let lower = min(max(center - half, limits.lowerBound), limits.upperBound - boundedSpan)
+        return lower...(lower + boundedSpan)
+    }
+}
+
+private extension ClosedRange where Bound == Double {
+    var midpoint: Double { lowerBound + (upperBound - lowerBound) / 2 }
+}
+
+private enum FlatMapProjection {
+    static func rect(in size: CGSize, focus: FlatMapFocus? = nil) -> CGRect {
         let horizontalPadding = min(size.width * 0.03, 22)
         let verticalPadding = min(size.height * 0.12, 24)
         let availableWidth = max(size.width - horizontalPadding * 2, 1)
         let availableHeight = max(size.height - verticalPadding * 2, 1)
         let availableAspectRatio = availableWidth / availableHeight
-        if availableAspectRatio > worldAspectRatio {
-            let height = availableHeight
-            let width = height * worldAspectRatio
+        let mapFocus = focus ?? FlatMapFocus(routes: []).fitted(to: CGSize(width: availableWidth, height: availableHeight))
+        let mapAspectRatio = max(mapFocus.longitudeSpan / mapFocus.latitudeSpan, 0.1)
+        if availableAspectRatio > mapAspectRatio {
+            let width = availableHeight * mapAspectRatio
             return CGRect(
                 x: (size.width - width) / 2,
                 y: verticalPadding,
                 width: width,
-                height: height
+                height: availableHeight
             )
         }
-        let width = availableWidth
-        let height = width / worldAspectRatio
+        let height = availableWidth / mapAspectRatio
         return CGRect(
             x: horizontalPadding,
             y: (size.height - height) / 2,
-            width: width,
+            width: availableWidth,
             height: height
         )
     }
 
-    static func point(for country: PolicyRouteCountry, in size: CGSize) -> CGPoint {
-        point(latitude: country.latitude, longitude: country.longitude, in: size)
+    static func point(for country: PolicyRouteCountry, in size: CGSize, focus: FlatMapFocus? = nil) -> CGPoint {
+        point(latitude: country.latitude, longitude: country.longitude, in: size, focus: focus)
     }
 
-    static func point(latitude: Double, longitude: Double, in size: CGSize) -> CGPoint {
-        let bounds = rect(in: size)
+    static func point(latitude: Double, longitude: Double, in size: CGSize, focus: FlatMapFocus? = nil) -> CGPoint {
+        let mapFocus = focus ?? FlatMapFocus(routes: []).fitted(to: size)
+        let bounds = rect(in: size, focus: mapFocus)
         return CGPoint(
-            x: bounds.minX + ((longitude + 180) / 360) * bounds.width,
-            y: bounds.minY + ((90 - latitude) / 180) * bounds.height
+            x: bounds.minX + ((longitude - mapFocus.longitude.lowerBound) / mapFocus.longitudeSpan) * bounds.width,
+            y: bounds.minY + ((mapFocus.latitude.upperBound - latitude) / mapFocus.latitudeSpan) * bounds.height
         )
     }
 }
@@ -879,9 +963,11 @@ private enum WorldMapGeometry {
 }
 
 private struct FlatWorldArtwork: View {
+    let focus: FlatMapFocus
+
     var body: some View {
         Canvas { context, size in
-            let mapBounds = FlatMapProjection.rect(in: size)
+            let mapBounds = FlatMapProjection.rect(in: size, focus: focus)
             let fillColor = Color.primary.opacity(0.028)
             let outlineColor = Color.primary.opacity(0.12)
             let polygons = WorldMapGeometry.rings.isEmpty ? Self.fallbackContinents : WorldMapGeometry.rings
@@ -891,7 +977,8 @@ private struct FlatWorldArtwork: View {
                     let point = FlatMapProjection.point(
                         latitude: coordinate.latitude,
                         longitude: coordinate.longitude,
-                        in: size
+                        in: size,
+                        focus: focus
                     )
                     if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
                 }

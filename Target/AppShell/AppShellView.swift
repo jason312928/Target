@@ -176,7 +176,7 @@ struct AppSidebarView: View {
         .navigationTitle("app.title")
         .accessibilityLabel(Text("navigation.accessibility.label"))
         .accessibilityIdentifier("app-shell.sidebar")
-        .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 220)
+        .navigationSplitViewColumnWidth(min: 210, ideal: 250, max: 320)
         .toolbar(removing: .sidebarToggle)
     }
 
@@ -239,6 +239,7 @@ private struct AppSidebarProfileRow: View {
             Spacer(minLength: 4)
             Image(systemName: validationSymbol)
                 .foregroundStyle(isSelected ? Color.white : validationColor)
+                .help(Text(validationTitleKey))
                 .accessibilityLabel(Text(validationTitleKey))
         }
         .padding(.leading, 18)
