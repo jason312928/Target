@@ -275,6 +275,7 @@ private struct SelectorDetail: View {
     let select: (String, String) -> Void
     let restart: () -> Void
     @Environment(\.locale) private var locale
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var pendingSelection: String?
     @SceneStorage("policy.workspace.countries-expanded") private var countriesExpanded = true
 
@@ -300,7 +301,9 @@ private struct SelectorDetail: View {
         }
         .onChange(of: query) { _, value in
             if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                countriesExpanded = true
+                withAnimation(accessibilityReduceMotion ? nil : .easeInOut(duration: 0.2)) {
+                    countriesExpanded = true
+                }
             }
         }
     }
@@ -376,6 +379,7 @@ private struct SelectorDetail: View {
         )
         .accessibilityLabel(Text(verbatim: selector.displayTag))
         .accessibilityValue(selector.accessibilityValue(isSelected: true))
+        .animation(accessibilityReduceMotion ? nil : .easeInOut(duration: 0.2), value: selectedMemberTag)
     }
 
     @ViewBuilder
@@ -557,14 +561,27 @@ private struct CountryRouteMap: View {
     let selectedMemberTag: String?
     let choose: (PolicyCountryRoute) -> Void
     @Environment(\.locale) private var locale
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var hoveredCountryCode: String?
+
+    private var selectedCountryCode: String? {
+        routes.first(where: { route in
+            route.members.contains(where: { $0.tag == selectedMemberTag })
+        })?.id
+    }
+
+    private var selectionAnimation: Animation? {
+        accessibilityReduceMotion
+            ? nil
+            : .spring(response: 0.46, dampingFraction: 0.84, blendDuration: 0.12)
+    }
 
     var body: some View {
         GeometryReader { proxy in
             let focus = FlatMapFocus.world
             let placements = Self.markerPlacements(
                 for: routes,
-                selectedMemberTag: selectedMemberTag,
+                selectedCountryCode: selectedCountryCode,
                 in: proxy.size,
                 focus: focus
             )
@@ -574,6 +591,8 @@ private struct CountryRouteMap: View {
                 ForEach(routes) { route in
                     countryButton(route)
                         .position(placements[route.id]?.marker ?? Self.point(for: route.country, in: proxy.size, focus: focus))
+                        .zIndex(route.id == selectedCountryCode ? 1 : 0)
+                        .animation(selectionAnimation, value: selectedCountryCode)
                 }
             }
         }
@@ -584,18 +603,20 @@ private struct CountryRouteMap: View {
     }
 
     private func markerConnectors(_ placements: [String: MapMarkerPlacement]) -> some View {
-        Canvas { context, _ in
-            for placement in placements.values where placement.isDisplaced {
-                var path = Path()
-                path.move(to: placement.anchor)
-                path.addLine(to: placement.marker)
-                context.stroke(path, with: .color(Color.primary.opacity(0.13)), lineWidth: 0.8)
-                context.fill(
-                    Path(ellipseIn: CGRect(x: placement.anchor.x - 1.5, y: placement.anchor.y - 1.5, width: 3, height: 3)),
-                    with: .color(Color.primary.opacity(0.24))
-                )
+        ZStack {
+            ForEach(routes) { route in
+                if let placement = placements[route.id] {
+                    MapMarkerConnector(anchor: placement.anchor, marker: placement.marker)
+                        .stroke(Color.primary.opacity(0.13), lineWidth: 0.8)
+                    Circle()
+                        .fill(Color.primary.opacity(0.24))
+                        .frame(width: 3, height: 3)
+                        .position(placement.anchor)
+                        .opacity(placement.isDisplaced ? 1 : 0)
+                }
             }
         }
+        .animation(selectionAnimation, value: selectedCountryCode)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
@@ -620,9 +641,10 @@ private struct CountryRouteMap: View {
                     .stroke(isSelected ? Color.accentColor : Color.primary.opacity(isHovered ? 0.22 : 0.08), lineWidth: isSelected ? 2 : 1)
                     .frame(width: isSelected ? 34 : 28, height: isSelected ? 34 : 28)
             }
-            .animation(.easeOut(duration: 0.15), value: isSelected)
+            .animation(selectionAnimation, value: isSelected)
+            .animation(.easeOut(duration: 0.12), value: isHovered)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SoftPressButtonStyle(pressedScale: 0.9, reduceMotion: accessibilityReduceMotion))
         .disabled(route.bestMember == nil)
         .onHover { hovering in
             hoveredCountryCode = hovering ? route.id : nil
@@ -652,7 +674,7 @@ private struct CountryRouteMap: View {
 
     private static func markerPlacements(
         for routes: [PolicyCountryRoute],
-        selectedMemberTag: String?,
+        selectedCountryCode: String?,
         in size: CGSize,
         focus: FlatMapFocus
     ) -> [String: MapMarkerPlacement] {
@@ -668,31 +690,70 @@ private struct CountryRouteMap: View {
             CGSize(width: 44, height: 16), CGSize(width: -44, height: 16)
         ]
         let mapBounds = FlatMapProjection.rect(in: size)
-        let orderedRoutes = routes.sorted { lhs, rhs in
-            let lhsSelected = lhs.members.contains(where: { $0.tag == selectedMemberTag })
-            let rhsSelected = rhs.members.contains(where: { $0.tag == selectedMemberTag })
-            if lhsSelected != rhsSelected { return lhsSelected }
-            return lhs.country.englishName < rhs.country.englishName
-        }
+        let orderedRoutes = routes.sorted { $0.country.englishName < $1.country.englishName }
+
+        // Establish a selection-independent layout first. Changing countries can
+        // then move only the markers that actually collide with the new anchor.
         for route in orderedRoutes {
             let base = point(for: route.country, in: size, focus: focus)
-            let candidate = offsets.map { offset in
-                CGPoint(
-                    x: min(max(base.x + offset.width, mapBounds.minX + 18), mapBounds.maxX - 18),
-                    y: min(max(base.y + offset.height, mapBounds.minY + 18), mapBounds.maxY - 18)
-                )
-            }.first { candidate in
-                placed.allSatisfy { other in
-                    hypot(other.x - candidate.x, other.y - candidate.y) >= 31
-                }
-            } ?? CGPoint(
-                x: min(max(base.x, mapBounds.minX + 18), mapBounds.maxX - 18),
-                y: min(max(base.y, mapBounds.minY + 18), mapBounds.maxY - 18)
-            )
+            let candidate = markerCandidates(anchor: base, offsets: offsets, bounds: mapBounds)
+                .first(where: { isAvailable($0, avoiding: placed) })
+                ?? clamped(base, to: mapBounds)
             placements[route.id] = MapMarkerPlacement(anchor: base, marker: candidate)
             placed.append(candidate)
         }
+
+        guard let selectedCountryCode,
+              let selectedRoute = orderedRoutes.first(where: { $0.id == selectedCountryCode }) else {
+            return placements
+        }
+
+        let selectedAnchor = point(for: selectedRoute.country, in: size, focus: focus)
+        let affectedRoutes = orderedRoutes.filter { route in
+            guard route.id != selectedCountryCode, let placement = placements[route.id] else { return false }
+            return distance(placement.marker, selectedAnchor) < 31
+        }
+        let affectedIDs = Set(affectedRoutes.map(\.id))
+        var occupied = [selectedAnchor]
+        occupied.append(contentsOf: orderedRoutes.compactMap { route in
+            guard route.id != selectedCountryCode,
+                  !affectedIDs.contains(route.id) else { return nil }
+            return placements[route.id]?.marker
+        })
+
+        placements[selectedCountryCode] = MapMarkerPlacement(anchor: selectedAnchor, marker: selectedAnchor)
+        for route in affectedRoutes {
+            let anchor = point(for: route.country, in: size, focus: focus)
+            let previous = placements[route.id]?.marker
+            let candidates = (previous.map { [$0] } ?? [])
+                + markerCandidates(anchor: anchor, offsets: offsets, bounds: mapBounds)
+            let marker = candidates.first(where: { isAvailable($0, avoiding: occupied) })
+                ?? clamped(anchor, to: mapBounds)
+            placements[route.id] = MapMarkerPlacement(anchor: anchor, marker: marker)
+            occupied.append(marker)
+        }
         return placements
+    }
+
+    private static func markerCandidates(anchor: CGPoint, offsets: [CGSize], bounds: CGRect) -> [CGPoint] {
+        offsets.map { offset in
+            clamped(CGPoint(x: anchor.x + offset.width, y: anchor.y + offset.height), to: bounds)
+        }
+    }
+
+    private static func clamped(_ point: CGPoint, to bounds: CGRect) -> CGPoint {
+        CGPoint(
+            x: min(max(point.x, bounds.minX + 18), bounds.maxX - 18),
+            y: min(max(point.y, bounds.minY + 18), bounds.maxY - 18)
+        )
+    }
+
+    private static func isAvailable(_ point: CGPoint, avoiding occupied: [CGPoint]) -> Bool {
+        occupied.allSatisfy { distance($0, point) >= 31 }
+    }
+
+    private static func distance(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
+        hypot(lhs.x - rhs.x, lhs.y - rhs.y)
     }
 }
 
@@ -702,6 +763,43 @@ private struct MapMarkerPlacement {
 
     var isDisplaced: Bool {
         hypot(marker.x - anchor.x, marker.y - anchor.y) > 2
+    }
+}
+
+private struct MapMarkerConnector: Shape {
+    var anchor: CGPoint
+    var marker: CGPoint
+
+    var animatableData: AnimatablePair<AnimatablePair<CGFloat, CGFloat>, AnimatablePair<CGFloat, CGFloat>> {
+        get {
+            AnimatablePair(
+                AnimatablePair(anchor.x, anchor.y),
+                AnimatablePair(marker.x, marker.y)
+            )
+        }
+        set {
+            anchor = CGPoint(x: newValue.first.first, y: newValue.first.second)
+            marker = CGPoint(x: newValue.second.first, y: newValue.second.second)
+        }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: anchor)
+        path.addLine(to: marker)
+        return path
+    }
+}
+
+private struct SoftPressButtonStyle: ButtonStyle {
+    let pressedScale: CGFloat
+    let reduceMotion: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? pressedScale : 1)
+            .opacity(configuration.isPressed ? 0.82 : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
 
@@ -735,6 +833,7 @@ private struct CountryRouteCard: View {
     let selectedMemberTag: String?
     let localeIdentifier: String
     let choose: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var isHovering = false
 
     private var isSelected: Bool {
@@ -787,8 +886,13 @@ private struct CountryRouteCard: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(isSelected ? Color.accentColor.opacity(0.55) : Color.primary.opacity(0.09), lineWidth: isSelected ? 1.5 : 1)
             }
+            .animation(accessibilityReduceMotion ? nil : .easeOut(duration: 0.16), value: isHovering)
+            .animation(
+                accessibilityReduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.86),
+                value: isSelected
+            )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SoftPressButtonStyle(pressedScale: 0.985, reduceMotion: accessibilityReduceMotion))
         .onHover { isHovering = $0 }
         .help(Text("policy.workspace.country.choose.hint"))
         .accessibilityLabel(Text(verbatim: route.country.displayName(localeIdentifier: localeIdentifier)))

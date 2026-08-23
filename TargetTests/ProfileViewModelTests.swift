@@ -238,8 +238,17 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(PolicyRouteCountry.recognize(in: "🇸🇬 Premium")?.code, "SG")
         XCTAssertEqual(PolicyRouteCountry.recognize(in: "印度尼西亚 01")?.code, "ID")
         XCTAssertEqual(PolicyRouteCountry.recognize(in: "中国台湾 01")?.code, "TW")
+        XCTAssertEqual(PolicyRouteCountry.recognize(in: "中國台灣 02")?.code, "TW")
         XCTAssertEqual(PolicyRouteCountry.recognize(in: "台湾 CN2")?.code, "TW")
         XCTAssertEqual(PolicyRouteCountry.recognize(in: "🇹🇼 Premium")?.code, "TW")
+        XCTAssertEqual(
+            PolicyRouteCountry.recognize(in: "China 01", endpoint: "168.95.1.1:443")?.code,
+            "TW"
+        )
+        XCTAssertEqual(
+            PolicyRouteCountry.supported.first(where: { $0.code == "TW" })?.displayName(localeIdentifier: "zh-Hans"),
+            "台湾"
+        )
         XCTAssertNil(PolicyRouteCountry.recognize(in: "Automatic Route"))
     }
 
