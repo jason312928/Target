@@ -52,13 +52,13 @@ Target 会先下载并验证候选内容，展示脱敏变化摘要，只有在�
 
 ### 下载预览版
 
-1. 从 [Development Preview 8](https://github.com/jason312928/Target/releases/tag/v1.0.0-dev.8) 下载 `Target-1.0.0-dev.8-macos-arm64.zip`。
+1. 从 [Development Preview 9](https://github.com/jason312928/Target/releases/tag/v1.0.0-dev.9) 下载 `Target-1.0.0-dev.9-macos-arm64.zip`。
 2. 解压后将 `Target.app` 移到“应用程序”。
 3. 首次运行时按住 Control 点按 App，选择“打开”。
 4. 在 Dashboard 按提示安装 sing-box 内核与 TargetService。
 5. 在 Profiles 导入 sing-box JSON，或添加受支持的订阅；选择 Profile 后回到 Dashboard 连接。
 
-当前 Development Preview 8 的要求：
+当前 Development Preview 9 的要求：
 
 - macOS 15 或更高版本
 - Apple Silicon（arm64）
@@ -67,7 +67,7 @@ Target 会先下载并验证候选内容，展示脱敏变化摘要，只有在�
 你可以在下载目录验证文件：
 
 ```sh
-shasum -a 256 Target-1.0.0-dev.8-macos-arm64.zip
+shasum -a 256 Target-1.0.0-dev.9-macos-arm64.zip
 ```
 
 > [!NOTE]
