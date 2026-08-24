@@ -405,6 +405,69 @@ final class ProfileViewModel {
         refreshPolicyCatalog()
     }
 
+    @discardableResult
+    func bindRoute(
+        url: URL,
+        countryCode: String,
+        outboundTag: String,
+        participatingProfileIDs: Set<UUID>
+    ) -> Bool {
+        guard !isDirty else {
+            messageKey = "profile.route.error.unsaved"
+            return false
+        }
+        guard let domain = ProfileRouteBinding.domain(from: url),
+              let binding = ProfileRouteBinding(domain: domain, outboundTag: outboundTag, countryCode: countryCode) else {
+            messageKey = "profile.route.error.invalid-link"
+            return false
+        }
+        do {
+            let owner = try profiles
+                .filter { participatingProfileIDs.contains($0.id) && $0.validation.status != .invalid }
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                .first { profile in
+                    let catalog = try store.policyCatalog(for: profile.id)
+                    return catalog.selectors.flatMap(\.members).contains {
+                        $0.tag == outboundTag
+                            && $0.status == .available
+                            && PolicyRouteCountry.recognize(in: $0.tag, endpoint: $0.endpoint)?.code == countryCode
+                    }
+                }
+            guard let owner else { throw ProfileStoreError.invalidStoredMetadata }
+            if owner.id != selectedID {
+                try selectAndActivate(owner.id)
+            }
+            try store.persistRouteBinding(
+                profileID: owner.id,
+                expectedRevision: owner.validRevision,
+                binding: binding
+            )
+            messageKey = "profile.route.saved"
+            refreshMetadataPreservingEditor()
+            markReadinessChanged()
+            return true
+        } catch {
+            messageKey = "profile.route.error.save-failed"
+            return false
+        }
+    }
+
+    func removeRouteBinding(domain: String) {
+        guard let profile = selectedProfile else { return }
+        do {
+            guard try store.removeRouteBinding(
+                profileID: profile.id,
+                expectedRevision: profile.validRevision,
+                domain: domain
+            ) else { return }
+            messageKey = "profile.route.removed"
+            refreshMetadataPreservingEditor()
+            markReadinessChanged()
+        } catch {
+            messageKey = "profile.route.error.save-failed"
+        }
+    }
+
     func probePolicyLatency(selectorID: Int, selectorTag: String) {
         guard policyProbeTask == nil,
               let catalog = policyCatalog,

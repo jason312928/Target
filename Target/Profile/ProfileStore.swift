@@ -416,6 +416,67 @@ final class ProfileStore {
         return cleared
     }
 
+    /// Persists a Target-owned site route after proving that its target is still
+    /// selectable in the current Profile revision. Existing bindings for the
+    /// same domain are deliberately replaced, making a drop onto another country
+    /// an explicit reassignment rather than an ambiguous duplicate route.
+    func persistRouteBinding(
+        profileID: UUID,
+        expectedRevision: Int,
+        binding: ProfileRouteBinding
+    ) throws {
+        guard try selectedProfileID() == profileID else { throw ProfileStoreError.noSelectedProfile }
+        var profiles = try loadManifest()
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
+            throw ProfileStoreError.profileNotFound
+        }
+        guard profiles[index].validRevision == expectedRevision else {
+            throw ProfileStoreError.noValidVersion
+        }
+        let source = try versionData(for: profileID, revision: expectedRevision)
+        let catalog = PolicyCatalogParser.parse(
+            source,
+            profileID: profileID,
+            profileRevision: expectedRevision,
+            overrides: profiles[index].policyOverrides
+        )
+        let targetIsAvailable = catalog.selectors
+            .flatMap(\.members)
+            .contains { $0.tag == binding.outboundTag && $0.status == .available }
+        guard targetIsAvailable else { throw ProfileStoreError.invalidStoredMetadata }
+
+        let replacingExisting = profiles[index].routeBindings.contains { $0.domain == binding.domain }
+        guard replacingExisting || profiles[index].routeBindings.count < 256 else {
+            throw ProfileStoreError.invalidStoredMetadata
+        }
+        profiles[index].routeBindings.removeAll { $0.domain == binding.domain }
+        profiles[index].routeBindings.append(binding)
+        profiles[index].routeBindings.sort { $0.domain.localizedStandardCompare($1.domain) == .orderedAscending }
+        profiles[index].updatedAt = now()
+        try saveManifest(profiles)
+    }
+
+    @discardableResult
+    func removeRouteBinding(profileID: UUID, expectedRevision: Int, domain: String) throws -> Bool {
+        guard try selectedProfileID() == profileID else { throw ProfileStoreError.noSelectedProfile }
+        guard let normalizedDomain = ProfileRouteBinding.normalizedDomain(domain) else {
+            throw ProfileStoreError.invalidStoredMetadata
+        }
+        var profiles = try loadManifest()
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }) else {
+            throw ProfileStoreError.profileNotFound
+        }
+        guard profiles[index].validRevision == expectedRevision else {
+            throw ProfileStoreError.noValidVersion
+        }
+        let countBefore = profiles[index].routeBindings.count
+        profiles[index].routeBindings.removeAll { $0.domain == normalizedDomain }
+        guard profiles[index].routeBindings.count != countBefore else { return false }
+        profiles[index].updatedAt = now()
+        try saveManifest(profiles)
+        return true
+    }
+
     func selectedProfile() -> Profile? {
         do {
             guard let id = try selectedProfileID() else { return nil }

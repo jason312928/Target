@@ -77,6 +77,9 @@ actor TargetAutomationOperations {
             case "policy.select": return try await policySelect(request.arguments)
             case "policy.probe": return try await policyProbe(request.arguments)
             case "policy.reset": return try await policyReset()
+            case "route.list": return try routeList()
+            case "route.bind": return try routeBind(request.arguments)
+            case "route.remove": return try routeRemove(request.arguments)
             case "profile.delete": return try profileDelete(request.arguments)
             case "engine.status": return await engineStatus()
             case "engine.start": return try await engineStart()
@@ -297,6 +300,65 @@ actor TargetAutomationOperations {
             )
         }
         return .success(try await policyOperations.probeLatency(selectorTag: selectorTag).automationJSON())
+    }
+
+    private func routeList() throws -> AutomationResponse {
+        let version = try profileStore.selectedValidVersion()
+        return .success(.object([
+            "bindings": .array(version.profile.routeBindings.map { binding in
+                .object([
+                    "country": .string(binding.countryCode),
+                    "domain": .string(binding.domain),
+                    "outbound": .string(binding.outboundTag)
+                ])
+            }),
+            "formatVersion": .integer(1),
+            "profileID": .string(version.profile.id.uuidString.lowercased()),
+            "profileRevision": .integer(version.revision)
+        ]))
+    }
+
+    private func routeBind(_ arguments: [String: String]) throws -> AutomationResponse {
+        guard Set(arguments.keys) == ["url", "country", "outbound"],
+              let rawURL = arguments["url"], let url = URL(string: rawURL),
+              let domain = ProfileRouteBinding.domain(from: url),
+              let outbound = arguments["outbound"], let country = arguments["country"],
+              let binding = ProfileRouteBinding(domain: domain, outboundTag: outbound, countryCode: country) else {
+            return .failure(code: "invalid_arguments", message: "Route binding requires a website URL, country, and outbound.")
+        }
+        let version = try profileStore.selectedValidVersion()
+        try profileStore.persistRouteBinding(
+            profileID: version.profile.id,
+            expectedRevision: version.revision,
+            binding: binding
+        )
+        return .success(.object([
+            "country": .string(binding.countryCode),
+            "domain": .string(binding.domain),
+            "formatVersion": .integer(1),
+            "outbound": .string(binding.outboundTag),
+            "profileID": .string(version.profile.id.uuidString.lowercased()),
+            "profileRevision": .integer(version.revision),
+            "restartRequired": .boolean(true)
+        ]))
+    }
+
+    private func routeRemove(_ arguments: [String: String]) throws -> AutomationResponse {
+        guard Set(arguments.keys) == ["domain"], let domain = arguments["domain"] else {
+            return .failure(code: "invalid_arguments", message: "Route removal requires a domain.")
+        }
+        let version = try profileStore.selectedValidVersion()
+        let removed = try profileStore.removeRouteBinding(
+            profileID: version.profile.id,
+            expectedRevision: version.revision,
+            domain: domain
+        )
+        return .success(.object([
+            "domain": .string(ProfileRouteBinding.normalizedDomain(domain) ?? domain),
+            "formatVersion": .integer(1),
+            "profileID": .string(version.profile.id.uuidString.lowercased()),
+            "removed": .boolean(removed)
+        ]))
     }
 
     private func profileDelete(_ arguments: [String: String]) throws -> AutomationResponse {
@@ -670,11 +732,11 @@ actor TargetAutomationOperations {
     }
 
     private static let commands = [
-        "capabilities", "status", "runtime.status", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset",
+        "capabilities", "status", "runtime.status", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset", "route.list", "route.bind", "route.remove",
         "engine.status", "engine.start", "engine.stop", "connection.start", "connection.stop", "connection.restart", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
     ]
     private static let argumentFreeActions = Set(commands).subtracting([
-        "profile.import", "profile.subscribe", "profile.subscription-update", "profile.delete", "policy.select", "policy.probe"
+        "profile.import", "profile.subscribe", "profile.subscription-update", "profile.delete", "policy.select", "policy.probe", "route.bind", "route.remove"
     ])
 }

@@ -3,12 +3,13 @@
 set -euo pipefail
 
 dry_run=false
+build_channel='Local'
 script_directory="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 # shellcheck source=install_local_app_transaction.sh
 source "$script_directory/install_local_app_transaction.sh"
 
 usage() {
-    printf 'Usage: %s [--dry-run]\n' "${0##*/}"
+    printf 'Usage: %s [--dry-run] [--channel local|development-preview]\n' "${0##*/}"
 }
 
 unregister_app() {
@@ -86,6 +87,15 @@ collect_stale_launchservices_paths() {
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --dry-run) dry_run=true ;;
+        --channel)
+            [ "$#" -ge 2 ] || { usage >&2; installer_error 'missing channel value'; exit 1; }
+            case "$2" in
+                local) build_channel='Local' ;;
+                development-preview) build_channel='DevelopmentPreview' ;;
+                *) usage >&2; installer_error "unsupported channel: $2"; exit 1 ;;
+            esac
+            shift
+            ;;
         --help|-h) usage; exit 0 ;;
         *) usage >&2; installer_error "unknown argument: $1"; exit 1 ;;
     esac
@@ -99,6 +109,9 @@ if [ "$installer_test_mode" = false ]; then
     command -v "$installer_ditto" >/dev/null 2>&1 || { installer_error 'ditto is required'; exit 1; }
     command -v "$installer_mdimport" >/dev/null 2>&1 || { installer_error 'mdimport is required'; exit 1; }
     [ -x "$installer_lsregister" ] || { installer_error 'LaunchServices lsregister is unavailable'; exit 1; }
+    if [ "$build_channel" = 'DevelopmentPreview' ]; then
+        [ -x /usr/bin/codesign ] || { installer_error 'codesign is unavailable'; exit 1; }
+    fi
 else
     validate_test_mode_paths || exit 1
 fi
@@ -117,9 +130,14 @@ build_number="$(git rev-list --count HEAD)"
 [ "$build_number" -gt 0 ] || { installer_error 'invalid Git commit count'; exit 1; }
 
 printf 'repository: %s\ncommit: %s\nderived data: %s\ncanonical path: %s\n' "$repo_root" "$commit" "$derived_data_path" "$canonical_app"
+printf 'build channel: %s\n' "$build_channel"
 
 if [ "$dry_run" = true ]; then
-    printf 'would build unsigned Release Target with isolated .noindex DerivedData\n'
+    if [ "$build_channel" = 'DevelopmentPreview' ]; then
+        printf 'would build Apple Development-signed Release Target with isolated .noindex DerivedData\n'
+    else
+        printf 'would build unsigned Release Target with isolated .noindex DerivedData\n'
+    fi
     collect_old_apps
     collect_stale_launchservices_paths
     printf 'would locally import Spotlight metadata: %s\n' "$canonical_app"
@@ -130,27 +148,33 @@ fi
 recover_interrupted_installation
 validate_test_mode_paths || exit 1
 mkdir -p "$derived_data_path"
+signing_allowed='NO'
+signing_required='NO'
+if [ "$build_channel" = 'DevelopmentPreview' ]; then
+    signing_allowed='YES'
+    signing_required='YES'
+fi
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer "$installer_xcodebuild" \
     -project 'Target.xcodeproj' \
     -scheme 'Target' \
     -configuration Release \
     -destination 'platform=macOS' \
     -derivedDataPath "$derived_data_path" \
-    CODE_SIGNING_ALLOWED=NO \
-    CODE_SIGNING_REQUIRED=NO \
+    CODE_SIGNING_ALLOWED="$signing_allowed" \
+    CODE_SIGNING_REQUIRED="$signing_required" \
     TARGET_SOURCE_COMMIT="$commit" \
     TARGET_SOURCE_COMMIT_SHORT="${commit:0:12}" \
-    TARGET_BUILD_CHANNEL='Local' \
+    TARGET_BUILD_CHANNEL="$build_channel" \
     CONFIGURATION_BUILD_DIR="$derived_data_path/Build/Products/Release" \
     CURRENT_PROJECT_VERSION="$build_number" \
     build
 
 built_app="$derived_data_path/Build/Products/Release/Target.app"
-verify_built_app "$built_app" "$commit" "$build_number"
-install_canonical_app "$built_app" "$commit" "$build_number"
+verify_built_app "$built_app" "$commit" "$build_number" "$build_channel"
+install_canonical_app "$built_app" "$commit" "$build_number" "$build_channel"
 collect_old_apps
 collect_stale_launchservices_paths
 "$installer_lsregister" -f "$canonical_app" >/dev/null
 "$installer_mdimport" "$canonical_app"
-verify_built_app "$canonical_app" "$commit" "$build_number"
+verify_built_app "$canonical_app" "$commit" "$build_number" "$build_channel"
 printf 'installed canonical Target.app at %s\n' "$canonical_app"

@@ -15,6 +15,7 @@ public enum TargetCtlCommandParser {
         case ["profile", "list"]: return ("profile.list", [:])
         case ["policy", "list"]: return ("policy.list", [:])
         case ["policy", "reset"]: return ("policy.reset", [:])
+        case ["route", "list"]: return ("route.list", [:])
         case ["engine", "status"]: return ("engine.status", [:])
         case ["engine", "start"]: return ("engine.start", [:])
         case ["engine", "stop"]: return ("engine.stop", [:])
@@ -53,6 +54,13 @@ public enum TargetCtlCommandParser {
         if values.count == 4, values[0...1] == ["policy", "probe"],
            values[2] == "--selector" {
             return ("policy.probe", ["selector": values[3]])
+        }
+        if values.count == 8, values[0...1] == ["route", "bind"],
+           values[2] == "--url", values[4] == "--country", values[6] == "--outbound" {
+            return ("route.bind", ["url": values[3], "country": values[5], "outbound": values[7]])
+        }
+        if values.count == 4, values[0...1] == ["route", "remove"], values[2] == "--domain" {
+            return ("route.remove", ["domain": values[3]])
         }
         throw AutomationSocketError.unavailable
     }

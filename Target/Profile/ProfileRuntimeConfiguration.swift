@@ -76,6 +76,7 @@ struct ProfileRuntimeConfigurationPreparer {
         }
         guard !containsSensitivePath(root) else { throw ProfileRuntimeConfigurationError.unsafeConfiguration }
         root = applyValidPolicyOverrides(to: root, version: version)
+        root = applyValidRouteBindings(to: root, version: version)
         var inbounds: [[String: Any]]
         if let rawInbounds = root["inbounds"] {
             guard let configuredInbounds = rawInbounds as? [[String: Any]] else {
@@ -198,6 +199,36 @@ struct ProfileRuntimeConfigurationPreparer {
         }
         var result = root
         result["outbounds"] = outbounds
+        return result
+    }
+
+    private func applyValidRouteBindings(
+        to root: [String: Any],
+        version: ProfileConfigurationVersion
+    ) -> [String: Any] {
+        let catalog = PolicyCatalogParser.parse(
+            version.data,
+            profileID: version.profile.id,
+            profileRevision: version.revision,
+            overrides: version.profile.policyOverrides
+        )
+        let outboundTags = Set(catalog.selectors.flatMap(\.members).filter { $0.status == .available }.map(\.tag))
+        let bindings = version.profile.routeBindings.filter {
+            ProfileRouteBinding.normalizedDomain($0.domain) == $0.domain
+                && outboundTags.contains($0.outboundTag)
+        }
+        guard !bindings.isEmpty else { return root }
+
+        var result = root
+        var route = result["route"] as? [String: Any] ?? [:]
+        let existingRules = route["rules"] as? [Any] ?? []
+        let targetRules: [[String: Any]] = bindings.map {
+            ["domain_suffix": [$0.domain], "outbound": $0.outboundTag]
+        }
+        // Target-owned site rules must precede provider rules to make the
+        // explicit binding effective, while keeping every provider rule intact.
+        route["rules"] = targetRules + existingRules
+        result["route"] = route
         return result
     }
 

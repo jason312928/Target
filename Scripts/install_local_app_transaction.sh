@@ -325,7 +325,7 @@ recover_interrupted_installation() {
 }
 
 verify_built_app() {
-    local app="$1" commit="$2" build_number="$3"
+    local app="$1" commit="$2" build_number="$3" expected_channel="${4:-Local}"
     if test_failpoint 'verify_canonical' && [ "$app" = "$canonical_app" ]; then
         printf 'error: injected canonical verification failure: %s\n' "$app" >&2
         return 1
@@ -339,7 +339,15 @@ verify_built_app() {
     [ "$(plist_value "$app" CFBundleVersion)" = "$build_number" ] || { installer_error "unexpected build number in $app"; return 1; }
     [ "$(plist_value "$app" TargetSourceCommit)" = "$commit" ] || { installer_error "unexpected source commit in $app"; return 1; }
     [ "$(plist_value "$app" TargetSourceCommitShort)" = "${commit:0:12}" ] || { installer_error "unexpected short source commit in $app"; return 1; }
-    [ "$(plist_value "$app" TargetBuildChannel)" = 'Local' ] || { installer_error "unexpected build channel in $app"; return 1; }
+    case "$expected_channel" in
+        Local|DevelopmentPreview) ;;
+        *) installer_error "unsupported expected build channel: $expected_channel"; return 1 ;;
+    esac
+    [ "$(plist_value "$app" TargetBuildChannel)" = "$expected_channel" ] || { installer_error "unexpected build channel in $app"; return 1; }
+    if [ "$expected_channel" = 'DevelopmentPreview' ] && [ "$installer_test_mode" = false ]; then
+        /usr/bin/codesign --verify --deep --strict "$app" \
+            || { installer_error "development preview signature verification failed in $app"; return 1; }
+    fi
 }
 
 remove_controlled_staging() {
@@ -431,7 +439,7 @@ quarantine_failed_canonical() {
 }
 
 install_canonical_app() {
-    local built_app="$1" commit="$2" build_number="$3"
+    local built_app="$1" commit="$2" build_number="$3" expected_channel="${4:-Local}"
     local staging_app replaced_app failed_app transaction_id
     validate_test_mode_paths || return 1
     applications_directory="$(canonical_directory "$applications_directory")" || { installer_error 'cannot resolve Applications directory'; return 1; }
@@ -479,7 +487,7 @@ install_canonical_app() {
         rollback_install_transaction || true
         return 1
     fi
-    verify_built_app "$staging_app" "$commit" "$build_number" || {
+    verify_built_app "$staging_app" "$commit" "$build_number" "$expected_channel" || {
         rollback_install_transaction || true
         return 1
     }
@@ -497,7 +505,7 @@ install_canonical_app() {
         return 1
     fi
     install_staging_app=''
-    if ! verify_built_app "$canonical_app" "$commit" "$build_number"; then
+    if ! verify_built_app "$canonical_app" "$commit" "$build_number" "$expected_channel"; then
         quarantine_failed_canonical "$failed_app" || true
         rollback_install_transaction || true
         return 1

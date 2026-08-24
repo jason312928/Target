@@ -60,15 +60,17 @@ fi
 derived_data=''
 commit=''
 build_number=''
+build_channel=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -derivedDataPath) derived_data="$2"; shift ;;
         TARGET_SOURCE_COMMIT=*) commit="${1#*=}" ;;
         CURRENT_PROJECT_VERSION=*) build_number="${1#*=}" ;;
+        TARGET_BUILD_CHANNEL=*) build_channel="${1#*=}" ;;
     esac
     shift
 done
-[ -n "$derived_data" ] && [ -n "$commit" ] && [ -n "$build_number" ]
+[ -n "$derived_data" ] && [ -n "$commit" ] && [ -n "$build_number" ] && [ -n "$build_channel" ]
 app="$derived_data/Build/Products/Release/Target.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$app/Contents/MacOS/Target"
@@ -83,7 +85,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>CFBundleVersion</key><string>$build_number</string>
 <key>TargetSourceCommit</key><string>$commit</string>
 <key>TargetSourceCommitShort</key><string>${commit:0:12}</string>
-<key>TargetBuildChannel</key><string>Local</string>
+<key>TargetBuildChannel</key><string>$build_channel</string>
 </dict></plist>
 PLIST
 EOF
@@ -411,15 +413,17 @@ fi
 derived_data=''
 commit=''
 build_number=''
+build_channel=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -derivedDataPath) derived_data="$2"; shift ;;
         TARGET_SOURCE_COMMIT=*) commit="${1#*=}" ;;
         CURRENT_PROJECT_VERSION=*) build_number="${1#*=}" ;;
+        TARGET_BUILD_CHANNEL=*) build_channel="${1#*=}" ;;
     esac
     shift
 done
-[ -n "$derived_data" ] && [ -n "$commit" ] && [ -n "$build_number" ]
+[ -n "$derived_data" ] && [ -n "$commit" ] && [ -n "$build_number" ] && [ -n "$build_channel" ]
 app="$derived_data/Build/Products/Release/Target.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$app/Contents/MacOS/Target"
@@ -434,7 +438,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>CFBundleVersion</key><string>$build_number</string>
 <key>TargetSourceCommit</key><string>$commit</string>
 <key>TargetSourceCommitShort</key><string>${commit:0:12}</string>
-<key>TargetBuildChannel</key><string>Local</string>
+<key>TargetBuildChannel</key><string>$build_channel</string>
 </dict></plist>
 PLIST
 EOF
@@ -464,12 +468,13 @@ make_top_level_repository_fixture() {
 
 run_top_level_installer() {
     local fixture="$1" stdout_file="$2" stderr_file="$3"
+    shift 3
     (
         cd "$fixture"
         PATH="$fixture/bin:$PATH" \
             TARGET_INSTALLER_TEST_MODE=1 \
             TARGET_INSTALLER_TEST_ROOT="$test_root" \
-            bash Scripts/install_local_app.sh >"$stdout_file" 2>"$stderr_file"
+            bash Scripts/install_local_app.sh "$@" >"$stdout_file" 2>"$stderr_file"
     )
 }
 
@@ -529,7 +534,29 @@ after_tree="$(find "$test_root" -print | LC_ALL=C sort)"
 [ -d "$test_root/Home/Applications/Target.app" ] || fail_test 'dry run modified an old app candidate'
 pass_test 'dry run exits 0 and makes no filesystem changes in the isolated root'
 
-# 20. Normal mode has no path injection and remains fixed to /Applications/Target.app.
+# 20. Development preview mode emits and verifies the update-enabled channel.
+reset_apps
+fixture="$test_root/DevelopmentPreviewRepository"
+make_top_level_repository_fixture "$fixture"
+run_top_level_installer \
+    "$fixture" \
+    "$test_root/development-preview.stdout" \
+    "$test_root/development-preview.stderr" \
+    --channel development-preview \
+    || fail_test 'development preview installation failed'
+[ -d "$canonical_app" ] || {
+    cat "$test_root/development-preview.stdout" >&2
+    cat "$test_root/development-preview.stderr" >&2
+    fail_test 'development preview canonical app is missing'
+}
+installed_channel="$(plist_value "$canonical_app" TargetBuildChannel)"
+[ "$installed_channel" = 'DevelopmentPreview' ] \
+    || fail_test "development preview channel was not installed: $installed_channel"
+grep -Fq 'build channel: DevelopmentPreview' "$test_root/development-preview.stdout" \
+    || fail_test 'development preview channel was not reported'
+pass_test 'development preview mode installs an update-enabled channel'
+
+# 21. Normal mode has no path injection and remains fixed to /Applications/Target.app.
 env -u TARGET_INSTALLER_TEST_MODE -u TARGET_INSTALLER_TEST_ROOT bash -c '
     source "$1"
     configure_installer_paths

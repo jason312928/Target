@@ -84,6 +84,84 @@ struct ProfileVersionSummary: Identifiable, Equatable, Sendable {
     var id: Int { revision }
 }
 
+/// A Target-owned, domain-scoped route. These bindings live in the encrypted
+/// Profile manifest so subscription refreshes never overwrite a user's choices.
+struct ProfileRouteBinding: Codable, Equatable, Sendable, Identifiable {
+    let domain: String
+    let outboundTag: String
+    let countryCode: String
+
+    var id: String { domain }
+
+    init?(domain: String, outboundTag: String, countryCode: String) {
+        guard let normalizedDomain = Self.normalizedDomain(domain),
+              Self.isValidOutboundTag(outboundTag),
+              Self.isValidCountryCode(countryCode) else {
+            return nil
+        }
+        self.domain = normalizedDomain
+        self.outboundTag = outboundTag
+        self.countryCode = countryCode.uppercased()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case domain, outboundTag, countryCode
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let domain = try values.decode(String.self, forKey: .domain)
+        let outboundTag = try values.decode(String.self, forKey: .outboundTag)
+        let countryCode = try values.decode(String.self, forKey: .countryCode)
+        guard let binding = Self(domain: domain, outboundTag: outboundTag, countryCode: countryCode) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .domain,
+                in: values,
+                debugDescription: "Invalid site route binding"
+            )
+        }
+        self = binding
+    }
+
+    static func domain(from url: URL) -> String? {
+        guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = url.host(percentEncoded: false) else {
+            return nil
+        }
+        return normalizedDomain(host)
+    }
+
+    static func normalizedDomain(_ value: String) -> String? {
+        let candidate = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        guard candidate.count > 0, candidate.count <= 253, candidate.contains("."),
+              !candidate.hasSuffix(".local") else { return nil }
+        let labels = candidate.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 2, labels.allSatisfy({ label in
+            guard !label.isEmpty, label.count <= 63,
+                  label.first?.isASCII == true, label.last?.isASCII == true,
+                  label.first?.isLetter == true || label.first?.isNumber == true,
+                  label.last?.isLetter == true || label.last?.isNumber == true else {
+                return false
+            }
+            return label.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" }
+        }) else {
+            return nil
+        }
+        guard !labels.allSatisfy({ $0.allSatisfy(\.isNumber) }) else { return nil }
+        return candidate
+    }
+
+    static func isValidOutboundTag(_ value: String) -> Bool {
+        !value.isEmpty && value.count <= 256 && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+    }
+
+    static func isValidCountryCode(_ value: String) -> Bool {
+        value.count == 2 && value.allSatisfy { $0.isASCII && $0.isLetter }
+    }
+}
+
 struct Profile: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
     var name: String
@@ -95,6 +173,8 @@ struct Profile: Identifiable, Codable, Equatable, Sendable {
     /// Target-owned selector choices. These values are encrypted with the
     /// enclosing manifest and never rewrite the user's configuration JSON.
     var policyOverrides: [String: String]
+    /// Target-owned domain routes, injected only into the ephemeral runtime copy.
+    var routeBindings: [ProfileRouteBinding]
 
     var hasRemoteSubscription: Bool { subscription != nil }
 
@@ -106,7 +186,8 @@ struct Profile: Identifiable, Codable, Equatable, Sendable {
         updatedAt: Date,
         validation: ProfileValidation,
         validRevision: Int,
-        policyOverrides: [String: String] = [:]
+        policyOverrides: [String: String] = [:],
+        routeBindings: [ProfileRouteBinding] = []
     ) {
         self.id = id
         self.name = name
@@ -116,10 +197,11 @@ struct Profile: Identifiable, Codable, Equatable, Sendable {
         self.validation = validation
         self.validRevision = validRevision
         self.policyOverrides = policyOverrides
+        self.routeBindings = routeBindings
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, subscription, createdAt, updatedAt, validation, validRevision, policyOverrides
+        case id, name, subscription, createdAt, updatedAt, validation, validRevision, policyOverrides, routeBindings
     }
 
     init(from decoder: any Decoder) throws {
@@ -132,7 +214,8 @@ struct Profile: Identifiable, Codable, Equatable, Sendable {
             updatedAt: try values.decode(Date.self, forKey: .updatedAt),
             validation: try values.decode(ProfileValidation.self, forKey: .validation),
             validRevision: try values.decode(Int.self, forKey: .validRevision),
-            policyOverrides: try values.decodeIfPresent([String: String].self, forKey: .policyOverrides) ?? [:]
+            policyOverrides: try values.decodeIfPresent([String: String].self, forKey: .policyOverrides) ?? [:],
+            routeBindings: try values.decodeIfPresent([ProfileRouteBinding].self, forKey: .routeBindings) ?? []
         )
     }
 }

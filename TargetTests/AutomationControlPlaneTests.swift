@@ -155,6 +155,58 @@ final class AutomationControlPlaneTests: XCTestCase {
         ]))
     }
 
+    func testTargetCtlRouteParserRequiresExactArguments() throws {
+        XCTAssertEqual(
+            try TargetCtlCommandParser.parse(["route", "list", "--json"]).action,
+            "route.list"
+        )
+        let bind = try TargetCtlCommandParser.parse([
+            "route", "bind", "--url", "https://chat.openai.com/path?token=secret",
+            "--country", "US", "--outbound", "United States 01", "--json"
+        ])
+        XCTAssertEqual(bind.action, "route.bind")
+        XCTAssertEqual(bind.arguments["country"], "US")
+        let remove = try TargetCtlCommandParser.parse([
+            "route", "remove", "--domain", "chat.openai.com", "--json"
+        ])
+        XCTAssertEqual(remove.action, "route.remove")
+        XCTAssertThrowsError(try TargetCtlCommandParser.parse(["route", "bind", "--json"]))
+    }
+
+    func testRouteAutomationPersistsListsRemovesAndReturnsDomainOnly() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDirectory: root, checker: AutomationPassingChecker(), keyProvider: TestProfileKeyProvider())
+        let profile = try store.create(name: "Routes")
+        try store.save(json: policyConfiguration(configuredDefault: "United States 01", members: ["United States 01"]), for: profile.id)
+        let operations = TargetAutomationOperations(profileStore: store, backend: MockBackend())
+        let bound = await operations.handle(.init(
+            protocolVersion: 1,
+            action: "route.bind",
+            arguments: [
+                "url": "https://chat.openai.com/private/path?token=ROUTE-SECRET",
+                "country": "US",
+                "outbound": "United States 01"
+            ]
+        ))
+        XCTAssertTrue(bound.ok)
+        let encoded = String(decoding: AutomationProtocol.encodeResponse(bound), as: UTF8.self)
+        XCTAssertTrue(encoded.contains("chat.openai.com"))
+        XCTAssertFalse(encoded.contains("ROUTE-SECRET"))
+        XCTAssertFalse(encoded.contains("private/path"))
+
+        let listed = await operations.handle(.init(protocolVersion: 1, action: "route.list"))
+        XCTAssertTrue(listed.ok)
+        XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(listed), as: UTF8.self).contains("United States 01"))
+        let removed = await operations.handle(.init(
+            protocolVersion: 1,
+            action: "route.remove",
+            arguments: ["domain": "CHAT.OPENAI.COM"]
+        ))
+        XCTAssertTrue(removed.ok)
+        XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(removed), as: UTF8.self).contains("\"removed\":true"))
+    }
+
     func testPolicyProbeAutomationUsesSharedOperationAndReturnsDeterministicSafeJSON() async throws {
         let profileID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
         let shared = AutomationProbePolicyOperation(result: PolicyLatencyProbeResult(

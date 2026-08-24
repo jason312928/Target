@@ -10,6 +10,70 @@ final class ProfilePolicyPersistenceTests: XCTestCase, ProfileTestCaseSupport {
         decoder.dateDecodingStrategy = .secondsSince1970
         let profile = try decoder.decode(Profile.self, from: data)
         XCTAssertEqual(profile.policyOverrides, [:])
+        XCTAssertEqual(profile.routeBindings, [])
+    }
+
+    func testSiteRouteBindingNormalizesPersistsReassignsAndRemovesWithoutChangingSource() throws {
+        let root = try temporaryDirectory()
+        let keys = TestProfileKeyProvider()
+        let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        let profile = try store.create(name: "Routes")
+        let source = policyConfiguration(configuredDefault: "United States 01", members: ["United States 01", "Japan 01"])
+        try store.save(json: source, for: profile.id)
+        let version = try store.selectedValidVersion()
+        let first = try XCTUnwrap(ProfileRouteBinding(domain: "Chat.OpenAI.COM.", outboundTag: "United States 01", countryCode: "us"))
+        try store.persistRouteBinding(profileID: profile.id, expectedRevision: version.revision, binding: first)
+        let replacement = try XCTUnwrap(ProfileRouteBinding(domain: "chat.openai.com", outboundTag: "Japan 01", countryCode: "JP"))
+        try store.persistRouteBinding(profileID: profile.id, expectedRevision: version.revision, binding: replacement)
+
+        let reopened = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: keys)
+        XCTAssertEqual(try reopened.selectedValidVersion().profile.routeBindings, [replacement])
+        XCTAssertEqual(try reopened.configurationText(for: profile.id), source)
+        XCTAssertEqual(try reopened.selectedValidVersion().revision, version.revision)
+        let disk = try recursiveData(in: root)
+        XCTAssertFalse(disk.contains(Data("chat.openai.com".utf8)))
+        XCTAssertTrue(try reopened.removeRouteBinding(profileID: profile.id, expectedRevision: version.revision, domain: "CHAT.OPENAI.COM"))
+        XCTAssertFalse(try reopened.removeRouteBinding(profileID: profile.id, expectedRevision: version.revision, domain: "chat.openai.com"))
+    }
+
+    func testRuntimeCopyPrependsValidSiteRoutesAndSkipsRemovedOutbounds() throws {
+        let store = try makeStore()
+        let profile = try store.create(name: "Runtime Routes")
+        let source = #"{"inbounds":[{"type":"mixed","tag":"local","listen":"127.0.0.1","listen_port":0}],"outbounds":[{"type":"selector","tag":"group","outbounds":["United States 01"],"default":"United States 01"},{"type":"direct","tag":"United States 01"}],"route":{"rules":[{"domain_suffix":["example.org"],"outbound":"group"}],"final":"group"}}"#
+        try store.save(json: source, for: profile.id)
+        let version = try store.selectedValidVersion()
+        let active = try XCTUnwrap(ProfileRouteBinding(domain: "chat.openai.com", outboundTag: "United States 01", countryCode: "US"))
+        try store.persistRouteBinding(profileID: profile.id, expectedRevision: version.revision, binding: active)
+
+        let prepared = try ProfileRuntimeConfigurationPreparer(portSelector: FixedPortSelector(port: 51_234))
+            .prepare(store.selectedValidVersion())
+        let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: prepared.data) as? [String: Any])
+        let route = try XCTUnwrap(root["route"] as? [String: Any])
+        let rules = try XCTUnwrap(route["rules"] as? [[String: Any]])
+        XCTAssertEqual(rules.count, 2)
+        XCTAssertEqual(rules[0]["domain_suffix"] as? [String], ["chat.openai.com"])
+        XCTAssertEqual(rules[0]["outbound"] as? String, "United States 01")
+        XCTAssertEqual(rules[1]["outbound"] as? String, "group")
+
+        try store.save(json: #"{"outbounds":[{"type":"direct","tag":"replacement"}],"route":{"final":"replacement"}}"#, for: profile.id)
+        let refreshed = try ProfileRuntimeConfigurationPreparer(portSelector: FixedPortSelector(port: 51_235))
+            .prepare(store.selectedValidVersion())
+        let refreshedRoot = try XCTUnwrap(try JSONSerialization.jsonObject(with: refreshed.data) as? [String: Any])
+        XCTAssertNil((refreshedRoot["route"] as? [String: Any])?["rules"])
+    }
+
+    func testSiteRouteRejectsInvalidDomainsAndUnavailableOutbound() throws {
+        XCTAssertNil(ProfileRouteBinding(domain: "localhost", outboundTag: "node", countryCode: "US"))
+        XCTAssertNil(ProfileRouteBinding(domain: "127.0.0.1", outboundTag: "node", countryCode: "US"))
+        XCTAssertNil(ProfileRouteBinding(domain: "example.local", outboundTag: "node", countryCode: "US"))
+        XCTAssertNil(ProfileRouteBinding(domain: "example.com", outboundTag: "", countryCode: "US"))
+
+        let store = try makeStore()
+        let profile = try store.create(name: "Unavailable Route")
+        try store.save(json: policyConfiguration(configuredDefault: "first", members: ["first"]), for: profile.id)
+        let version = try store.selectedValidVersion()
+        let binding = try XCTUnwrap(ProfileRouteBinding(domain: "chat.openai.com", outboundTag: "missing", countryCode: "US"))
+        XCTAssertThrowsError(try store.persistRouteBinding(profileID: profile.id, expectedRevision: version.revision, binding: binding))
     }
 
     func testPolicySelectionPersistsEncryptedMetadataWithoutChangingSourceOrRevision() async throws {

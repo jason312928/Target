@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ProfilePolicyWorkspaceView: View {
     let catalog: PolicyCatalog?
@@ -10,6 +11,9 @@ struct ProfilePolicyWorkspaceView: View {
     let lifecycle: BackendLifecycleModel?
     var participatingCountryRoutes: [PolicyCountryRoute]? = nil
     var chooseParticipatingCountry: ((String) -> Void)? = nil
+    var routeBindings: [ProfileRouteBinding] = []
+    var bindRoute: ((URL, String, String) -> Void)? = nil
+    var removeRouteBinding: ((String) -> Void)? = nil
     let select: (String, String) -> Void
     let probeLatency: (Int, String) -> Void
     let reset: () -> Void
@@ -174,6 +178,10 @@ struct ProfilePolicyWorkspaceView: View {
                 exposesSelectorAccessibilityIdentity: presentation.selectors.count == 1,
                 participatingCountryRoutes: participatingCountryRoutes,
                 chooseParticipatingCountry: chooseParticipatingCountry,
+                routeBindings: routeBindings,
+                availableRouteOutboundTags: Set(presentation.selectors.flatMap(\.members).filter(\.isSelectable).map(\.tag)),
+                bindRoute: bindRoute,
+                removeRouteBinding: removeRouteBinding,
                 select: select,
                 restart: { lifecycle?.restartWithCurrentProfile() }
             )
@@ -226,28 +234,46 @@ private struct SelectorDetail: View {
     let exposesSelectorAccessibilityIdentity: Bool
     let participatingCountryRoutes: [PolicyCountryRoute]?
     let chooseParticipatingCountry: ((String) -> Void)?
+    let routeBindings: [ProfileRouteBinding]
+    let availableRouteOutboundTags: Set<String>
+    let bindRoute: ((URL, String, String) -> Void)?
+    let removeRouteBinding: ((String) -> Void)?
     let select: (String, String) -> Void
     let restart: () -> Void
     @Environment(\.locale) private var locale
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var pendingSelection: String?
+    @State private var inspectedCountryCode: String?
     @SceneStorage("policy.workspace.countries-expanded") private var countriesExpanded = true
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                if selector.members.isEmpty {
-                    emptySelectorState
-                } else {
-                    if selector.restartRequired || selector.runtime.state == .unavailable {
-                        runtimeSummary
-                    }
-                    destinations
-                }
+        HStack(spacing: 0) {
+            if let inspectedRoute {
+                CountryRouteInspector(
+                    route: inspectedRoute,
+                    bindings: routeBindings.filter { $0.countryCode == inspectedRoute.country.code },
+                    availableRouteOutboundTags: availableRouteOutboundTags,
+                    close: { inspectedCountryCode = nil }
+                )
+                .frame(width: 260)
+                Divider()
             }
-            .frame(maxWidth: ProfileWorkspaceLayout.contentMaxWidth, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(20)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    if selector.members.isEmpty {
+                        emptySelectorState
+                    } else {
+                        siteRoutes
+                        if selector.restartRequired || selector.runtime.state == .unavailable {
+                            runtimeSummary
+                        }
+                        destinations
+                    }
+                }
+                .frame(maxWidth: ProfileWorkspaceLayout.contentMaxWidth, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(20)
+            }
         }
         .onChange(of: isSelecting) { wasSelecting, selecting in
             if wasSelecting && !selecting {
@@ -316,6 +342,11 @@ private struct SelectorDetail: View {
         pendingSelection ?? selector.desiredSelection
     }
 
+    private var inspectedRoute: PolicyCountryRoute? {
+        guard let inspectedCountryCode else { return nil }
+        return (participatingCountryRoutes ?? selector.countryRoutes).first { $0.id == inspectedCountryCode }
+    }
+
     private var filteredCountryRoutes: [PolicyCountryRoute] {
         let routes = participatingCountryRoutes ?? selector.countryRoutes
         return routes.filter { $0.matches(query: query) }
@@ -353,6 +384,9 @@ private struct SelectorDetail: View {
                 CountryRouteMap(
                     routes: filteredMapCountryRoutes,
                     selectedMemberTag: selectedMemberTag,
+                    bindings: routeBindings,
+                    bind: bindURL,
+                    inspect: { inspectedCountryCode = $0.id },
                     choose: { route in
                         if let chooseParticipatingCountry {
                             chooseParticipatingCountry(route.id)
@@ -378,6 +412,9 @@ private struct SelectorDetail: View {
             CountryRouteGrid(
                 routes: filteredCountryRoutes,
                 selectedMemberTag: selectedMemberTag,
+                bindings: routeBindings,
+                bind: bindURL,
+                inspect: { inspectedCountryCode = $0.id },
                 choose: { route in
                     if let chooseParticipatingCountry {
                         chooseParticipatingCountry(route.id)
@@ -449,11 +486,56 @@ private struct SelectorDetail: View {
         select(selectorTag, member.tag)
     }
 
+    private var siteRoutes: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Label("profile.route.title", systemImage: "link")
+                    .font(.headline)
+                Text("\(routeBindings.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Text("profile.route.drop-hint")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if routeBindings.isEmpty {
+                Text("profile.route.empty")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 190, maximum: 280), spacing: 8)],
+                    alignment: .leading,
+                    spacing: 8
+                ) {
+                    ForEach(routeBindings) { binding in
+                        RouteBindingChip(
+                            binding: binding,
+                            isAvailable: availableRouteOutboundTags.contains(binding.outboundTag)
+                        ) {
+                            removeRouteBinding?(binding.domain)
+                        }
+                    }
+                }
+            }
+        }
+        .accessibilityIdentifier("profile.route.bindings")
+    }
+
+    private func bindURL(_ url: URL, to route: PolicyCountryRoute) {
+        guard let member = route.bestMember else { return }
+        bindRoute?(url, route.country.code, member.tag)
+    }
+
 }
 
 private struct CountryRouteMap: View {
     let routes: [PolicyCountryRoute]
     let selectedMemberTag: String?
+    let bindings: [ProfileRouteBinding]
+    let bind: (URL, PolicyCountryRoute) -> Void
+    let inspect: (PolicyCountryRoute) -> Void
     let choose: (PolicyCountryRoute) -> Void
     @Environment(\.locale) private var locale
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
@@ -550,6 +632,17 @@ private struct CountryRouteMap: View {
         .accessibilityValue(countryAccessibilityValue(route, selected: isSelected))
         .accessibilityHint(Text("policy.workspace.country.choose.hint"))
         .accessibilityIdentifier("policy.workspace.country.\(route.id)")
+        .onDrop(of: [.url], isTargeted: nil) { providers in
+            RouteBindingDrop.load(from: providers) { url in bind(url, route) }
+        }
+        .contextMenu {
+            Button("profile.route.view-details", systemImage: "sidebar.left") { inspect(route) }
+            Divider()
+            Text("\(route.members.filter(\.isSelectable).count) \(String(localized: "policy.workspace.nodes"))")
+            ForEach(bindings.filter { $0.countryCode == route.country.code }) { binding in
+                Text(binding.domain)
+            }
+        }
     }
 
     private func countryAccessibilityValue(_ route: PolicyCountryRoute, selected: Bool) -> Text {
@@ -702,6 +795,9 @@ private struct SoftPressButtonStyle: ButtonStyle {
 private struct CountryRouteGrid: View {
     let routes: [PolicyCountryRoute]
     let selectedMemberTag: String?
+    let bindings: [ProfileRouteBinding]
+    let bind: (URL, PolicyCountryRoute) -> Void
+    let inspect: (PolicyCountryRoute) -> Void
     let choose: (PolicyCountryRoute) -> Void
     @Environment(\.locale) private var locale
 
@@ -716,6 +812,9 @@ private struct CountryRouteGrid: View {
                     route: route,
                     selectedMemberTag: selectedMemberTag,
                     localeIdentifier: locale.identifier,
+                    bindings: bindings.filter { $0.countryCode == route.country.code },
+                    bind: bind,
+                    inspect: { inspect(route) },
                     choose: { choose(route) }
                 )
             }
@@ -728,9 +827,13 @@ private struct CountryRouteCard: View {
     let route: PolicyCountryRoute
     let selectedMemberTag: String?
     let localeIdentifier: String
+    let bindings: [ProfileRouteBinding]
+    let bind: (URL, PolicyCountryRoute) -> Void
+    let inspect: () -> Void
     let choose: () -> Void
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var isHovering = false
+    @State private var isAddingLink = false
 
     private var isSelected: Bool {
         route.members.contains(where: { $0.tag == selectedMemberTag })
@@ -795,6 +898,26 @@ private struct CountryRouteCard: View {
         .accessibilityValue(Text("\(route.members.count) \(String(localized: "policy.workspace.nodes"))"))
         .accessibilityHint(Text("policy.workspace.country.choose.hint"))
         .accessibilityIdentifier("policy.workspace.country-card.\(route.id)")
+        .onDrop(of: [.url], isTargeted: nil) { providers in
+            RouteBindingDrop.load(from: providers) { url in bind(url, route) }
+        }
+        .contextMenu {
+            Button("profile.route.view-details", systemImage: "sidebar.left", action: inspect)
+            Divider()
+            Text("\(route.members.filter(\.isSelectable).count) \(String(localized: "policy.workspace.nodes"))")
+            ForEach(bindings) { binding in
+                Text(binding.domain)
+            }
+            Divider()
+            Button("profile.route.add-link", systemImage: "link.badge.plus") {
+                isAddingLink = true
+            }
+        }
+        .sheet(isPresented: $isAddingLink) {
+            RouteBindingSheet(route: route) { url in
+                bind(url, route)
+            }
+        }
     }
 
     private func latencyTint(_ latency: Int) -> Color {

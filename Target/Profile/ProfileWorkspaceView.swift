@@ -143,6 +143,14 @@ struct ProfileWorkspaceView: View {
                         countryCode,
                         participatingProfileIDs: participatingProfileIDs
                     )
+                },
+                bindRoute: { url, countryCode, outboundTag in
+                    model.bindRoute(
+                        url: url,
+                        countryCode: countryCode,
+                        outboundTag: outboundTag,
+                        participatingProfileIDs: participatingProfileIDs
+                    )
                 }
             )
         } else {
@@ -338,6 +346,7 @@ private struct ProfileWorkspaceDetailView: View {
     let participatingProfileCount: Int
     let participatingCountryRoutes: [PolicyCountryRoute]
     let chooseParticipatingCountry: (String) -> Void
+    let bindRoute: (URL, String, String) -> Bool
     private var presentation: ProfileWorkspacePresentation { ProfileWorkspacePresentation(profile: profile) }
 
     var body: some View {
@@ -414,6 +423,14 @@ private struct ProfileWorkspaceDetailView: View {
                 lifecycle: lifecycle,
                 participatingCountryRoutes: participatingCountryRoutes,
                 chooseParticipatingCountry: chooseParticipatingCountry,
+                routeBindings: profile.routeBindings,
+                bindRoute: { url, countryCode, outboundTag in
+                    let saved = bindRoute(url, countryCode, outboundTag)
+                    if saved, lifecycle?.isEngineRunning == true, lifecycle?.canRestart == true {
+                        lifecycle?.restartWithCurrentProfile()
+                    }
+                },
+                removeRouteBinding: model.removeRouteBinding,
                 select: model.selectPolicy,
                 probeLatency: model.probePolicyLatency,
                 reset: model.resetPolicy,
