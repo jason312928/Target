@@ -52,22 +52,22 @@ Provider-specific rules, groups, and DNS semantics are not imported wholesale. T
 
 ### Download a preview
 
-1. Download `Target-1.0.0-dev.7-macos-arm64.zip` from [Development Preview 7](https://github.com/jason312928/Target/releases/tag/v1.0.0-dev.7).
+1. Download `Target-1.0.0-dev.8-macos-arm64.zip` from [Development Preview 8](https://github.com/jason312928/Target/releases/tag/v1.0.0-dev.8).
 2. Extract it and move `Target.app` to Applications.
 3. On first launch, Control-click the app and choose Open.
 4. Follow the Dashboard prompts to install the sing-box engine and TargetService.
 5. Import sing-box JSON or add a supported subscription in Profiles, select it, then return to Dashboard and connect.
 
-Development Preview 7 requires:
+Development Preview 8 requires:
 
 - macOS 15 or later
 - Apple silicon (arm64)
-- SHA-256: `c903291acd50d62bfc6d9d011e23ed70fdc101b9ec601e8112c9fe9f6217bf72`
+- SHA-256: `baa7b24d0f367b32b582acc8b487af7142afc967e2c46cf6348b5da1938f9daf`
 
 Verify the download from its directory:
 
 ```sh
-shasum -a 256 Target-1.0.0-dev.7-macos-arm64.zip
+shasum -a 256 Target-1.0.0-dev.8-macos-arm64.zip
 ```
 
 > [!NOTE]

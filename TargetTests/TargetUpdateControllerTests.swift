@@ -102,23 +102,24 @@ final class TargetUpdateControllerTests: XCTestCase {
         XCTAssertEqual(document.rootElement()?.namespaces?.first(where: { $0.name == "sparkle" })?.stringValue, sparkleNamespace)
 
         let items = try document.nodes(forXPath: "//item")
-        XCTAssertEqual(items.count, 6)
+        XCTAssertEqual(items.count, 7)
         XCTAssertEqual(
             try document.nodes(forXPath: "//*[name()='sparkle:channel']").compactMap(\.stringValue),
-            ["development", "development", "development", "development", "development", "development"]
+            ["development", "development", "development", "development", "development", "development", "development"]
         )
         XCTAssertEqual(
             try document.nodes(forXPath: "//*[name()='sparkle:version']").compactMap(\.stringValue),
-            ["126", "100", "5", "4", "3", "2"]
+            ["133", "126", "100", "5", "4", "3", "2"]
         )
         XCTAssertEqual(
             try document.nodes(forXPath: "//*[name()='sparkle:shortVersionString']").compactMap(\.stringValue),
-            ["1.0.0", "1.0.0", "1.0.0", "1.0.0", "1.0.0", "1.0.0"]
+            ["1.0.0", "1.0.0", "1.0.0", "1.0.0", "1.0.0", "1.0.0", "1.0.0"]
         )
 
         let enclosures = try document.nodes(forXPath: "//enclosure").compactMap { $0 as? XMLElement }
-        XCTAssertEqual(enclosures.count, 6)
+        XCTAssertEqual(enclosures.count, 7)
         let expectedAssets = [
+            ("v1.0.0-dev.8/Target-1.0.0-dev.8-macos-arm64.zip", "3891735"),
             ("v1.0.0-dev.7/Target-1.0.0-dev.7-macos-arm64.zip", "3762131"),
             ("v1.0.0-dev.6/Target-1.0.0-dev.6-macos-arm64.zip", "3695611"),
             ("v1.0.0-dev.5/Target-1.0.0-dev.5-macos-arm64.zip", "3671391"),
