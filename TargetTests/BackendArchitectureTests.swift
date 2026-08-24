@@ -468,6 +468,50 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertFalse(TargetServiceBundleLocation.isStable(temporaryApp))
     }
 
+    func testServiceV2UsesFreshMachServiceAndAppleRecommendedExecutableLayout() throws {
+        XCTAssertEqual(TargetServiceIdentifiers.machService, "com.jason312928.Target.TargetService.v2")
+        XCTAssertEqual(TargetServiceIdentifiers.launchDaemonPlistName, "com.jason312928.Target.TargetService.v2.plist")
+        XCTAssertEqual(TargetServiceIdentifiers.executableBundlePath, "Contents/MacOS/TargetService")
+        XCTAssertNotEqual(TargetServiceIdentifiers.machService, TargetServiceIdentifiers.legacyMachService)
+        XCTAssertNotEqual(
+            TargetServiceIdentifiers.launchDaemonPlistName,
+            TargetServiceIdentifiers.legacyLaunchDaemonPlistName
+        )
+
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let launchDaemons = root.appending(path: "TargetService")
+        let current = try XCTUnwrap(
+            NSDictionary(
+                contentsOf: launchDaemons.appending(path: TargetServiceIdentifiers.launchDaemonPlistName)
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(current["Label"] as? String, TargetServiceIdentifiers.machService)
+        XCTAssertEqual(current["BundleProgram"] as? String, TargetServiceIdentifiers.executableBundlePath)
+        XCTAssertEqual(
+            (current["MachServices"] as? [String: Bool])?[TargetServiceIdentifiers.machService],
+            true
+        )
+
+        let legacy = try XCTUnwrap(
+            NSDictionary(
+                contentsOf: launchDaemons.appending(path: TargetServiceIdentifiers.legacyLaunchDaemonPlistName)
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(legacy["Label"] as? String, TargetServiceIdentifiers.legacyMachService)
+        XCTAssertEqual(legacy["BundleProgram"] as? String, TargetServiceIdentifiers.executableBundlePath)
+    }
+
+    func testProjectEmbedsServiceInMacOSAndBothMigrationPlistsInLaunchDaemons() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let project = try String(
+            contentsOf: root.appending(path: "Target.xcodeproj/project.pbxproj"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(project.contains("dstPath = \"\"; dstSubfolderSpec = 6; files = (A1000000000000000000000E"))
+        XCTAssertTrue(project.contains("com.jason312928.Target.TargetService.v2.plist in Embed LaunchDaemon Definition"))
+        XCTAssertFalse(project.contains("dstPath = \"Contents/Library/HelperTools\""))
+    }
+
     func testMockBackendStartsAndStopsWhenServiceIsInstalled() async throws {
         let backend = MockBackend(initialStatus: BackendStatus(serviceInstallation: .enabled, engineState: .stopped, engineInstallation: .installed, hasSelectedValidProfile: true))
 

@@ -345,8 +345,29 @@ verify_built_app() {
     esac
     [ "$(plist_value "$app" TargetBuildChannel)" = "$expected_channel" ] || { installer_error "unexpected build channel in $app"; return 1; }
     if [ "$expected_channel" = 'DevelopmentPreview' ] && [ "$installer_test_mode" = false ]; then
+        local helper="$app/Contents/MacOS/TargetService"
+        local current_plist="$app/Contents/Library/LaunchDaemons/com.jason312928.Target.TargetService.v2.plist"
+        local legacy_plist="$app/Contents/Library/LaunchDaemons/com.jason312928.Target.TargetService.plist"
+        [ -f "$helper" ] && [ ! -L "$helper" ] && [ -x "$helper" ] \
+            || { installer_error "missing regular executable TargetService in $app/Contents/MacOS"; return 1; }
+        [ ! -e "$app/Contents/Library/HelperTools/TargetService" ] \
+            || { installer_error "obsolete HelperTools TargetService remains in $app"; return 1; }
+        for service_plist in "$current_plist" "$legacy_plist"; do
+            [ -f "$service_plist" ] && [ ! -L "$service_plist" ] \
+                || { installer_error "missing regular LaunchDaemon plist in $app"; return 1; }
+            /usr/bin/plutil -lint "$service_plist" >/dev/null \
+                || { installer_error "invalid LaunchDaemon plist in $app"; return 1; }
+            [ "$(/usr/libexec/PlistBuddy -c 'Print :BundleProgram' "$service_plist" 2>/dev/null)" = 'Contents/MacOS/TargetService' ] \
+                || { installer_error "unexpected BundleProgram in $service_plist"; return 1; }
+        done
+        [ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$current_plist" 2>/dev/null)" = 'com.jason312928.Target.TargetService.v2' ] \
+            || { installer_error "unexpected v2 service label in $current_plist"; return 1; }
+        [ "$(/usr/libexec/PlistBuddy -c 'Print :MachServices:com.jason312928.Target.TargetService.v2' "$current_plist" 2>/dev/null)" = 'true' ] \
+            || { installer_error "missing v2 Mach service in $current_plist"; return 1; }
         /usr/bin/codesign --verify --deep --strict "$app" \
             || { installer_error "development preview signature verification failed in $app"; return 1; }
+        /usr/bin/codesign --verify --strict "$helper" \
+            || { installer_error "TargetService signature verification failed in $app"; return 1; }
     fi
 }
 

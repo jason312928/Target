@@ -8,7 +8,18 @@ enum TargetServiceRegistration {
     }
 
     static var status: ServiceInstallationState {
-        let service = SMAppService.daemon(plistName: TargetServiceIdentifiers.launchDaemonPlistName)
+        installationState(for: currentService)
+    }
+
+    private static var currentService: SMAppService {
+        SMAppService.daemon(plistName: TargetServiceIdentifiers.launchDaemonPlistName)
+    }
+
+    private static var legacyService: SMAppService {
+        SMAppService.daemon(plistName: TargetServiceIdentifiers.legacyLaunchDaemonPlistName)
+    }
+
+    private static func installationState(for service: SMAppService) -> ServiceInstallationState {
         switch service.status {
         case .notRegistered:
             return .notRegistered
@@ -25,9 +36,14 @@ enum TargetServiceRegistration {
 
     static func register() throws {
         guard isStableInstallation else { throw BackendError.serviceRegistrationFailed }
-        let service = SMAppService.daemon(plistName: TargetServiceIdentifiers.launchDaemonPlistName)
+        // Retire the original registration before enabling v2. This prevents an
+        // old root daemon and the replacement daemon from observing the same
+        // recovery record concurrently. The legacy plist points at the relocated
+        // executable so macOS 26 can resolve the stale record while unregistering
+        // it; the application never registers that legacy definition again.
+        try unregisterIfRegistered(legacyService)
         do {
-            try service.register()
+            try currentService.register()
         } catch {
             if status == .requiresApproval {
                 return
@@ -37,11 +53,22 @@ enum TargetServiceRegistration {
     }
 
     static func unregister() throws {
-        let service = SMAppService.daemon(plistName: TargetServiceIdentifiers.launchDaemonPlistName)
         do {
-            try service.unregister()
+            try unregisterIfRegistered(currentService)
+            try unregisterIfRegistered(legacyService)
         } catch {
             throw BackendError.serviceRegistrationFailed
+        }
+    }
+
+    private static func unregisterIfRegistered(_ service: SMAppService) throws {
+        switch service.status {
+        case .notRegistered, .notFound:
+            return
+        case .enabled, .requiresApproval:
+            try service.unregister()
+        @unknown default:
+            try service.unregister()
         }
     }
 }
@@ -50,8 +77,9 @@ enum TargetServiceBundleLocation {
     static func isStable(_ bundleURL: URL) -> Bool {
         let bundlePath = bundleURL.resolvingSymlinksInPath().path
         guard !bundlePath.contains("/DerivedData/"),
-              FileManager.default.fileExists(atPath: bundleURL.appending(path: "Contents/Library/HelperTools/TargetService").path),
-              FileManager.default.fileExists(atPath: bundleURL.appending(path: "Contents/Library/LaunchDaemons/\(TargetServiceIdentifiers.launchDaemonPlistName)").path) else {
+              FileManager.default.fileExists(atPath: bundleURL.appending(path: TargetServiceIdentifiers.executableBundlePath).path),
+              FileManager.default.fileExists(atPath: bundleURL.appending(path: "Contents/Library/LaunchDaemons/\(TargetServiceIdentifiers.launchDaemonPlistName)").path),
+              FileManager.default.fileExists(atPath: bundleURL.appending(path: "Contents/Library/LaunchDaemons/\(TargetServiceIdentifiers.legacyLaunchDaemonPlistName)").path) else {
             return false
         }
 

@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.jason312928.Target.TargetService</string>
+    <string>com.jason312928.Target.TargetService.v2</string>
     <key>BundleProgram</key>
     <string>Contents/MacOS/TargetService</string>
     <key>MachServices</key>
     <dict>
-        <key>com.jason312928.Target.TargetService</key>
+        <key>com.jason312928.Target.TargetService.v2</key>
         <true/>
     </dict>
 </dict>

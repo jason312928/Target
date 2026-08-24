@@ -1,8 +1,14 @@
 import Foundation
 
 enum TargetServiceIdentifiers {
-    static let machService = "com.jason312928.Target.TargetService"
-    static let launchDaemonPlistName = "com.jason312928.Target.TargetService.plist"
+    // v2 deliberately creates a fresh SMAppService registration. macOS 26 can
+    // retain an enabled legacy registration whose bundle-relative executable
+    // no longer resolves after an in-place application update.
+    static let machService = "com.jason312928.Target.TargetService.v2"
+    static let launchDaemonPlistName = "com.jason312928.Target.TargetService.v2.plist"
+    static let executableBundlePath = "Contents/MacOS/TargetService"
+    static let legacyMachService = "com.jason312928.Target.TargetService"
+    static let legacyLaunchDaemonPlistName = "com.jason312928.Target.TargetService.plist"
     static let snapshotOwner = "com.jason312928.Target.system-proxy-snapshot.v1"
 }
 
