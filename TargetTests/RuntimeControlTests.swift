@@ -247,6 +247,58 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         }
     }
 
+    func testConnectionSidebarPresentationShowsDestinationAndEffectiveRouteMark() throws {
+        let country = RuntimeConnectionSidebarPresentation(connection: RuntimeConnection(
+            id: "country",
+            destinationHost: "chat.example.test",
+            destinationIP: "198.51.100.4",
+            destinationPort: 443,
+            network: "tcp",
+            inbound: "mixed",
+            outboundChain: ["Proxy", "United States West 01"],
+            uploadBytes: 12,
+            downloadBytes: 34,
+            startedAt: nil
+        ))
+        XCTAssertEqual(country.destination, "chat.example.test")
+        XCTAssertEqual(country.detail, "443 · TCP")
+        guard case .country(let routeCountry) = country.routeMark else {
+            return XCTFail("Expected a country route mark")
+        }
+        XCTAssertEqual(routeCountry.code, "US")
+
+        let bypass = RuntimeConnectionSidebarPresentation(connection: RuntimeConnection(
+            id: "bypass",
+            destinationHost: nil,
+            destinationIP: "192.0.2.8",
+            destinationPort: 80,
+            network: "udp",
+            inbound: nil,
+            outboundChain: ["bypass-mainland", "direct"],
+            uploadBytes: nil,
+            downloadBytes: nil,
+            startedAt: nil
+        ))
+        XCTAssertEqual(bypass.destination, "192.0.2.8")
+        XCTAssertEqual(bypass.routeMark, .bypass)
+
+        let fallback = RuntimeConnectionSidebarPresentation(connection: RuntimeConnection(
+            id: "default",
+            destinationHost: nil,
+            destinationIP: nil,
+            destinationPort: nil,
+            network: nil,
+            inbound: nil,
+            outboundChain: ["Proxy", "Automatic"],
+            uploadBytes: nil,
+            downloadBytes: nil,
+            startedAt: nil
+        ))
+        XCTAssertEqual(fallback.destination, "-")
+        XCTAssertNil(fallback.detail)
+        XCTAssertEqual(fallback.routeMark, .defaultRoute)
+    }
+
     func testTrafficHistoryIsBoundedAndResetsAtRuntimeBoundary() {
         var history = RuntimeTrafficHistory()
         for index in 0..<100 {

@@ -12,21 +12,28 @@ struct AppShellView: View {
     let preferences: ApplicationPreferencesModel
     @State private var profileModel: ProfileViewModel
     private let refreshOnTask: Bool
+    private let connectionSidebar: AnyView?
 
     init(
         lifecycle: BackendLifecycleModel,
         profileModel: ProfileViewModel? = nil,
         preferences: ApplicationPreferencesModel,
-        refreshOnTask: Bool = true
+        refreshOnTask: Bool = true,
+        connectionSidebar: AnyView? = nil
     ) {
         self.lifecycle = lifecycle
         self.preferences = preferences
         _profileModel = State(initialValue: profileModel ?? ProfileViewModel())
         self.refreshOnTask = refreshOnTask
+        self.connectionSidebar = connectionSidebar
     }
 
     var body: some View {
-        ProfileWorkspaceView(lifecycle: lifecycle, model: profileModel)
+        ProfileWorkspaceView(
+            lifecycle: lifecycle,
+            model: profileModel,
+            connectionSidebar: connectionSidebar
+        )
             .frame(
                 minWidth: AppShellLayout.minimumWindowWidth,
                 minHeight: AppShellLayout.minimumWindowHeight

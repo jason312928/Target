@@ -10,6 +10,7 @@ struct ProfilePolicyWorkspaceView: View {
     let testingSelectorID: Int?
     let lifecycle: BackendLifecycleModel?
     var participatingCountryRoutes: [PolicyCountryRoute]? = nil
+    var inspectCountry: ((String) -> Void)? = nil
     var chooseParticipatingCountry: ((String) -> Void)? = nil
     var routeBindings: [ProfileRouteBinding] = []
     var bindRoute: ((URL, String, String) -> Void)? = nil
@@ -178,6 +179,7 @@ struct ProfilePolicyWorkspaceView: View {
                 exposesSelectorAccessibilityIdentity: presentation.selectors.count == 1,
                 participatingCountryRoutes: participatingCountryRoutes,
                 chooseParticipatingCountry: chooseParticipatingCountry,
+                inspectCountry: { inspectCountry?($0.id) },
                 routeBindings: routeBindings,
                 availableRouteOutboundTags: Set(presentation.selectors.flatMap(\.members).filter(\.isSelectable).map(\.tag)),
                 bindRoute: bindRoute,
@@ -234,6 +236,7 @@ private struct SelectorDetail: View {
     let exposesSelectorAccessibilityIdentity: Bool
     let participatingCountryRoutes: [PolicyCountryRoute]?
     let chooseParticipatingCountry: ((String) -> Void)?
+    let inspectCountry: (PolicyCountryRoute) -> Void
     let routeBindings: [ProfileRouteBinding]
     let availableRouteOutboundTags: Set<String>
     let bindRoute: ((URL, String, String) -> Void)?
@@ -243,37 +246,24 @@ private struct SelectorDetail: View {
     @Environment(\.locale) private var locale
     @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @State private var pendingSelection: String?
-    @State private var inspectedCountryCode: String?
     @SceneStorage("policy.workspace.countries-expanded") private var countriesExpanded = true
 
     var body: some View {
-        HStack(spacing: 0) {
-            if let inspectedRoute {
-                CountryRouteInspector(
-                    route: inspectedRoute,
-                    bindings: routeBindings.filter { $0.countryCode == inspectedRoute.country.code },
-                    availableRouteOutboundTags: availableRouteOutboundTags,
-                    close: { inspectedCountryCode = nil }
-                )
-                .frame(width: 260)
-                Divider()
-            }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    if selector.members.isEmpty {
-                        emptySelectorState
-                    } else {
-                        siteRoutes
-                        if selector.restartRequired || selector.runtime.state == .unavailable {
-                            runtimeSummary
-                        }
-                        destinations
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                if selector.members.isEmpty {
+                    emptySelectorState
+                } else {
+                    siteRoutes
+                    if selector.restartRequired || selector.runtime.state == .unavailable {
+                        runtimeSummary
                     }
+                    destinations
                 }
-                .frame(maxWidth: ProfileWorkspaceLayout.contentMaxWidth, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(20)
             }
+            .frame(maxWidth: ProfileWorkspaceLayout.contentMaxWidth, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(20)
         }
         .onChange(of: isSelecting) { wasSelecting, selecting in
             if wasSelecting && !selecting {
@@ -342,11 +332,6 @@ private struct SelectorDetail: View {
         pendingSelection ?? selector.desiredSelection
     }
 
-    private var inspectedRoute: PolicyCountryRoute? {
-        guard let inspectedCountryCode else { return nil }
-        return (participatingCountryRoutes ?? selector.countryRoutes).first { $0.id == inspectedCountryCode }
-    }
-
     private var filteredCountryRoutes: [PolicyCountryRoute] {
         let routes = participatingCountryRoutes ?? selector.countryRoutes
         return routes.filter { $0.matches(query: query) }
@@ -386,7 +371,7 @@ private struct SelectorDetail: View {
                     selectedMemberTag: selectedMemberTag,
                     bindings: routeBindings,
                     bind: bindURL,
-                    inspect: { inspectedCountryCode = $0.id },
+                    inspect: inspectCountry,
                     choose: { route in
                         if let chooseParticipatingCountry {
                             chooseParticipatingCountry(route.id)
@@ -414,7 +399,7 @@ private struct SelectorDetail: View {
                 selectedMemberTag: selectedMemberTag,
                 bindings: routeBindings,
                 bind: bindURL,
-                inspect: { inspectedCountryCode = $0.id },
+                inspect: inspectCountry,
                 choose: { route in
                     if let chooseParticipatingCountry {
                         chooseParticipatingCountry(route.id)

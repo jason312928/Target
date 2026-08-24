@@ -5,127 +5,180 @@ import UniformTypeIdentifiers
 struct ProfileWorkspaceView: View {
     var lifecycle: BackendLifecycleModel? = nil
     @Bindable var model: ProfileViewModel
+    private let connectionSidebar: AnyView?
     @State private var sheet: ProfileSheet?
     @State private var deleteTarget: UUID?
     @State private var participatingRoutes: [PolicyCountryRoute] = []
     @State private var section: ProfileWorkspaceSection = .proxies
+    @State private var inspectedCountryCode: String?
     @AppStorage("profiles.smart-participants") private var participationRawValue = "*"
 
-    init(lifecycle: BackendLifecycleModel?, model: ProfileViewModel) {
+    init(
+        lifecycle: BackendLifecycleModel?,
+        model: ProfileViewModel,
+        connectionSidebar: AnyView? = nil
+    ) {
         self.lifecycle = lifecycle
         self.model = model
+        self.connectionSidebar = connectionSidebar
     }
 
     var body: some View {
-        workspaceDetail
+        configuredWorkspace
+            .toolbar { profileToolbar }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .toolbar { profileToolbar }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .sheet(item: $sheet) { sheet in
-            switch sheet {
-            case .create:
-                ProfileNameSheet(sheet: sheet) { name in model.requestCreate(name: name) }
-            case .subscription:
-                ProfileSubscriptionSheet(model: model)
-            case .rename(let id, _):
-                ProfileNameSheet(sheet: sheet) { name in model.rename(id, to: name) }
-            }
-        }
-        .sheet(isPresented: Binding(
-            get: { model.shouldPresentImportConfirmation },
-            set: {
-                if !$0, model.pendingOperation == nil {
-                    model.cancelPreparedImport()
+            .sheet(item: $sheet) { sheet in
+                switch sheet {
+                case .create:
+                    ProfileNameSheet(sheet: sheet) { name in model.requestCreate(name: name) }
+                case .subscription:
+                    ProfileSubscriptionSheet(model: model)
+                case .rename(let id, _):
+                    ProfileNameSheet(sheet: sheet) { name in model.rename(id, to: name) }
                 }
             }
-        )) {
-            if let candidate = model.pendingImportCandidate {
-                ProfileImportConfirmation(candidate: candidate, isCommitting: model.isCommittingImport) { name in
-                    model.commitPreparedImport(name: name)
-                } cancel: {
-                    model.cancelPreparedImport()
+            .sheet(isPresented: Binding(
+                get: { model.shouldPresentImportConfirmation },
+                set: {
+                    if !$0, model.pendingOperation == nil {
+                        model.cancelPreparedImport()
+                    }
+                }
+            )) {
+                if let candidate = model.pendingImportCandidate {
+                    ProfileImportConfirmation(candidate: candidate, isCommitting: model.isCommittingImport) { name in
+                        model.commitPreparedImport(name: name)
+                    } cancel: {
+                        model.cancelPreparedImport()
+                    }
                 }
             }
-        }
-        .sheet(isPresented: Binding(
-            get: { model.shouldPresentSubscriptionPreview },
-            set: {
-                if !$0, model.pendingOperation == nil {
-                    model.discardSubscriptionPreview()
+            .sheet(isPresented: Binding(
+                get: { model.shouldPresentSubscriptionPreview },
+                set: {
+                    if !$0, model.pendingOperation == nil {
+                        model.discardSubscriptionPreview()
+                    }
+                }
+            )) {
+                if let pending = model.pendingSubscriptionUpdate {
+                    SubscriptionIntakePreview(pending: pending) {
+                        model.discardSubscriptionPreview()
+                    } confirm: {
+                        model.confirmSubscriptionUpdate()
+                    }
                 }
             }
-        )) {
-            if let pending = model.pendingSubscriptionUpdate {
-                SubscriptionIntakePreview(pending: pending) {
-                    model.discardSubscriptionPreview()
-                } confirm: {
-                    model.confirmSubscriptionUpdate()
+            .task {
+                model.refreshPolicyState()
+                normalizeParticipation()
+                refreshParticipatingRoutes()
+            }
+            .onChange(of: participationRawValue) { _, _ in refreshParticipatingRoutes() }
+            .onChange(of: model.selectedID) { _, _ in
+                section = .proxies
+                inspectedCountryCode = nil
+            }
+            .onChange(of: model.profiles.map { "\($0.id.uuidString):\($0.validRevision)" }) { _, _ in
+                normalizeParticipation()
+                refreshParticipatingRoutes()
+            }
+            .onChange(of: model.policyHealthBySelector) { _, _ in refreshParticipatingRoutes() }
+            .onChange(of: participatingRoutes.map(\.id)) { _, routeIDs in
+                if inspectedCountryCode.map({ routeIDs.contains($0) }) != true {
+                    inspectedCountryCode = nil
                 }
             }
-        }
-        .task {
-            model.refreshPolicyState()
-            normalizeParticipation()
-            refreshParticipatingRoutes()
-        }
-        .onChange(of: participationRawValue) { _, _ in refreshParticipatingRoutes() }
-        .onChange(of: model.selectedID) { _, _ in section = .proxies }
-        .onChange(of: model.profiles.map { "\($0.id.uuidString):\($0.validRevision)" }) { _, _ in
-            normalizeParticipation()
-            refreshParticipatingRoutes()
-        }
-        .onChange(of: model.policyHealthBySelector) { _, _ in refreshParticipatingRoutes() }
-        .onChange(of: model.readinessChangeGeneration) { _, _ in
-            lifecycle?.refresh()
-            refreshParticipatingRoutes()
-        }
-        .onChange(of: lifecycle?.runtimeChangeGeneration) { _, _ in
-            model.refreshPolicyState()
-        }
-        .alert("profile.delete.title", isPresented: Binding(
-            get: { deleteTarget != nil },
-            set: { if !$0 { deleteTarget = nil } }
-        )) {
-            Button("profile.action.delete", role: .destructive) {
-                if let deleteTarget { model.requestDelete(deleteTarget) }
-                deleteTarget = nil
+            .onChange(of: model.readinessChangeGeneration) { _, _ in
+                lifecycle?.refresh()
+                refreshParticipatingRoutes()
             }
-            Button("profile.action.cancel", role: .cancel) { deleteTarget = nil }
-        } message: {
-            Text("profile.delete.message")
-        }
-        .alert("profile.export.warning.title", isPresented: Binding(
-            get: { model.isShowingExportWarning },
-            set: { if !$0 { model.dismissExportWarning() } }
-        )) {
-            Button("profile.action.cancel", role: .cancel) { model.dismissExportWarning() }
-            Button("profile.export.warning.confirm") { presentExportPanel() }
-        } message: {
-            Text("profile.export.warning.message")
-        }
-        .alert("profile.unsaved.title", isPresented: Binding(
-            get: { model.unsavedChangesPresentation.isPresented },
-            // An Alert binding can be set to false as part of ordinary button
-            // dismissal. It must not discard the pending intent; only the
-            // explicit Cancel action below does that.
-            set: { model.unsavedChangesAlertPresentationDidChange($0) }
-        )) {
-            Button("profile.unsaved.save-and-continue") {
-                _ = model.resolveUnsavedChanges(.saveAndContinue)
+            .onChange(of: lifecycle?.runtimeChangeGeneration) { _, _ in
+                model.refreshPolicyState()
             }
-            .accessibilityIdentifier("profile.unsaved.save-and-continue")
-            .keyboardShortcut(.defaultAction)
-            Button("profile.unsaved.discard", role: .destructive) {
-                _ = model.resolveUnsavedChanges(.discardChanges)
+            .alert("profile.delete.title", isPresented: Binding(
+                get: { deleteTarget != nil },
+                set: { if !$0 { deleteTarget = nil } }
+            )) {
+                Button("profile.action.delete", role: .destructive) {
+                    if let deleteTarget { model.requestDelete(deleteTarget) }
+                    deleteTarget = nil
+                }
+                Button("profile.action.cancel", role: .cancel) { deleteTarget = nil }
+            } message: {
+                Text("profile.delete.message")
             }
-            .accessibilityIdentifier("profile.unsaved.discard")
-            Button("profile.action.cancel", role: .cancel) {
-                _ = model.resolveUnsavedChanges(.cancel)
+            .alert("profile.export.warning.title", isPresented: Binding(
+                get: { model.isShowingExportWarning },
+                set: { if !$0 { model.dismissExportWarning() } }
+            )) {
+                Button("profile.action.cancel", role: .cancel) { model.dismissExportWarning() }
+                Button("profile.export.warning.confirm") { presentExportPanel() }
+            } message: {
+                Text("profile.export.warning.message")
             }
-            .accessibilityIdentifier("profile.unsaved.cancel")
-        } message: {
-            Text("profile.unsaved.message")
+            .alert("profile.unsaved.title", isPresented: Binding(
+                get: { model.unsavedChangesPresentation.isPresented },
+                // An Alert binding can be set to false as part of ordinary button
+                // dismissal. It must not discard the pending intent; only the
+                // explicit Cancel action below does that.
+                set: { model.unsavedChangesAlertPresentationDidChange($0) }
+            )) {
+                Button("profile.unsaved.save-and-continue") {
+                    _ = model.resolveUnsavedChanges(.saveAndContinue)
+                }
+                .accessibilityIdentifier("profile.unsaved.save-and-continue")
+                .keyboardShortcut(.defaultAction)
+                Button("profile.unsaved.discard", role: .destructive) {
+                    _ = model.resolveUnsavedChanges(.discardChanges)
+                }
+                .accessibilityIdentifier("profile.unsaved.discard")
+                Button("profile.action.cancel", role: .cancel) {
+                    _ = model.resolveUnsavedChanges(.cancel)
+                }
+                .accessibilityIdentifier("profile.unsaved.cancel")
+            } message: {
+                Text("profile.unsaved.message")
+            }
+    }
+
+    private var configuredWorkspace: some View {
+        HStack(spacing: 0) {
+            workspaceSidebar
+                .frame(
+                    minWidth: ProfileWorkspaceLayout.connectionSidebarMinimumWidth,
+                    idealWidth: ProfileWorkspaceLayout.connectionSidebarIdealWidth,
+                    maxWidth: ProfileWorkspaceLayout.connectionSidebarMaximumWidth
+                )
+            Divider()
+            workspaceDetail
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+    }
+
+    @ViewBuilder
+    private var workspaceSidebar: some View {
+        if let inspectedCountryRoute {
+            CountryRouteInspector(
+                route: inspectedCountryRoute,
+                bindings: model.selectedProfile?.routeBindings.filter {
+                    $0.countryCode == inspectedCountryRoute.country.code
+                } ?? [],
+                availableRouteOutboundTags: Set(
+                    participatingRoutes.flatMap(\.members).filter(\.isSelectable).map(\.tag)
+                ),
+                close: { inspectedCountryCode = nil }
+            )
+        } else if let connectionSidebar {
+            connectionSidebar
+        } else {
+            ProfileConnectionsSidebarPlaceholder()
+        }
+    }
+
+    private var inspectedCountryRoute: PolicyCountryRoute? {
+        guard let inspectedCountryCode else { return nil }
+        return participatingRoutes.first { $0.id == inspectedCountryCode }
     }
 
     @ViewBuilder
@@ -138,6 +191,7 @@ struct ProfileWorkspaceView: View {
                 section: $section,
                 participatingProfileCount: participatingProfileIDs.count,
                 participatingCountryRoutes: participatingRoutes,
+                inspectCountry: { inspectedCountryCode = $0 },
                 chooseParticipatingCountry: { countryCode in
                     model.requestCountrySelection(
                         countryCode,
@@ -312,6 +366,42 @@ enum ProfileImportPanelResult: Equatable {
     }
 }
 
+private struct ProfileConnectionsSidebarPlaceholder: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                        .foregroundStyle(Color.accentColor)
+                    Text("connections.title")
+                        .font(.headline)
+                    Spacer(minLength: 8)
+                    Text("0")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Text("connections.sidebar.subtitle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 15)
+            .padding(.bottom, 12)
+            Divider()
+            Text("connections.empty.message")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .padding(22)
+            Spacer()
+        }
+        .background(.background.secondary)
+        .accessibilityIdentifier("connections.sidebar")
+    }
+}
+
 private struct ProfileWorkspaceEmptyState: View {
     let isPreparingImport: Bool
     let messageKey: String?
@@ -345,6 +435,7 @@ private struct ProfileWorkspaceDetailView: View {
     @Binding var section: ProfileWorkspaceSection
     let participatingProfileCount: Int
     let participatingCountryRoutes: [PolicyCountryRoute]
+    let inspectCountry: (String) -> Void
     let chooseParticipatingCountry: (String) -> Void
     let bindRoute: (URL, String, String) -> Bool
     private var presentation: ProfileWorkspacePresentation { ProfileWorkspacePresentation(profile: profile) }
@@ -422,6 +513,7 @@ private struct ProfileWorkspaceDetailView: View {
                 testingSelectorID: model.testingPolicySelectorID,
                 lifecycle: lifecycle,
                 participatingCountryRoutes: participatingCountryRoutes,
+                inspectCountry: inspectCountry,
                 chooseParticipatingCountry: chooseParticipatingCountry,
                 routeBindings: profile.routeBindings,
                 bindRoute: { url, countryCode, outboundTag in

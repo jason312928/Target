@@ -71,7 +71,12 @@ struct TargetApp: App {
         // can stay unopened until an explicit openWindow action is sent, which
         // made the Debug app appear empty when launched from Xcode.
         WindowGroup("Target", id: TargetMainWindowActivation.windowID) {
-            AppShellView(lifecycle: lifecycle, profileModel: profileModel, preferences: preferences)
+            AppShellView(
+                lifecycle: lifecycle,
+                profileModel: profileModel,
+                preferences: preferences,
+                connectionSidebar: AnyView(RuntimeConnectionsSidebar(lifecycle: lifecycle))
+            )
                 .onAppear { TargetApplicationDelegate.shared.lifecycle = lifecycle }
                 .background(TargetMainWindowMarker())
         }

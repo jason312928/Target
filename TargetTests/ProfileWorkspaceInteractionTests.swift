@@ -165,6 +165,18 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
             ProfileWorkspaceLayout.sidebarIdealWidth,
             ProfileWorkspaceLayout.sidebarMaximumWidth
         )
+        XCTAssertLessThanOrEqual(
+            ProfileWorkspaceLayout.connectionSidebarMinimumWidth,
+            ProfileWorkspaceLayout.connectionSidebarIdealWidth
+        )
+        XCTAssertLessThanOrEqual(
+            ProfileWorkspaceLayout.connectionSidebarIdealWidth,
+            ProfileWorkspaceLayout.connectionSidebarMaximumWidth
+        )
+        XCTAssertLessThan(
+            ProfileWorkspaceLayout.connectionSidebarMaximumWidth,
+            AppShellLayout.minimumWindowWidth / 2
+        )
     }
 
     func testImportedProfileActivationLoadsExactBytesAndStartsClean() async throws {

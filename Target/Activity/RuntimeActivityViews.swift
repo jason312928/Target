@@ -96,6 +96,195 @@ struct ConnectionsView: View {
     }
 }
 
+enum RuntimeConnectionRouteMark: Equatable {
+    case country(PolicyRouteCountry)
+    case bypass
+    case defaultRoute
+}
+
+struct RuntimeConnectionSidebarPresentation: Equatable {
+    let destination: String
+    let detail: String?
+    let routeMark: RuntimeConnectionRouteMark
+
+    init(connection: RuntimeConnection) {
+        destination = connection.destination.isEmpty ? "-" : connection.destination
+        let detailParts = [
+            connection.destinationPort.map(String.init),
+            connection.network?.uppercased()
+        ].compactMap { $0 }
+        detail = detailParts.isEmpty ? nil : detailParts.joined(separator: " · ")
+        routeMark = Self.routeMark(for: connection.outboundChain)
+    }
+
+    private static func routeMark(for chain: [String]) -> RuntimeConnectionRouteMark {
+        if let country = chain.lazy.compactMap({ PolicyRouteCountry.recognize(in: $0) }).first {
+            return .country(country)
+        }
+        let normalized = chain.map {
+            $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .init(identifier: "en_US_POSIX"))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if normalized.contains(where: {
+            $0 == "direct" || $0.contains("bypass") || $0.contains("绕过")
+        }) {
+            return .bypass
+        }
+        return .defaultRoute
+    }
+}
+
+struct RuntimeConnectionsSidebar: View {
+    @Bindable var lifecycle: BackendLifecycleModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sidebarHeader
+            Divider()
+            sidebarContent
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(.background.secondary)
+        .accessibilityIdentifier("connections.sidebar")
+        .task { lifecycle.setConnectionObservationActive(true) }
+        .onDisappear { lifecycle.setConnectionObservationActive(false) }
+    }
+
+    private var sidebarHeader: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .foregroundStyle(Color.accentColor)
+                Text("connections.title")
+                    .font(.headline)
+                Spacer(minLength: 8)
+                Text("\(lifecycle.runtimeConnections.connections.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Text("connections.sidebar.subtitle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 15)
+        .padding(.bottom, 12)
+    }
+
+    @ViewBuilder
+    private var sidebarContent: some View {
+        switch lifecycle.runtimeConnections.state {
+        case .available where lifecycle.runtimeConnections.connections.isEmpty:
+            compactState(
+                symbol: "checkmark.circle",
+                title: "connections.empty.title",
+                message: "connections.empty.message"
+            )
+        case .available:
+            List(lifecycle.runtimeConnections.connections) { connection in
+                RuntimeConnectionSidebarRow(connection: connection)
+            }
+            .listStyle(.sidebar)
+        case .stopped:
+            compactState(
+                symbol: "bolt.slash",
+                title: "activity.stopped.title",
+                message: "connections.stopped.message"
+            )
+        case .loading:
+            VStack(spacing: 10) {
+                ProgressView()
+                Text("connections.loading.message")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(22)
+        case .unavailable:
+            compactState(
+                symbol: "exclamationmark.triangle",
+                title: "activity.unavailable.title",
+                message: "connections.unavailable.message"
+            )
+        }
+    }
+
+    private func compactState(
+        symbol: String,
+        title: LocalizedStringKey,
+        message: LocalizedStringKey
+    ) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: symbol)
+                .font(.title3)
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.callout.weight(.medium))
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(22)
+    }
+}
+
+private struct RuntimeConnectionSidebarRow: View {
+    let connection: RuntimeConnection
+    @Environment(\.locale) private var locale
+
+    private var presentation: RuntimeConnectionSidebarPresentation {
+        RuntimeConnectionSidebarPresentation(connection: connection)
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(presentation.destination)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if let detail = presentation.detail {
+                    Text(detail)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 5)
+            routeMark
+                .frame(width: 22, height: 22)
+        }
+        .padding(.vertical, 3)
+        .help(connection.outboundChain.joined(separator: " -> "))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("connections.sidebar.row.\(connection.id)")
+    }
+
+    @ViewBuilder
+    private var routeMark: some View {
+        switch presentation.routeMark {
+        case .country(let country):
+            Text(country.flag)
+                .font(.body)
+                .help(country.displayName(localeIdentifier: locale.identifier))
+        case .bypass:
+            Image(systemName: "arrow.forward")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.green)
+                .help(Text("connections.sidebar.route.bypass"))
+        case .defaultRoute:
+            Image(systemName: "circle.dashed")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .help(Text("connections.sidebar.route.default"))
+        }
+    }
+}
+
 struct TrafficView: View {
     @Bindable var lifecycle: BackendLifecycleModel
 

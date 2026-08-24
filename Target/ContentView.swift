@@ -6,7 +6,11 @@ struct ContentView: View {
     @State private var model = ProfileViewModel()
 
     var body: some View {
-        ProfileWorkspaceView(lifecycle: lifecycle, model: model)
+        ProfileWorkspaceView(
+            lifecycle: lifecycle,
+            model: model,
+            connectionSidebar: AnyView(RuntimeConnectionsSidebar(lifecycle: lifecycle))
+        )
     }
 }
 

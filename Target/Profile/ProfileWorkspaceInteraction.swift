@@ -71,6 +71,9 @@ enum ProfileWorkspaceLayout {
     static let sidebarMinimumWidth: CGFloat = 140
     static let sidebarIdealWidth: CGFloat = 170
     static let sidebarMaximumWidth: CGFloat = 210
+    static let connectionSidebarMinimumWidth: CGFloat = 230
+    static let connectionSidebarIdealWidth: CGFloat = 260
+    static let connectionSidebarMaximumWidth: CGFloat = 300
 
 }
 
