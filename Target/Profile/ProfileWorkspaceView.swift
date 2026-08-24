@@ -360,7 +360,7 @@ private struct ProfileWorkspaceDetailView: View {
             sectionContent
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .navigationTitle("profile.smart-routing.title")
+        .navigationTitle("Target")
         .overlay(alignment: .top) {
             if model.isPreparingImport || model.isCommittingImport {
                 ProgressView(model.isCommittingImport ? "profile.import.committing" : "profile.import.preparing")
