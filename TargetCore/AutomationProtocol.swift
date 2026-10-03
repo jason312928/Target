@@ -12,6 +12,7 @@ public enum TargetCtlCommandParser {
         case ["capabilities"]: return ("capabilities", [:])
         case ["status"]: return ("status", [:])
         case ["smart", "shadow"]: return ("smart.shadow", [:])
+        case ["smart", "apply"]: return ("smart.apply", [:])
         case ["runtime", "status"]: return ("runtime.status", [:])
         case ["profile", "list"]: return ("profile.list", [:])
         case ["policy", "list"]: return ("policy.list", [:])

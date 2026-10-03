@@ -400,6 +400,37 @@ protocol RuntimePolicyApplying: Sendable {
         selectorTag: String,
         outboundTag: String
     ) async -> Bool
+    func applyLivePolicySelectionIfUnchanged(
+        evidence: PolicySelectionEvidence, outboundTag: String,
+        authorize: @escaping @Sendable () throws -> Void
+    ) async throws -> PolicySelectionApplyResult
+}
+
+extension RuntimePolicyApplying {
+    func applyLivePolicySelectionIfUnchanged(evidence: PolicySelectionEvidence, outboundTag: String,
+                                             authorize: @escaping @Sendable () throws -> Void) async throws -> PolicySelectionApplyResult {
+        .refused(.runtimeUnavailable)
+    }
+}
+
+struct PolicySelectionEvidence: Equatable, Sendable {
+    let catalog: PolicyCatalog
+    let sessionID: UUID
+    let selector: String
+    let currentOutbound: String
+    let observedAt: Date
+}
+
+enum PolicySelectionApplyReason: String, Sendable {
+    case applied, runtimeUnavailable, identityChanged, profileChanged, liveSelectionChanged
+    case selectionChanged, mutationInProgress, staleEvidence, invalidRecommendation, mutationUnconfirmed
+}
+
+struct PolicySelectionApplyResult: Equatable, Sendable {
+    let applied: Bool
+    let after: String?
+    let reason: PolicySelectionApplyReason
+    static func refused(_ reason: PolicySelectionApplyReason) -> Self { .init(applied: false, after: nil, reason: reason) }
 }
 
 enum RuntimeProxyHealthState: String, Codable, Equatable, Sendable {
@@ -697,9 +728,15 @@ protocol TargetPolicyOperating: Sendable {
     func select(selectorTag: String, outboundTag: String) async throws -> PolicyCatalog
     func reset() async throws -> PolicyResetResult
     func probeLatency(selectorTag: String) async throws -> PolicyLatencyProbeResult
+    func selectionGeneration() -> UInt64
+    func selectIfUnchanged(evidence: PolicySelectionEvidence, outboundTag: String, generation: UInt64) async throws -> PolicySelectionApplyResult
 }
 
 extension TargetPolicyOperating {
+    func selectionGeneration() -> UInt64 { 0 }
+    func selectIfUnchanged(evidence: PolicySelectionEvidence, outboundTag: String, generation: UInt64) async throws -> PolicySelectionApplyResult {
+        .refused(.runtimeUnavailable)
+    }
     func probeLatency(selectorTag: String) async throws -> PolicyLatencyProbeResult {
         throw TargetPolicyOperationError.selectorUnavailable
     }
@@ -709,6 +746,8 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
     private let profileStore: ProfileStore
     private let runtimeEvidenceProvider: any PolicyRuntimeEvidenceProviding
     private let mutationLock = NSLock()
+    private var generation: UInt64 = 0
+    private var conditionalSelectionInProgress = false
 
     init(
         profileStore: ProfileStore,
@@ -744,6 +783,43 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
             committed,
             evidence: await runtimeEvidenceProvider.currentPolicyRuntimeEvidence()
         )
+    }
+
+    func selectionGeneration() -> UInt64 {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        return generation
+    }
+
+    func selectIfUnchanged(evidence: PolicySelectionEvidence, outboundTag: String, generation expectedGeneration: UInt64) async throws -> PolicySelectionApplyResult {
+        guard beginConditionalSelection() else { return .refused(.mutationInProgress) }
+        defer { endConditionalSelection() }
+        guard let runtime = runtimeEvidenceProvider as? any RuntimePolicyApplying else { return .refused(.runtimeUnavailable) }
+        try Task.checkCancellation()
+        return try await runtime.applyLivePolicySelectionIfUnchanged(evidence: evidence, outboundTag: outboundTag) { [self] in
+            mutationLock.lock()
+            defer { mutationLock.unlock() }
+            try profileStore.withSerializedAccess {
+                try Task.checkCancellation()
+                guard generation == expectedGeneration else { throw PolicySelectionApplyRefusal.selectionChanged }
+                guard try readPersisted() == evidence.catalog else { throw PolicySelectionApplyRefusal.profileChanged }
+                _ = try commitSelectionLocked(selectorTag: evidence.selector, outboundTag: outboundTag)
+            }
+        }
+    }
+
+    private func beginConditionalSelection() -> Bool {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        guard !conditionalSelectionInProgress else { return false }
+        conditionalSelectionInProgress = true
+        return true
+    }
+
+    private func endConditionalSelection() {
+        mutationLock.lock()
+        defer { mutationLock.unlock() }
+        conditionalSelectionInProgress = false
     }
 
     func reset() async throws -> PolicyResetResult {
@@ -824,6 +900,11 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
     private func commitSelection(selectorTag: String, outboundTag: String) throws -> PolicyCatalog {
         mutationLock.lock()
         defer { mutationLock.unlock() }
+        return try commitSelectionLocked(selectorTag: selectorTag, outboundTag: outboundTag)
+    }
+
+    private func commitSelectionLocked(selectorTag: String, outboundTag: String) throws -> PolicyCatalog {
+        generation &+= 1
         do {
             let desired = try readPersisted()
             try PolicySelectionValidator.validate(
@@ -853,6 +934,7 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
     private func commitReset() throws -> PolicyResetResult {
         mutationLock.lock()
         defer { mutationLock.unlock() }
+        generation &+= 1
         let desired = try readPersisted()
         guard let profileID = desired.profileID, let revision = desired.profileRevision else {
             throw ProfileStoreError.noValidVersion
@@ -870,6 +952,8 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
         }
     }
 }
+
+enum PolicySelectionApplyRefusal: Error { case selectionChanged, profileChanged }
 
 private extension PolicyCatalog {
     var expectedRuntimeIdentity: ExpectedPolicyRuntimeIdentity? {

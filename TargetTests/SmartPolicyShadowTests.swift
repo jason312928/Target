@@ -208,7 +208,7 @@ final class SmartPolicyShadowTests: XCTestCase, ProfileTestCaseSupport {
 
     func testCLIAndAutomationPrivacyMutationZeroAndPersistenceUnchanged() async throws {
         XCTAssertEqual(try TargetCtlCommandParser.parse(["smart", "shadow", "--json"]).action, "smart.shadow")
-        for verb in ["apply", "select", "enable"] { XCTAssertThrowsError(try TargetCtlCommandParser.parse(["smart", verb, "--json"])) }
+        for verb in ["select", "enable"] { XCTAssertThrowsError(try TargetCtlCommandParser.parse(["smart", verb, "--json"])) }
         let root = try temporaryDirectory()
         let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
         let profile = try store.create(name: "Shadow")

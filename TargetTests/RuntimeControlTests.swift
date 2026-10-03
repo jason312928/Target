@@ -669,6 +669,139 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(calls, 0)
     }
 
+    func testSmartApplyUsesSharedPolicyAndExactlyOneControllerWrite() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: ["a": .latency(300), "b": .latency(30)], selectorMembers: ["a", "b"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+        let policy = TargetPolicyOperations(profileStore: fixture.profileStore, runtimeEvidenceProvider: fixture.backend)
+        let automation = TargetAutomationOperations(profileStore: fixture.profileStore, policyOperations: policy, backend: fixture.backend)
+        let response = await automation.handle(.init(protocolVersion: 1, action: "smart.apply"))
+        XCTAssertTrue(response.ok)
+        let output = String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self)
+        XCTAssertTrue(output.contains("\"applied\":true"))
+        XCTAssertEqual(try policy.readPersisted().selectors.first?.effectiveDesired, "b")
+        let count = await client.selectionCallCount()
+        XCTAssertEqual(count, 1)
+        let again = await automation.handle(.init(protocolVersion: 1, action: "smart.apply"))
+        XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(again), as: UTF8.self).contains("keepCurrent"))
+        let finalCount = await client.selectionCallCount()
+        XCTAssertEqual(finalCount, 1)
+        let capability = await automation.handle(.init(protocolVersion: 1, action: "capabilities"))
+        XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(capability), as: UTF8.self).contains("smart.apply"))
+        let invalid = await automation.handle(.init(protocolVersion: 1, action: "smart.apply", arguments: ["selector": "group"]))
+        XCTAssertFalse(invalid.ok)
+        for forbidden in ["unit-test-runtime-control-secret", "127.0.0.1", "sessionID", "sourceFingerprint", "destination", "connectionID"] { XCTAssertFalse(output.contains(forbidden)) }
+    }
+
+    func testConditionalSelectionProfileLiveAndRuntimeRacesAbortWithoutWrites() async throws {
+        for race in ["profile", "live", "identity"] {
+            let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a", "b"])
+            let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+            let policy = TargetPolicyOperations(profileStore: fixture.profileStore, runtimeEvidenceProvider: fixture.backend)
+            let evidence = try fixture.selectionEvidence()
+            let generation = policy.selectionGeneration()
+            let other = try fixture.profileStore.create(name: "Other")
+            try fixture.profileStore.save(json: policyConfiguration(configuredDefault: "a", members: ["a", "b"]), for: other.id)
+            if race == "profile" { try fixture.profileStore.select(other.id) }
+            if race == "live" { await client.setSelected("b") }
+            if race == "identity" { fixture.replaceRuntimeConfigurationIdentity() }
+            let result = try await policy.selectIfUnchanged(evidence: evidence, outboundTag: "b", generation: generation)
+            XCTAssertFalse(result.applied, race)
+            XCTAssertEqual(result.reason, race == "profile" ? .profileChanged : race == "live" ? .liveSelectionChanged : .identityChanged)
+            let count = await client.selectionCallCount()
+            XCTAssertEqual(count, 0, race)
+        }
+    }
+
+    func testProfileChangeDuringFinalControllerReadAbortsAtSharedCommit() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a", "b"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+        let policy = TargetPolicyOperations(profileStore: fixture.profileStore, runtimeEvidenceProvider: fixture.backend)
+        let evidence = try fixture.selectionEvidence()
+        let other = try fixture.profileStore.create(name: "Other")
+        try fixture.profileStore.save(json: policyConfiguration(configuredDefault: "a", members: ["a", "b"]), for: other.id)
+        await client.onNextSelectorRead { try? fixture.profileStore.select(other.id) }
+        let result = try await policy.selectIfUnchanged(evidence: evidence, outboundTag: "b", generation: policy.selectionGeneration())
+        XCTAssertEqual(result.reason, .profileChanged)
+        let count = await client.selectionCallCount()
+        XCTAssertEqual(count, 0)
+        XCTAssertTrue(try fixture.profileStore.selectedValidVersion().profile.policyOverrides.isEmpty)
+    }
+
+    func testManualSelectionGenerationRejectsStaleDecisionEvenAfterReturningToOriginalChoice() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a", "b"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+        let policy = TargetPolicyOperations(profileStore: fixture.profileStore, runtimeEvidenceProvider: fixture.backend)
+        _ = try await policy.select(selectorTag: "group", outboundTag: "a")
+        let evidence = try fixture.selectionEvidence()
+        let generation = policy.selectionGeneration()
+        _ = try await policy.select(selectorTag: "group", outboundTag: "b")
+        _ = try await policy.select(selectorTag: "group", outboundTag: "a")
+        XCTAssertEqual(try policy.readPersisted(), evidence.catalog)
+        let before = await client.selectionCallCount()
+        let result = try await policy.selectIfUnchanged(evidence: evidence, outboundTag: "b", generation: generation)
+        XCTAssertEqual(result.reason, .selectionChanged)
+        let after = await client.selectionCallCount()
+        XCTAssertEqual(after, before)
+    }
+
+    func testConditionalSelectionRejectsStaleAndCancelledRequestsBeforeCommit() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a", "b"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+        let policy = TargetPolicyOperations(profileStore: fixture.profileStore, runtimeEvidenceProvider: fixture.backend)
+        let fresh = try fixture.selectionEvidence()
+        let stale = PolicySelectionEvidence(catalog: fresh.catalog, sessionID: fresh.sessionID, selector: fresh.selector, currentOutbound: fresh.currentOutbound, observedAt: .now.addingTimeInterval(-11))
+        let result = try await policy.selectIfUnchanged(evidence: stale, outboundTag: "b", generation: 0)
+        XCTAssertEqual(result.reason, .staleEvidence)
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await policy.selectIfUnchanged(evidence: fresh, outboundTag: "b", generation: 0)
+        }
+        do { _ = try await cancelled.value; XCTFail("Expected cancellation") } catch is CancellationError {}
+        let count = await client.selectionCallCount()
+        XCTAssertEqual(count, 0)
+        XCTAssertTrue(try fixture.profileStore.selectedValidVersion().profile.policyOverrides.isEmpty)
+    }
+
+    func testConcurrentConditionalMutationIsBoundedAndLaterManualSelectionWins() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a", "b"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+        let policy = TargetPolicyOperations(profileStore: fixture.profileStore, runtimeEvidenceProvider: fixture.backend)
+        let evidence = try fixture.selectionEvidence()
+        await client.gateNextSelection()
+        let smart = Task { try await policy.selectIfUnchanged(evidence: evidence, outboundTag: "b", generation: 0) }
+        await client.waitUntilSelecting()
+        let concurrent = try await policy.selectIfUnchanged(evidence: evidence, outboundTag: "b", generation: 0)
+        XCTAssertEqual(concurrent.reason, .mutationInProgress)
+        let manual = Task { try await policy.select(selectorTag: "group", outboundTag: "a") }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while policy.selectionGeneration() < 2 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertEqual(policy.selectionGeneration(), 2)
+        await client.releaseSelection()
+        let smartResult = try await smart.value
+        XCTAssertTrue(smartResult.applied)
+        _ = try await manual.value
+        XCTAssertEqual(try policy.readPersisted().selectors.first?.effectiveDesired, "a")
+        let selected = try await client.selectors(using: runtimeDescriptor)["group"]?.selected
+        XCTAssertEqual(selected, "a")
+        let count = await client.selectionCallCount()
+        XCTAssertEqual(count, 2)
+    }
+
+    func testConditionalRuntimeChangeDuringFinalReadAndInvalidCandidateNeverMutate() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a", "b"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+        let policy = TargetPolicyOperations(profileStore: fixture.profileStore, runtimeEvidenceProvider: fixture.backend)
+        let evidence = try fixture.selectionEvidence()
+        let invalid = try await policy.selectIfUnchanged(evidence: evidence, outboundTag: "removed", generation: 0)
+        XCTAssertEqual(invalid.reason, .invalidRecommendation)
+        await client.onNextSelectorRead { fixture.replaceRuntimeConfigurationIdentity() }
+        let changed = try await policy.selectIfUnchanged(evidence: evidence, outboundTag: "b", generation: 0)
+        XCTAssertEqual(changed.reason, .identityChanged)
+        let count = await client.selectionCallCount()
+        XCTAssertEqual(count, 0)
+        XCTAssertTrue(try fixture.profileStore.selectedValidVersion().profile.policyOverrides.isEmpty)
+    }
+
     private func makeRuntimePolicyProbeFixture(
         members: [String],
         client: any RuntimeControlClient
@@ -729,6 +862,7 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         )
         return RuntimePolicyProbeFixture(
             backend: backend,
+            profileStore: profileStore,
             expectedRuntime: expectedRuntime,
             recordStore: recordStore,
             configurations: configurations,
@@ -808,6 +942,12 @@ private actor ControlledRuntimeControlClient: RuntimeControlClient {
     private var snapshotCalls = 0
     private let selectorMembers: [String]?
     private var identityChange: (tag: String, action: @Sendable () -> Void)?
+    private var selected: String?
+    private var selectorReadAction: (@Sendable () -> Void)?
+    private var shouldGateSelection = false
+    private var selectionGate: CheckedContinuation<Void, Never>?
+    private var selectionWaiting: CheckedContinuation<Void, Never>?
+
 
     init(
         probeOutcomes: [String: ControlledProbeOutcome],
@@ -822,10 +962,27 @@ private actor ControlledRuntimeControlClient: RuntimeControlClient {
     func selectors(using descriptor: RuntimeControlDescriptor) async throws -> [String: RuntimeSelectorState] {
         selectorCalls += 1
         if let selectorError { throw selectorError }
-        return ["group": .init(tag: "group", selected: selectorMembers?.first ?? "node", members: selectorMembers ?? [])]
+        selectorReadAction?(); selectorReadAction = nil
+        return ["group": .init(tag: "group", selected: selected ?? selectorMembers?.first ?? "node", members: selectorMembers ?? [])]
     }
 
-    func select(selector: String, outbound: String, using descriptor: RuntimeControlDescriptor) async throws { selectionCalls += 1 }
+    func select(selector: String, outbound: String, using descriptor: RuntimeControlDescriptor) async throws {
+        selectionCalls += 1
+        if shouldGateSelection {
+            shouldGateSelection = false
+            await withCheckedContinuation { selectionGate = $0; selectionWaiting?.resume(); selectionWaiting = nil }
+        }
+        selected = outbound
+    }
+    func gateNextSelection() { shouldGateSelection = true }
+    func waitUntilSelecting() async {
+        if selectionGate != nil { return }
+        await withCheckedContinuation { selectionWaiting = $0 }
+    }
+    func releaseSelection() { selectionGate?.resume(); selectionGate = nil }
+
+    func setSelected(_ value: String) { selected = value }
+    func onNextSelectorRead(_ action: @escaping @Sendable () -> Void) { selectorReadAction = action }
 
     func connectionTotals(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionTotals {
         .init(uploadTotalBytes: 0, downloadTotalBytes: 0, activeConnectionCount: 0)
@@ -861,22 +1018,29 @@ private actor ControlledRuntimeControlClient: RuntimeControlClient {
 private final class RuntimePolicyProbeFixture: @unchecked Sendable {
     let backend: SingBoxBackend
     let expectedRuntime: ExpectedPolicyRuntimeIdentity
+    let profileStore: ProfileStore
     private let recordStore: MutableEngineRuntimeStore
     private let configurations: RuntimeConfigurationStore
     private let runtimeData: Data
 
     init(
         backend: SingBoxBackend,
+        profileStore: ProfileStore,
         expectedRuntime: ExpectedPolicyRuntimeIdentity,
         recordStore: MutableEngineRuntimeStore,
         configurations: RuntimeConfigurationStore,
         runtimeData: Data
     ) {
         self.backend = backend
+        self.profileStore = profileStore
         self.expectedRuntime = expectedRuntime
         self.recordStore = recordStore
         self.configurations = configurations
         self.runtimeData = runtimeData
+    }
+
+    func selectionEvidence() throws -> PolicySelectionEvidence {
+        .init(catalog: try PolicyCatalogOperation(profileStore: profileStore).read(), sessionID: try XCTUnwrap(recordStore.current()?.runtimeConfigurationID), selector: "group", currentOutbound: "a", observedAt: .now)
     }
 
     func replaceRuntimeConfigurationIdentity() {

@@ -15,6 +15,7 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
     private let readinessTimeout: Duration
     private let executableURL: URL
     private let runtimeControlClient: any RuntimeControlClient
+    private var policyMutationInProgress = false
 
     init(
         portProbe: any LocalEnginePortProbing = LocalTCPPortProbe(),
@@ -136,6 +137,15 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         selectorTag: String,
         outboundTag: String
     ) async -> Bool {
+        // A later manual choice waits for an already dispatched Smart write and
+        // then wins. New Smart requests never queue behind another mutation.
+        let deadline = ContinuousClock.now + .seconds(30)
+        while policyMutationInProgress {
+            guard ContinuousClock.now < deadline, !Task.isCancelled else { return false }
+            do { try await Task.sleep(for: .milliseconds(10)) } catch { return false }
+        }
+        policyMutationInProgress = true
+        defer { policyMutationInProgress = false }
         guard let verified = await verifiedRuntimeControlMaterial(),
               verified.record.profileID == expectedRuntime.profileID,
               verified.record.profileRevision == expectedRuntime.profileRevision,
@@ -143,12 +153,61 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
             return false
         }
         do {
-            try await runtimeControlClient.select(selector: selectorTag, outbound: outboundTag, using: verified.descriptor)
-            let selectors = try await runtimeControlClient.selectors(using: verified.descriptor)
-            return selectors[selectorTag]?.selected == outboundTag
+            try Task.checkCancellation()
+            return try await performLivePolicySelection(selectorTag: selectorTag, outboundTag: outboundTag, descriptor: verified.descriptor)
         } catch {
             return false
         }
+    }
+
+    func applyLivePolicySelectionIfUnchanged(evidence: PolicySelectionEvidence, outboundTag: String,
+                                             authorize: @escaping @Sendable () throws -> Void) async throws -> PolicySelectionApplyResult {
+        guard !policyMutationInProgress else { return .refused(.mutationInProgress) }
+        policyMutationInProgress = true
+        defer { policyMutationInProgress = false }
+        try Task.checkCancellation()
+        guard let before = await verifiedRuntimeControlMaterial(),
+              before.record.runtimeConfigurationID == evidence.sessionID,
+              before.record.profileID == evidence.catalog.profileID,
+              before.record.profileRevision == evidence.catalog.profileRevision,
+              before.record.sourceConfigurationFingerprint == evidence.catalog.sourceFingerprint else { return .refused(.identityChanged) }
+        let matches = evidence.catalog.selectors.filter { $0.tag == evidence.selector }
+        guard matches.count == 1, matches[0].isMutable,
+              matches[0].members.contains(where: { $0.tag == outboundTag && $0.status == .available }),
+              outboundTag != evidence.currentOutbound else { return .refused(.invalidRecommendation) }
+        let live: RuntimeSelectorState
+        do {
+            guard let value = try await runtimeControlClient.selectors(using: before.descriptor)[evidence.selector] else { return .refused(.runtimeUnavailable) }
+            live = value
+        } catch is CancellationError { throw CancellationError() }
+        catch { return .refused(.runtimeUnavailable) }
+        guard live.selected == evidence.currentOutbound,
+              Set(live.members) == Set(matches[0].members.map(\.tag)) else { return .refused(.liveSelectionChanged) }
+        guard let current = await verifiedRuntimeControlMaterial(), current.record == before.record,
+              current.descriptor == before.descriptor else { return .refused(.identityChanged) }
+        let age = Date().timeIntervalSince(evidence.observedAt)
+        guard age.isFinite, (0...SmartPolicyApplyOperations.maximumEvidenceAge).contains(age) else { return .refused(.staleEvidence) }
+        try Task.checkCancellation()
+        // No suspension between the shared Profile/generation compare-and-commit
+        // and dispatch. All Target selector writes share this mutation lease.
+        do { try authorize() }
+        catch PolicySelectionApplyRefusal.selectionChanged { return .refused(.selectionChanged) }
+        catch PolicySelectionApplyRefusal.profileChanged { return .refused(.profileChanged) }
+        do {
+            let converged = try await performLivePolicySelection(selectorTag: evidence.selector, outboundTag: outboundTag, descriptor: before.descriptor)
+            guard converged, let after = await verifiedRuntimeControlMaterial(),
+                  after.record == before.record, after.descriptor == before.descriptor else { return .refused(.mutationUnconfirmed) }
+            return .init(applied: true, after: outboundTag, reason: .applied)
+        } catch {
+            // A dispatched request can have taken effect even when its reply is
+            // unavailable. Never retry or claim convergence in that situation.
+            return .refused(.mutationUnconfirmed)
+        }
+    }
+
+    private func performLivePolicySelection(selectorTag: String, outboundTag: String, descriptor: RuntimeControlDescriptor) async throws -> Bool {
+        try await runtimeControlClient.select(selector: selectorTag, outbound: outboundTag, using: descriptor)
+        return try await runtimeControlClient.selectors(using: descriptor)[selectorTag]?.selected == outboundTag
     }
 
     func probePolicyMemberLatency(

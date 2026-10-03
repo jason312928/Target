@@ -47,6 +47,8 @@ struct SmartShadowRecommendation: Equatable, Sendable {
     var connectionSuccessCount = 0
     var connectionSnapshotAvailable = false
     var connectionSnapshotTruncated = false
+    // In-process authority only. Never serialized into automation output.
+    var selectionEvidence: PolicySelectionEvidence?
 
     func automationJSON() -> JSONValue {
         .object([
@@ -179,10 +181,93 @@ actor SmartPolicyShadowOperations {
                      keepCurrent: decision.keepCurrentSelection, reasonCodes: reasons.sorted(), candidateCount: tags.count,
                      probeSuccessCount: successes, probeFailureCount: failures, ambiguousProbeCount: ambiguous,
                      connectionSuccessCount: connections, connectionSnapshotAvailable: evidence.connections != nil,
-                     connectionSnapshotTruncated: evidence.connections?.isTruncated ?? false)
+                     connectionSnapshotTruncated: evidence.connections?.isTruncated ?? false,
+                     selectionEvidence: .init(catalog: catalog, sessionID: evidence.sessionID,
+                                              selector: selector, currentOutbound: evidence.currentOutbound, observedAt: now))
     }
 
     // Internal deterministic inspection; no production output or persistence.
     func retainedState() -> SmartPolicyState { engine.state }
     func retainedConnectionIDCount() -> Int { connectionIDs.count }
+}
+
+protocol SmartPolicyEvaluating: Sendable {
+    func evaluate() async throws -> SmartShadowRecommendation
+}
+extension SmartPolicyShadowOperations: SmartPolicyEvaluating {}
+
+struct SmartPolicyApplyResult: Sendable {
+    let recommendation: SmartShadowRecommendation?
+    let applied: Bool
+    let after: String?
+    let reasonCode: String
+
+    func automationJSON() -> JSONValue {
+        var fields: [String: JSONValue] = [
+            "applied": .boolean(applied), "before": recommendation?.currentOutbound.map(JSONValue.string) ?? .null,
+            "after": after.map(JSONValue.string) ?? .null,
+            "recommended": recommendation?.recommendedOutbound.map(JSONValue.string) ?? .null,
+            "confidence": .string(recommendation?.confidence.rawValue ?? "low"),
+            "reasonCodes": .array([.string(reasonCode)])
+        ]
+        if case .object(let evaluation)? = recommendation?.automationJSON() {
+            fields["evidence"] = evaluation["evidence"]
+            fields["decisionReasonCodes"] = evaluation["reasonCodes"]
+        }
+        return .object(fields)
+    }
+}
+
+/// An explicit invocation evaluates once and may request one shared Policy write.
+/// There is no background task, retry, lifecycle action or connection interruption.
+actor SmartPolicyApplyOperations {
+    private let evaluator: any SmartPolicyEvaluating
+    private let policy: any TargetPolicyOperating
+    private let clock: @Sendable () -> Date
+    private var applying = false
+    static let maximumEvidenceAge: TimeInterval = 10
+
+    init(evaluator: any SmartPolicyEvaluating, policy: any TargetPolicyOperating,
+         clock: @escaping @Sendable () -> Date = { Date() }) {
+        self.evaluator = evaluator
+        self.policy = policy
+        self.clock = clock
+    }
+
+    func apply() async -> SmartPolicyApplyResult {
+        func result(_ reason: String, _ recommendation: SmartShadowRecommendation? = nil) -> SmartPolicyApplyResult {
+            .init(recommendation: recommendation, applied: false, after: nil, reasonCode: reason)
+        }
+        guard !applying else { return result("applyInProgress") }
+        applying = true
+        defer { applying = false }
+        let generation = policy.selectionGeneration()
+        var recommendation: SmartShadowRecommendation?
+        do {
+            try Task.checkCancellation()
+            let value = try await evaluator.evaluate()
+            recommendation = value
+            try Task.checkCancellation()
+            guard value.state == "available" else { return result(value.reasonCodes.first ?? "runtimeUnavailable", value) }
+            guard let evidence = value.selectionEvidence,
+                  evidence.selector == value.selector, evidence.currentOutbound == value.currentOutbound,
+                  evidence.observedAt == value.observedAt,
+                  let recommended = value.recommendedOutbound else { return result("invalidRecommendation", value) }
+            guard (try? PolicySelectionValidator.validate(selectorTag: evidence.selector, outboundTag: recommended, in: evidence.catalog)) != nil else {
+                return result("invalidRecommendation", value)
+            }
+            let age = clock().timeIntervalSince(value.observedAt)
+            guard age.isFinite, (0...Self.maximumEvidenceAge).contains(age),
+                  !value.reasonCodes.contains("staleEvidence") else { return result("staleEvidence", value) }
+            guard value.ambiguousProbeCount == 0, !value.reasonCodes.contains("ambiguousProbeEvidence"),
+                  !value.reasonCodes.contains("networkWideDegradation") else { return result("ambiguousEvidence", value) }
+            guard value.connectionSnapshotAvailable else { return result("runtimeUnavailable", value) }
+            guard value.confidence != .low else { return result("lowConfidence", value) }
+            guard !value.keepCurrent else { return result("keepCurrent", value) }
+            guard recommended != evidence.currentOutbound else { return result("alreadySelected", value) }
+            let outcome = try await policy.selectIfUnchanged(evidence: evidence, outboundTag: recommended, generation: generation)
+            return .init(recommendation: value, applied: outcome.applied, after: outcome.after, reasonCode: outcome.reason.rawValue)
+        } catch is CancellationError { return result("cancelled", recommendation) }
+        catch { return result("operationUnavailable", recommendation) }
+    }
 }
