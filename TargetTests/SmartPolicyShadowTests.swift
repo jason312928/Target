@@ -201,7 +201,7 @@ final class SmartPolicyShadowTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(concurrent.reasonCodes, ["evaluationInProgress"])
         first.cancel()
         await runtime.release()
-        do { _ = try await first.value; XCTFail("Expected cancellation") } catch is CancellationError {} 
+        do { _ = try await first.value; XCTFail("Expected cancellation") } catch is CancellationError {}
         let state = await operations.retainedState()
         XCTAssertTrue(state.nodes.isEmpty)
     }
