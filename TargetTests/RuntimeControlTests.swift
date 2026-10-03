@@ -235,16 +235,17 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertNil(snapshot.connections.first?.destinationHost)
     }
 
-    func testConnectionsParserRejectsSnapshotsOverBound() throws {
-        let rawConnections = Array(repeating: ["id": "connection"] as [String: Any], count: 1_001)
+    func testConnectionsParserBoundsDetailsAndRetainsTotals() throws {
+        let rawConnections = (0..<1_001).map { ["id": "connection-\($0)"] as [String: Any] }
         let data = try JSONSerialization.data(withJSONObject: [
             "uploadTotal": 0,
             "downloadTotal": 0,
             "connections": rawConnections
         ])
-        XCTAssertThrowsError(try RuntimeConnectionsParser.parse(data)) { error in
-            XCTAssertEqual(error as? RuntimeControlError, .malformedResponse)
-        }
+        let snapshot = try RuntimeConnectionsParser.parse(data)
+        XCTAssertEqual(snapshot.totals.activeConnectionCount, 1_001)
+        XCTAssertEqual(snapshot.connections.count, 1_000)
+        XCTAssertTrue(snapshot.isTruncated)
     }
 
     func testConnectionSidebarPresentationShowsDestinationAndEffectiveRouteMark() throws {

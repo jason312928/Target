@@ -93,6 +93,16 @@ struct ProfileRouteBinding: Codable, Equatable, Sendable, Identifiable {
 
     var id: String { domain }
 
+    static func fingerprint(_ bindings: [Self]) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let ordered = bindings.sorted {
+            if $0.domain != $1.domain { return $0.domain < $1.domain }
+            return $0.outboundTag < $1.outboundTag
+        }
+        return TargetConfigurationFingerprint.sha256((try? encoder.encode(ordered)) ?? Data())
+    }
+
     init?(domain: String, outboundTag: String, countryCode: String) {
         guard let normalizedDomain = Self.normalizedDomain(domain),
               Self.isValidOutboundTag(outboundTag),
@@ -246,6 +256,8 @@ enum ProfileStoreError: LocalizedError, Equatable {
     case plaintextMigrationRecoveryFailed
     case profileImportTransactionFailed
     case profileImportRecoveryFailed
+    case profileMutationTransactionFailed
+    case profileMutationRecoveryFailed
 
     var errorDescription: String? {
         switch self {
@@ -263,7 +275,8 @@ enum ProfileStoreError: LocalizedError, Equatable {
              .mixedOrDowngradedStorage, .missingEncryptedRecord,
              .plaintextMigrationValidationFailed, .plaintextMigrationCommitFailed,
              .plaintextMigrationRecoveryFailed, .profileImportTransactionFailed,
-             .profileImportRecoveryFailed:
+             .profileImportRecoveryFailed, .profileMutationTransactionFailed,
+             .profileMutationRecoveryFailed:
             "Profile storage could not be loaded safely."
         }
     }

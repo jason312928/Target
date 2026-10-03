@@ -20,12 +20,22 @@ struct RuntimeConnection: Identifiable, Equatable, Sendable {
 struct RuntimeConnectionsSnapshot: Equatable, Sendable {
     let totals: RuntimeConnectionTotals
     let connections: [RuntimeConnection]
+    var isTruncated: Bool { totals.activeConnectionCount > connections.count }
 }
 
 struct RuntimeConnectionObservation: Equatable, Sendable {
     let state: RuntimeObservationState
     let connections: [RuntimeConnection]
     let observedAt: Date?
+    let totalConnectionCount: Int
+    var isTruncated: Bool { totalConnectionCount > connections.count }
+
+    init(state: RuntimeObservationState, connections: [RuntimeConnection], observedAt: Date?, totalConnectionCount: Int? = nil) {
+        self.state = state
+        self.connections = connections
+        self.observedAt = observedAt
+        self.totalConnectionCount = totalConnectionCount ?? connections.count
+    }
 
     static let stopped = Self(state: .stopped, connections: [], observedAt: nil)
     static let loading = Self(state: .loading, connections: [], observedAt: nil)

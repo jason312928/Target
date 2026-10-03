@@ -18,8 +18,13 @@ final class BackendLifecycleModel {
     private var operationTask: Task<Void, Never>?
     private var observationTask: Task<Void, Never>?
     private var observationRuntimeGeneration: Int?
-    private var observesConnectionDetails = false
-    private var observesLogs = false
+    private var connectionObservers: Set<UUID> = []
+    private let legacyConnectionObserver = UUID()
+    private var observesConnectionDetails: Bool { !connectionObservers.isEmpty }
+    private var observationTaskID: UUID?
+    private var logObservers: Set<UUID> = []
+    private let legacyLogObserver = UUID()
+    private var observesLogs: Bool { !logObservers.isEmpty }
     private var trafficHistoryModel = RuntimeTrafficHistory()
     private let hostNetworkSafetyMode: HostNetworkSafetyMode
     private let serviceRegistrationStatusProvider: @Sendable () -> ServiceInstallationState
@@ -449,9 +454,12 @@ final class BackendLifecycleModel {
         }
     }
 
-    func setConnectionObservationActive(_ active: Bool) {
-        observesConnectionDetails = active
-        if !active {
+    func setConnectionObservationActive(_ active: Bool, consumerID: UUID? = nil) {
+        let wasActive = observesConnectionDetails
+        let id = consumerID ?? legacyConnectionObserver
+        if active { connectionObservers.insert(id) } else { connectionObservers.remove(id) }
+        guard wasActive != observesConnectionDetails else { return }
+        if !observesConnectionDetails {
             runtimeConnections = .stopped
             return
         }
@@ -459,9 +467,12 @@ final class BackendLifecycleModel {
         updateObservationLifecycle(for: status)
     }
 
-    func setLogObservationActive(_ active: Bool) {
-        observesLogs = active
-        if !active {
+    func setLogObservationActive(_ active: Bool, consumerID: UUID? = nil) {
+        let wasActive = observesLogs
+        let id = consumerID ?? legacyLogObserver
+        if active { logObservers.insert(id) } else { logObservers.remove(id) }
+        guard wasActive != observesLogs else { return }
+        if !observesLogs {
             runtimeLogState = .stopped
             runtimeLogEntries = []
             return
@@ -721,47 +732,60 @@ final class BackendLifecycleModel {
         let operations = runtimeObservationOperations
         let connectionProvider = runtimeConnectionProvider
         let logProvider = runtimeLogProvider
+        let taskID = UUID()
+        observationTaskID = taskID
         observationTask = Task { [weak self] in
+            defer {
+                if self?.observationTaskID == taskID {
+                    self?.observationTask = nil
+                    self?.observationTaskID = nil
+                    self?.observationRuntimeGeneration = nil
+                }
+            }
             while !Task.isCancelled {
-                let observation = await operations.read()
-                guard !Task.isCancelled else { return }
-                guard self?.runtimeChangeGeneration == generation else { return }
-                self?.runtimeObservation = observation
-                self?.appendTrafficSample(observation)
-                if self?.observesConnectionDetails == true, let connectionProvider {
-                    let availability = await connectionProvider.runtimeConnectionAvailability()
-                    guard !Task.isCancelled,
-                          self?.runtimeChangeGeneration == generation,
-                          self?.observesConnectionDetails == true else { return }
-                    if availability != .loading {
-                        self?.runtimeConnections = availability == .stopped ? .stopped : .unavailable
-                    } else {
-                        let connections = await connectionProvider.currentRuntimeConnections()
-                        guard !Task.isCancelled,
-                              self?.runtimeChangeGeneration == generation,
-                              self?.observesConnectionDetails == true else { return }
-                        self?.runtimeConnections = connections.map {
-                            .init(state: .available, connections: $0, observedAt: .now)
-                        } ?? .unavailable
+                let activity = await operations.readActivity()
+                let observation = activity.summary
+                guard !Task.isCancelled, let self,
+                      self.runtimeChangeGeneration == generation else { return }
+                self.runtimeObservation = observation
+                self.appendTrafficSample(observation)
+                if self.observesConnectionDetails {
+                    if let snapshot = activity.snapshot {
+                        self.runtimeConnections = .init(
+                            state: .available, connections: snapshot.connections, observedAt: observation.observedAt,
+                            totalConnectionCount: snapshot.totals.activeConnectionCount
+                        )
+                    } else if let connectionProvider {
+                        let availability = await connectionProvider.runtimeConnectionAvailability()
+                        guard !Task.isCancelled, self.runtimeChangeGeneration == generation else { return }
+                        if self.observesConnectionDetails {
+                            if availability != .loading {
+                                self.runtimeConnections = availability == .stopped ? .stopped : .unavailable
+                            } else {
+                                let connections = await connectionProvider.currentRuntimeConnections()
+                                guard !Task.isCancelled, self.runtimeChangeGeneration == generation else { return }
+                                if self.observesConnectionDetails {
+                                    self.runtimeConnections = connections.map {
+                                        .init(state: .available, connections: $0, observedAt: .now)
+                                    } ?? .unavailable
+                                }
+                            }
+                        }
                     }
                 }
-                if self?.observesLogs == true, let logProvider {
+                if self.observesLogs, let logProvider {
                     let availability = await logProvider.runtimeLogAvailability()
-                    guard !Task.isCancelled,
-                          self?.runtimeChangeGeneration == generation,
-                          self?.observesLogs == true else { return }
-                    let entries = availability == .available ? await logProvider.runtimeLogs() : []
-                    guard !Task.isCancelled,
-                          self?.runtimeChangeGeneration == generation,
-                          self?.observesLogs == true else { return }
-                    self?.runtimeLogState = availability
-                    self?.runtimeLogEntries = entries
+                    guard !Task.isCancelled, self.runtimeChangeGeneration == generation else { return }
+                    if self.observesLogs {
+                        let entries = availability == .available ? await logProvider.runtimeLogs() : []
+                        guard !Task.isCancelled, self.runtimeChangeGeneration == generation else { return }
+                        if self.observesLogs {
+                            self.runtimeLogState = availability
+                            if self.runtimeLogEntries != entries { self.runtimeLogEntries = entries }
+                        }
+                    }
                 }
-                if observation.state == .stopped {
-                    self?.observationTask = nil
-                    self?.observationRuntimeGeneration = nil
-                    return
-                }
+                if observation.state == .stopped { return }
                 do { try await Task.sleep(for: .seconds(1)) }
                 catch { return }
             }

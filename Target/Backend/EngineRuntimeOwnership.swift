@@ -27,6 +27,7 @@ struct EngineRuntimeRecord: Codable, Equatable, Sendable {
     let configurationFingerprint: String
     let startedAt: Date
     let runtimeConfigurationID: UUID
+    var routeBindingsFingerprint: String? = nil
 
     var isValid: Bool {
         pid > 0 && endpoint.isDynamicHighPort && !executablePath.isEmpty
@@ -348,7 +349,8 @@ final class EngineRuntimeOwnership: @unchecked Sendable {
         profileRevision: Int,
         sourceConfigurationFingerprint: String,
         configurationFingerprint: String,
-        runtimeConfigurationID: UUID
+        runtimeConfigurationID: UUID,
+        routeBindingsFingerprint: String? = nil
     ) throws {
         let resolvedExecutable = executableURL.resolvingSymlinksInPath()
         let record = EngineRuntimeRecord(
@@ -361,7 +363,8 @@ final class EngineRuntimeOwnership: @unchecked Sendable {
             sourceConfigurationFingerprint: sourceConfigurationFingerprint,
             configurationFingerprint: configurationFingerprint,
             startedAt: Date(),
-            runtimeConfigurationID: runtimeConfigurationID
+            runtimeConfigurationID: runtimeConfigurationID,
+            routeBindingsFingerprint: routeBindingsFingerprint
         )
         guard record.isValid else { throw BackendError.engineLaunchFailed }
         try store.save(record)

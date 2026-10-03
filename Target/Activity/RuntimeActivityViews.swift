@@ -17,6 +17,13 @@ struct RuntimeActivityDestinationView: View {
 
 struct ConnectionsView: View {
     @Bindable var lifecycle: BackendLifecycleModel
+    @State private var consumerID = UUID()
+    @State private var query = ""
+    @State private var sort = RuntimeConnectionSort.newest
+    @State private var isPaused = false
+    @State private var frozenObservation: RuntimeConnectionObservation?
+    @State private var displayedConnections: [RuntimeConnection] = []
+    private var observation: RuntimeConnectionObservation { frozenObservation ?? lifecycle.runtimeConnections }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,20 +33,47 @@ struct ConnectionsView: View {
                 .padding(.horizontal, TargetUI.pagePadding)
                 .padding(.top, TargetUI.pagePadding)
                 .padding(.bottom, 16)
+            HStack {
+                TextField("diagnostics.search", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 280)
+                Picker("diagnostics.sort", selection: $sort) {
+                    ForEach(RuntimeConnectionSort.allCases) { value in
+                        Text(LocalizedStringKey(value.titleKey)).tag(value)
+                    }
+                }.frame(maxWidth: 240)
+                Spacer()
+                Button(isPaused ? "diagnostics.resume" : "diagnostics.pause", systemImage: isPaused ? "play" : "pause") {
+                    isPaused.toggle()
+                }
+            }.padding(.horizontal, TargetUI.pagePadding).padding(.bottom, 12)
+            if observation.isTruncated {
+                Text("diagnostics.connections.truncated")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.bottom, 8)
+            }
             content
         }
         .navigationTitle("connections.title")
-        .task { lifecycle.setConnectionObservationActive(true) }
-        .onDisappear { lifecycle.setConnectionObservationActive(false) }
+        .task { lifecycle.setConnectionObservationActive(!isPaused, consumerID: consumerID); refreshRows() }
+        .onDisappear { lifecycle.setConnectionObservationActive(false, consumerID: consumerID) }
+        .onChange(of: lifecycle.runtimeConnections) { _, _ in if !isPaused { refreshRows() } }
+        .onChange(of: query) { _, _ in refreshRows() }
+        .onChange(of: sort) { _, _ in refreshRows() }
+        .onChange(of: isPaused) { _, paused in
+            frozenObservation = paused ? lifecycle.runtimeConnections : nil
+            lifecycle.setConnectionObservationActive(!paused, consumerID: consumerID)
+            refreshRows()
+        }
     }
 
     @ViewBuilder
     private var content: some View {
-        switch lifecycle.runtimeConnections.state {
-        case .available where lifecycle.runtimeConnections.connections.isEmpty:
+        switch observation.state {
+        case .available where observation.connections.isEmpty:
             ActivityStateView(symbol: "point.3.connected.trianglepath.dotted", titleKey: "connections.empty.title", messageKey: "connections.empty.message")
         case .available:
-            Table(lifecycle.runtimeConnections.connections) {
+            Table(displayedConnections) {
                 TableColumn("connections.column.destination") { connection in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(connection.destination.isEmpty ? "—" : connection.destination)
@@ -94,48 +128,15 @@ struct ConnectionsView: View {
             ActivityStateView(symbol: "exclamationmark.triangle", titleKey: "activity.unavailable.title", messageKey: "connections.unavailable.message")
         }
     }
-}
-
-enum RuntimeConnectionRouteMark: Equatable {
-    case country(PolicyRouteCountry)
-    case bypass
-    case defaultRoute
-}
-
-struct RuntimeConnectionSidebarPresentation: Equatable {
-    let destination: String
-    let detail: String?
-    let routeMark: RuntimeConnectionRouteMark
-
-    init(connection: RuntimeConnection) {
-        destination = connection.destination.isEmpty ? "-" : connection.destination
-        let detailParts = [
-            connection.destinationPort.map(String.init),
-            connection.network?.uppercased()
-        ].compactMap { $0 }
-        detail = detailParts.isEmpty ? nil : detailParts.joined(separator: " · ")
-        routeMark = Self.routeMark(for: connection.outboundChain)
+    private func refreshRows() {
+        displayedConnections = RuntimeConnectionPresentation.rows(observation.connections, query: query, sort: sort)
     }
 
-    private static func routeMark(for chain: [String]) -> RuntimeConnectionRouteMark {
-        if let country = chain.lazy.compactMap({ PolicyRouteCountry.recognize(in: $0) }).first {
-            return .country(country)
-        }
-        let normalized = chain.map {
-            $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .init(identifier: "en_US_POSIX"))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        if normalized.contains(where: {
-            $0 == "direct" || $0.contains("bypass") || $0.contains("绕过")
-        }) {
-            return .bypass
-        }
-        return .defaultRoute
-    }
 }
 
 struct RuntimeConnectionsSidebar: View {
     @Bindable var lifecycle: BackendLifecycleModel
+    @State private var consumerID = UUID()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -146,8 +147,8 @@ struct RuntimeConnectionsSidebar: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(.background.secondary)
         .accessibilityIdentifier("connections.sidebar")
-        .task { lifecycle.setConnectionObservationActive(true) }
-        .onDisappear { lifecycle.setConnectionObservationActive(false) }
+        .task { lifecycle.setConnectionObservationActive(true, consumerID: consumerID) }
+        .onDisappear { lifecycle.setConnectionObservationActive(false, consumerID: consumerID) }
     }
 
     private var sidebarHeader: some View {
@@ -158,7 +159,7 @@ struct RuntimeConnectionsSidebar: View {
                 Text("connections.title")
                     .font(.headline)
                 Spacer(minLength: 8)
-                Text("\(lifecycle.runtimeConnections.connections.count)")
+                Text("\(lifecycle.runtimeConnections.totalConnectionCount)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -374,6 +375,12 @@ struct TrafficView: View {
 
 struct LogsView: View {
     @Bindable var lifecycle: BackendLifecycleModel
+    @State private var consumerID = UUID()
+    @State private var query = ""
+    @State private var frozenEntries: [RuntimeLogEntry]?
+    private var entries: [RuntimeLogEntry] {
+        (frozenEntries ?? lifecycle.runtimeLogEntries).filter { query.isEmpty || $0.message.localizedCaseInsensitiveContains(query) || $0.level.rawValue.localizedCaseInsensitiveContains(query) }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -383,29 +390,40 @@ struct LogsView: View {
                 .padding(.horizontal, TargetUI.pagePadding)
                 .padding(.top, TargetUI.pagePadding)
                 .padding(.bottom, 16)
+            HStack {
+                TextField("diagnostics.search", text: $query).textFieldStyle(.roundedBorder).frame(maxWidth: 320)
+                Spacer()
+                Button(frozenEntries == nil ? "diagnostics.pause" : "diagnostics.resume") {
+                    frozenEntries = frozenEntries == nil ? lifecycle.runtimeLogEntries : nil
+                    lifecycle.setLogObservationActive(frozenEntries == nil, consumerID: consumerID)
+                }
+            }.padding(.horizontal, TargetUI.pagePadding).padding(.bottom, 12)
             content
         }
         .navigationTitle("logs.title")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button("logs.clear", systemImage: "trash") { lifecycle.clearRuntimeLogs() }
+                Button("logs.clear", systemImage: "trash") {
+                    lifecycle.clearRuntimeLogs()
+                    if frozenEntries != nil { frozenEntries = [] }
+                }
                     .disabled(lifecycle.runtimeLogEntries.isEmpty)
                     .accessibilityLabel(Text("logs.clear"))
             }
         }
-        .task { lifecycle.setLogObservationActive(true) }
-        .onDisappear { lifecycle.setLogObservationActive(false) }
+        .task { lifecycle.setLogObservationActive(frozenEntries == nil, consumerID: consumerID) }
+        .onDisappear { lifecycle.setLogObservationActive(false, consumerID: consumerID) }
     }
 
     @ViewBuilder
     private var content: some View {
-        switch lifecycle.runtimeLogState {
+        switch frozenEntries == nil ? lifecycle.runtimeLogState : .available {
         case .available where lifecycle.runtimeLogEntries.isEmpty:
             ActivityStateView(symbol: "text.alignleft", titleKey: "logs.empty.title", messageKey: "logs.empty.message")
         case .available:
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(lifecycle.runtimeLogEntries) { entry in
+                    ForEach(entries) { entry in
                         HStack(alignment: .firstTextBaseline, spacing: 10) {
                             Text(entry.timestamp, format: .dateTime.hour().minute().second())
                                 .foregroundStyle(.secondary)

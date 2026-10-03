@@ -9,9 +9,18 @@ final class ProfileViewModel {
     private let policyCatalogLoader: () throws -> PolicyCatalog
     private let usesCustomPolicyCatalogLoader: Bool
     private let configurationLoader: (UUID) throws -> String
+    private let usesCustomConfigurationLoader: Bool
     private let subscriptionOperations: TargetSubscriptionOperations
     private var subscriptionTask: Task<Void, Never>?
     private var subscriptionGeneration = 0
+    private var importGeneration = 0
+    private var persistenceTask: Task<Void, Never>?
+    private var editorDiagnosticTask: Task<Void, Never>?
+    private var editorGeneration = 0
+    private var metadataGeneration = 0
+    private var cachedCatalogs: [UUID: PolicyCatalog] = [:]
+    private var hasLoadedInitialState = false
+    private(set) var isPerformingPersistence = false
     private var importTask: Task<Void, Never>?
     private var policyTask: Task<Void, Never>?
     private var queuedPolicySelection: (selectorTag: String, outboundTag: String)?
@@ -53,7 +62,8 @@ final class ProfileViewModel {
         subscriptionFetcher: any ProfileSubscriptionFetching = SecureSubscriptionFetcher(),
         configurationLoader: ((UUID) throws -> String)? = nil,
         policyOperations: (any TargetPolicyOperating)? = nil,
-        policyCatalogLoader: (() throws -> PolicyCatalog)? = nil
+        policyCatalogLoader: (() throws -> PolicyCatalog)? = nil,
+        loadImmediately: Bool = true
     ) {
         self.store = store
         let resolvedPolicyOperations = policyOperations ?? TargetPolicyOperations(profileStore: store)
@@ -61,14 +71,20 @@ final class ProfileViewModel {
         self.policyCatalogLoader = policyCatalogLoader ?? resolvedPolicyOperations.readPersisted
         self.usesCustomPolicyCatalogLoader = policyCatalogLoader != nil
         self.subscriptionOperations = TargetSubscriptionOperations(store: store, fetcher: subscriptionFetcher)
+        self.usesCustomConfigurationLoader = configurationLoader != nil
         self.configurationLoader = configurationLoader ?? { try store.configurationText(for: $0) }
-        reloadInitialState()
+        if loadImmediately {
+            reloadInitialState()
+            hasLoadedInitialState = true
+        }
     }
 
     var selectedProfile: Profile? { profiles.first { $0.id == selectedID } }
-    var canEditConfiguration: Bool { selectedProfile != nil && isConfigurationLoaded }
-    var canExport: Bool { canEditConfiguration && !isDirty && !isExporting }
-    var defaultExportFileName: String { store.defaultExportFileNameForSelectedProfile() ?? "Profile.json" }
+    var canEditConfiguration: Bool { selectedProfile != nil && isConfigurationLoaded && !isPerformingPersistence }
+    var canExport: Bool { canEditConfiguration && !isDirty && !isExporting && !isPerformingPersistence }
+    var defaultExportFileName: String {
+        selectedProfile.map { ProfileTransferService.defaultExportFileName(for: $0.name) } ?? "Profile.json"
+    }
     var shouldPresentImportConfirmation: Bool { pendingImportCandidate != nil && pendingOperation == nil }
     var pendingSubscriptionUpdate: PendingSubscriptionIntake? { pendingSubscriptionIntake }
     var shouldPresentSubscriptionPreview: Bool { pendingSubscriptionIntake != nil && pendingOperation == nil }
@@ -80,7 +96,8 @@ final class ProfileViewModel {
     }
 
     func participatingCountryRoutes(profileIDs: Set<UUID>) -> [PolicyCountryRoute] {
-        let eligible = profiles
+        let eligible =
+            profiles
             .filter { profileIDs.contains($0.id) && $0.validation.status != .invalid }
             .sorted {
                 if $0.name != $1.name { return $0.name < $1.name }
@@ -90,7 +107,7 @@ final class ProfileViewModel {
         var seenMembers = Set<String>()
 
         for profile in eligible {
-            guard let catalog = try? store.policyCatalog(for: profile.id) else { continue }
+            guard let catalog = cachedCatalogs[profile.id] else { continue }
             for selector in catalog.selectors where selector.isMutable {
                 let health = profile.id == selectedID ? policyHealthBySelector[selector.id] ?? [:] : [:]
                 for route in PolicySelectorPresentation(selector, health: health).countryRoutes {
@@ -107,7 +124,8 @@ final class ProfileViewModel {
     }
 
     func requestCountrySelection(_ countryCode: String, participatingProfileIDs: Set<UUID>) {
-        let eligible = profiles
+        let eligible =
+            profiles
             .filter { participatingProfileIDs.contains($0.id) && $0.validation.status != .invalid }
             .sorted {
                 if $0.name != $1.name { return $0.name < $1.name }
@@ -116,12 +134,13 @@ final class ProfileViewModel {
         var candidates: [(profile: Profile, selector: PolicyCatalogSelector, member: PolicyCatalogMember, latency: Int?)] = []
 
         for profile in eligible {
-            guard let catalog = try? store.policyCatalog(for: profile.id) else { continue }
+            guard let catalog = cachedCatalogs[profile.id] else { continue }
             for selector in catalog.selectors where selector.isMutable {
                 let health = profile.id == selectedID ? policyHealthBySelector[selector.id] ?? [:] : [:]
                 for member in selector.members where member.status == .available {
                     guard PolicyRouteCountry.recognize(in: member.tag, endpoint: member.endpoint)?.code == countryCode,
-                          selector.tag != nil else { continue }
+                        selector.tag != nil
+                    else { continue }
                     candidates.append((profile, selector, member, health[member.tag]?.latencyMilliseconds))
                 }
             }
@@ -129,7 +148,7 @@ final class ProfileViewModel {
 
         let chosen = candidates.min { lhs, rhs in
             switch (lhs.latency, rhs.latency) {
-            case let (left?, right?) where left != right: return left < right
+            case (let left?, let right?) where left != right: return left < right
             case (_?, nil): return true
             case (nil, _?): return false
             default:
@@ -141,16 +160,16 @@ final class ProfileViewModel {
             }
         }
         guard let chosen, let selectorTag = chosen.selector.tag else { return }
-        request(.selectPolicy(
-            profileID: chosen.profile.id,
-            selectorTag: selectorTag,
-            outboundTag: chosen.member.tag
-        ))
+        request(
+            .selectPolicy(
+                profileID: chosen.profile.id,
+                selectorTag: selectorTag,
+                outboundTag: chosen.member.tag
+            ))
     }
 
     func requestCreate(name: String, subscriptionURL: URL? = nil) {
-        if let subscriptionURL { prepareSubscription(name: name, url: subscriptionURL) }
-        else { request(.create(name: name)) }
+        if let subscriptionURL { prepareSubscription(name: name, url: subscriptionURL) } else { request(.create(name: name)) }
     }
 
     func prepareSubscription(name: String, url: URL) {
@@ -197,7 +216,8 @@ final class ProfileViewModel {
     }
 
     @discardableResult
-    func resolveUnsavedChanges(_ decision: ProfileUnsavedChangesDecision) -> ProfileUnsavedChangesDecisionResult {
+    func resolveUnsavedChanges(_ decision: ProfileUnsavedChangesDecision) async -> ProfileUnsavedChangesDecisionResult {
+        guard !isPerformingPersistence else { return .failedAndStillPending }
         guard let operation = pendingOperation else { return .noPendingOperation }
         switch decision {
         case .cancel:
@@ -205,28 +225,28 @@ final class ProfileViewModel {
             unsavedChangesPresentation.resolve(.cancelled)
             return .cancelled
         case .discardChanges:
-            guard discardCurrentEditorToPersistedState() else {
+            guard await discardCurrentEditorToPersistedState() else {
                 unsavedChangesPresentation.resolve(.failedAndStillPending)
                 return .failedAndStillPending
             }
             pendingOperation = nil
             unsavedChangesPresentation.resolve(.resolved)
-            execute(operation)
+            await execute(operation)
             return .resolved
         case .saveAndContinue:
-            guard saveCurrentEditor() else {
+            guard await saveCurrentEditor() else {
                 unsavedChangesPresentation.resolve(.failedAndStillPending)
                 return .failedAndStillPending
             }
             pendingOperation = nil
             unsavedChangesPresentation.resolve(.resolved)
-            execute(operation)
+            await execute(operation)
             return .resolved
         }
     }
 
     func cancelUnsavedChangesConfirmation() {
-        _ = resolveUnsavedChanges(.cancel)
+        Task { _ = await resolveUnsavedChanges(.cancel) }
     }
 
     func unsavedChangesAlertPresentationDidChange(_ isPresented: Bool) {
@@ -236,6 +256,7 @@ final class ProfileViewModel {
     private func reloadInitialState() {
         do {
             profiles = try store.listProfiles()
+            cachedCatalogs = try Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, try store.policyCatalog(for: $0.id)) })
             selectedID = try store.selectedProfileID() ?? profiles.first?.id
             loadSelectedText()
             refreshPolicyCatalog()
@@ -254,21 +275,25 @@ final class ProfileViewModel {
         cancelPreparedImport()
         isPreparingImport = true
         messageKey = nil
+        let generation = importGeneration
+        let store = store
         importTask = Task { [weak self] in
             guard let self else { return }
             defer {
-                self.importTask = nil
-                self.isPreparingImport = false
+                if self.importGeneration == generation {
+                    self.importTask = nil
+                    self.isPreparingImport = false
+                }
             }
             do {
-                let candidate = try self.store.prepareImportCandidate(from: url)
-                guard !Task.isCancelled else { return }
+                let candidate = try await ProfileBackgroundWork.run { try store.prepareImportCandidate(from: url) }
+                guard !Task.isCancelled, self.importGeneration == generation else { return }
                 self.pendingImportCandidate = candidate
             } catch let error as ProfileTransferError {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, self.importGeneration == generation else { return }
                 self.messageKey = self.transferMessageKey(for: error)
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, self.importGeneration == generation else { return }
                 self.messageKey = "profile.import.error.unreadable"
             }
         }
@@ -280,6 +305,7 @@ final class ProfileViewModel {
     }
 
     func cancelPreparedImport() {
+        importGeneration &+= 1
         importTask?.cancel()
         importTask = nil
         isPreparingImport = false
@@ -307,14 +333,15 @@ final class ProfileViewModel {
         guard canExport else { return }
         isShowingExportWarning = false
         isExporting = true
-        defer { isExporting = false }
-        do {
-            try store.exportSelectedProfile(to: destination)
-            messageKey = "profile.export.success"
-        } catch let error as ProfileTransferError {
-            messageKey = transferMessageKey(for: error)
-        } catch {
-            messageKey = "profile.export.error.failed"
+        let store = store
+        Task { [weak self] in
+            defer { self?.isExporting = false }
+            do {
+                try await ProfileBackgroundWork.run { try store.exportSelectedProfile(to: destination) }
+                self?.messageKey = "profile.export.success"
+            } catch let error as ProfileTransferError {
+                self?.messageKey = self?.transferMessageKey(for: error)
+            } catch { self?.messageKey = "profile.export.error.failed" }
         }
     }
 
@@ -324,11 +351,30 @@ final class ProfileViewModel {
     }
 
     func rename(_ id: UUID, to name: String) {
-        do {
-            try store.rename(id, to: name)
-            refreshMetadataPreservingEditor()
-            refreshPolicyCatalog()
-        } catch { messageKey = "profile.message.operation-failed" }
+        let store = store
+        startMetadataMutation { try store.rename(id, to: name) }
+    }
+
+    private func startMetadataMutation(_ mutation: @escaping @Sendable () throws -> Void) {
+        guard !isPerformingPersistence, persistenceTask == nil else { return }
+        isPerformingPersistence = true
+        let store = store
+        persistenceTask = Task { [weak self] in
+            defer {
+                self?.isPerformingPersistence = false
+                self?.persistenceTask = nil
+            }
+            do {
+                let snapshot = try await ProfileBackgroundWork.run {
+                    try mutation()
+                    return try store.snapshot()
+                }
+                self?.profiles = snapshot.profiles
+                self?.cachedCatalogs = snapshot.catalogs
+                self?.refreshPolicyCatalogFromSnapshot(snapshot)
+                self?.markReadinessChanged()
+            } catch { self?.messageKey = "profile.message.operation-failed" }
+        }
     }
 
     func selectPolicy(selectorTag: String, outboundTag: String) {
@@ -411,39 +457,42 @@ final class ProfileViewModel {
         countryCode: String,
         outboundTag: String,
         participatingProfileIDs: Set<UUID>
-    ) -> Bool {
-        guard !isDirty else {
-            messageKey = "profile.route.error.unsaved"
+    ) async -> Bool {
+        guard !isPerformingPersistence, !isDirty,
+            let domain = ProfileRouteBinding.domain(from: url),
+            let binding = ProfileRouteBinding(domain: domain, outboundTag: outboundTag, countryCode: countryCode)
+        else {
+            messageKey = isDirty ? "profile.route.error.unsaved" : "profile.route.error.invalid-link"
             return false
         }
-        guard let domain = ProfileRouteBinding.domain(from: url),
-              let binding = ProfileRouteBinding(domain: domain, outboundTag: outboundTag, countryCode: countryCode) else {
-            messageKey = "profile.route.error.invalid-link"
-            return false
-        }
-        do {
-            let owner = try profiles
-                .filter { participatingProfileIDs.contains($0.id) && $0.validation.status != .invalid }
-                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-                .first { profile in
-                    let catalog = try store.policyCatalog(for: profile.id)
-                    return catalog.selectors.flatMap(\.members).contains {
-                        $0.tag == outboundTag
-                            && $0.status == .available
-                            && PolicyRouteCountry.recognize(in: $0.tag, endpoint: $0.endpoint)?.code == countryCode
-                    }
-                }
-            guard let owner else { throw ProfileStoreError.invalidStoredMetadata }
-            if owner.id != selectedID {
-                try selectAndActivate(owner.id)
+        let owner = profiles.filter { participatingProfileIDs.contains($0.id) && $0.validation.status != .invalid }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            .first { profile in
+                cachedCatalogs[profile.id]?.selectors.flatMap(\.members).contains {
+                    $0.tag == outboundTag && $0.status == .available
+                        && PolicyRouteCountry.recognize(in: $0.tag, endpoint: $0.endpoint)?.code == countryCode
+                } == true
             }
-            try store.persistRouteBinding(
-                profileID: owner.id,
-                expectedRevision: owner.validRevision,
-                binding: binding
-            )
+        guard let owner else {
+            messageKey = "profile.route.error.save-failed"
+            return false
+        }
+        isPerformingPersistence = true
+        defer { isPerformingPersistence = false }
+        let store = store
+        let previousID = selectedID
+        do {
+            let snapshot = try await ProfileBackgroundWork.run {
+                try store.bindRouteSelectingProfile(binding, profileID: owner.id, expectedRevision: owner.validRevision)
+                return try store.snapshot()
+            }
+            if previousID != snapshot.selectedID {
+                applySnapshot(snapshot)
+            } else {
+                profiles = snapshot.profiles
+                cachedCatalogs = snapshot.catalogs
+            }
             messageKey = "profile.route.saved"
-            refreshMetadataPreservingEditor()
             markReadinessChanged()
             return true
         } catch {
@@ -454,27 +503,20 @@ final class ProfileViewModel {
 
     func removeRouteBinding(domain: String) {
         guard let profile = selectedProfile else { return }
-        do {
-            guard try store.removeRouteBinding(
-                profileID: profile.id,
-                expectedRevision: profile.validRevision,
-                domain: domain
-            ) else { return }
-            messageKey = "profile.route.removed"
-            refreshMetadataPreservingEditor()
-            markReadinessChanged()
-        } catch {
-            messageKey = "profile.route.error.save-failed"
+        let store = store
+        startMetadataMutation {
+            _ = try store.removeRouteBinding(profileID: profile.id, expectedRevision: profile.validRevision, domain: domain)
         }
     }
 
     func probePolicyLatency(selectorID: Int, selectorTag: String) {
         guard policyProbeTask == nil,
-              let catalog = policyCatalog,
-              let profileID = catalog.profileID,
-              let profileRevision = catalog.profileRevision,
-              let sourceFingerprint = catalog.sourceFingerprint,
-              let selector = catalog.selectors.first(where: { $0.id == selectorID && $0.tag == selectorTag }) else {
+            let catalog = policyCatalog,
+            let profileID = catalog.profileID,
+            let profileRevision = catalog.profileRevision,
+            let sourceFingerprint = catalog.sourceFingerprint,
+            let selector = catalog.selectors.first(where: { $0.id == selectorID && $0.tag == selectorTag })
+        else {
             return
         }
         let availableMembers = selector.members.filter { $0.status == .available }
@@ -499,15 +541,16 @@ final class ProfileViewModel {
             do {
                 let result = try await self.policyOperations.probeLatency(selectorTag: selectorTag)
                 guard !Task.isCancelled,
-                      generation == self.policyHealthGeneration,
-                      self.selectedID == selectedProfileID,
-                      result.profileID == profileID,
-                      result.profileRevision == profileRevision,
-                      result.sourceFingerprint == sourceFingerprint,
-                      result.selector == selectorTag,
-                      self.policyCatalog?.profileID == profileID,
-                      self.policyCatalog?.profileRevision == profileRevision,
-                      self.policyCatalog?.sourceFingerprint == sourceFingerprint else { return }
+                    generation == self.policyHealthGeneration,
+                    self.selectedID == selectedProfileID,
+                    result.profileID == profileID,
+                    result.profileRevision == profileRevision,
+                    result.sourceFingerprint == sourceFingerprint,
+                    result.selector == selectorTag,
+                    self.policyCatalog?.profileID == profileID,
+                    self.policyCatalog?.profileRevision == profileRevision,
+                    self.policyCatalog?.sourceFingerprint == sourceFingerprint
+                else { return }
                 self.policyHealthBySelector[selectorID] = Dictionary(
                     uniqueKeysWithValues: result.members.map { ($0.tag, $0) }
                 )
@@ -535,53 +578,122 @@ final class ProfileViewModel {
         subscriptionFailureDiagnostic = nil
         editorText = text
         isDirty = true
-        diagnostic = JSONSyntaxChecker.validate(text)
+        editorGeneration &+= 1
+        let generation = editorGeneration
+        editorDiagnosticTask?.cancel()
+        editorDiagnosticTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(180))
+                let diagnostic = try await ProfileBackgroundWork.run { JSONSyntaxChecker.validate(text) }
+                guard !Task.isCancelled, self?.editorGeneration == generation else { return }
+                self?.diagnostic = diagnostic
+            } catch {}
+        }
         messageKey = nil
     }
 
     func format() {
         guard canEditConfiguration else { return }
-        guard JSONSyntaxChecker.validate(editorText) == nil,
-              let object = try? JSONSerialization.jsonObject(with: Data(editorText.utf8)),
-              let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
-              let text = String(data: data, encoding: .utf8) else {
-            diagnostic = JSONSyntaxChecker.validate(editorText)
-            return
+        let source = editorText
+        let generation = editorGeneration
+        Task { [weak self] in
+            do {
+                let result = try await ProfileBackgroundWork.run { () -> (String?, ConfigurationDiagnostic?) in
+                    if let diagnostic = JSONSyntaxChecker.validate(source) { return (nil, diagnostic) }
+                    let object = try JSONSerialization.jsonObject(with: Data(source.utf8))
+                    let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+                    return (String(data: data, encoding: .utf8).map { $0 + "\n" }, nil)
+                }
+                guard let self, self.editorGeneration == generation, self.canEditConfiguration else { return }
+                if let text = result.0 { self.updateEditor(text) } else { self.diagnostic = result.1 }
+            } catch { self?.messageKey = "profile.message.operation-failed" }
         }
-        editorText = text + "\n"
-        isDirty = true
     }
 
     func save() {
-        if pendingOperation != nil {
-            _ = resolveUnsavedChanges(.saveAndContinue)
-        } else {
-            _ = saveCurrentEditor()
+        guard !isPerformingPersistence, persistenceTask == nil else { return }
+        persistenceTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.persistenceTask = nil }
+            if self.pendingOperation != nil {
+                _ = await self.resolveUnsavedChanges(.saveAndContinue)
+            } else {
+                _ = await self.saveCurrentEditor()
+            }
         }
     }
 
     @discardableResult
-    private func saveCurrentEditor() -> Bool {
-        guard let selectedID, isConfigurationLoaded else {
-            messageKey = "profile.message.configuration-read-failed"
-            return false
-        }
+    private func saveCurrentEditor() async -> Bool {
+        guard !isPerformingPersistence, let selectedID, isConfigurationLoaded else { return false }
+        isPerformingPersistence = true
+        defer { isPerformingPersistence = false }
+        let text = editorText
+        let generation = editorGeneration
+        let store = store
         do {
-            try store.save(json: editorText, for: selectedID)
-            diagnostic = nil
-            isDirty = false
+            let snapshot = try await ProfileBackgroundWork.run {
+                try store.withSerializedAccess {
+                    try store.save(json: text, for: selectedID)
+                    return try store.snapshot()
+                }
+            }
+            guard self.selectedID == selectedID else { return false }
+            profiles = snapshot.profiles
+            cachedCatalogs = snapshot.catalogs
+            if editorText == text, editorGeneration == generation {
+                diagnostic = nil
+                isDirty = false
+            }
             messageKey = "profile.message.saved"
-            refreshMetadataPreservingEditor()
             invalidatePolicyHealth()
-            // Read only the newly persisted valid revision.  Do not reload the
-            // editor: formatting and cursor/editor semantics remain unchanged.
-            refreshPolicyCatalog()
+            refreshPolicyCatalogFromSnapshot(snapshot)
             markReadinessChanged()
-            return true
-        } catch let error as ProfileStoreError {
-            present(error)
-        } catch { messageKey = "profile.message.operation-failed" }
+            return !isDirty
+        } catch let error as ProfileStoreError { present(error) } catch { messageKey = "profile.message.operation-failed" }
         return false
+    }
+
+    func loadInitialState() async {
+        guard !hasLoadedInitialState else { return }
+        hasLoadedInitialState = true
+        let store = store
+        do { applySnapshot(try await ProfileBackgroundWork.run { try store.snapshot() }) } catch {
+            messageKey = "profile.message.load-failed"
+            isPolicyCatalogUnavailable = true
+        }
+    }
+
+    private func refreshPolicyCatalogFromSnapshot(_ snapshot: ProfileStoreSnapshot) {
+        if usesCustomPolicyCatalogLoader {
+            refreshPolicyCatalog()
+            return
+        }
+        policyCatalog = snapshot.selectedID.flatMap { snapshot.catalogs[$0] }
+        isPolicyCatalogUnavailable = snapshot.selectedID != nil && policyCatalog == nil
+        refreshPolicyState()
+    }
+
+    private func applySnapshot(_ snapshot: ProfileStoreSnapshot) {
+        metadataGeneration &+= 1
+        invalidatePolicyHealth()
+        profiles = snapshot.profiles
+        cachedCatalogs = snapshot.catalogs
+        selectedID = snapshot.selectedID
+        editorText = snapshot.configuration ?? ""
+        isConfigurationLoaded = snapshot.configuration != nil
+        if usesCustomConfigurationLoader, let selectedID {
+            do { editorText = try configurationLoader(selectedID) } catch {
+                editorText = ""
+                isConfigurationLoaded = false
+                messageKey = "profile.message.configuration-read-failed"
+            }
+        }
+        isDirty = false
+        diagnostic = nil
+        editorGeneration &+= 1
+        editorDiagnosticTask?.cancel()
+        refreshPolicyCatalogFromSnapshot(snapshot)
     }
 
     func updateSubscription() {
@@ -606,10 +718,11 @@ final class ProfileViewModel {
             do {
                 let prepared = try await operations.prepareUpdate(profileID: profileID)
                 guard let self, !Task.isCancelled, self.subscriptionGeneration == generation,
-                      self.selectedID == profileID else { return }
+                    self.selectedID == profileID
+                else { return }
                 if prepared.candidate == nil {
                     do {
-                        _ = try operations.commitNotModified(prepared)
+                        _ = try await ProfileBackgroundWork.run { try operations.commitNotModified(prepared) }
                     } catch {
                         throw SubscriptionPersistenceFailure()
                     }
@@ -620,12 +733,12 @@ final class ProfileViewModel {
             } catch {
                 guard let self, self.subscriptionGeneration == generation else { return }
                 if Task.isCancelled || (error as? SubscriptionUpdateError) == .cancelled {
-                    try? store.recordSubscriptionCancellation(for: profileID)
+                    _ = try? await ProfileBackgroundWork.run { try store.recordSubscriptionCancellation(for: profileID) }
                     self.messageKey = SubscriptionUpdateError.cancelled.messageKey
                     self.subscriptionFailureDiagnostic = nil
                 } else {
                     let key = self.subscriptionMessageKey(for: error)
-                    try? store.recordSubscriptionFailure(for: profileID, messageKey: key)
+                    _ = try? await ProfileBackgroundWork.run { try store.recordSubscriptionFailure(for: profileID, messageKey: key) }
                     self.presentSubscriptionError(error)
                 }
                 self.refreshMetadataPreservingEditor()
@@ -636,7 +749,10 @@ final class ProfileViewModel {
     func cancelSubscriptionUpdate() {
         let profileID = selectedProfile?.id
         cancelSubscriptionOperation(clearCandidate: false)
-        if let profileID { try? store.recordSubscriptionCancellation(for: profileID) }
+        if let profileID {
+            let store = store
+            Task { _ = try? await ProfileBackgroundWork.run { try store.recordSubscriptionCancellation(for: profileID) } }
+        }
         subscriptionFailureDiagnostic = nil
         messageKey = SubscriptionUpdateError.cancelled.messageKey
         refreshMetadataPreservingEditor()
@@ -689,114 +805,103 @@ final class ProfileViewModel {
     private func request(_ operation: ProfileWorkspaceOperation) {
         // A recovery decision owns the next replacement action. This also
         // prevents a clean editor from overwriting a recoverable older intent.
-        guard pendingOperation == nil else { return }
+        guard pendingOperation == nil, !isPerformingPersistence, !isExporting, persistenceTask == nil else { return }
         guard !isDirty else {
             pendingOperation = operation
             unsavedChangesPresentation.requestPresentation()
             return
         }
-        execute(operation)
+        isPerformingPersistence = true
+        persistenceTask = Task { [weak self] in
+            guard let self else { return }
+            self.isPerformingPersistence = false
+            await self.execute(operation)
+            self.persistenceTask = nil
+        }
     }
 
-    private func execute(_ operation: ProfileWorkspaceOperation) {
+    private func execute(_ operation: ProfileWorkspaceOperation) async {
+        guard !isPerformingPersistence else { return }
+        isPerformingPersistence = true
+        defer {
+            isPerformingPersistence = false
+            isCommittingImport = false
+        }
+        let store = store
+        let operations = subscriptionOperations
+        if case .importCandidate = operation { isCommittingImport = true }
         do {
-            switch operation {
-            case .select(let id):
-                cancelSubscriptionOperation(clearCandidate: true)
-                subscriptionFailureDiagnostic = nil
-                try store.select(id)
-                selectedID = id
-                cancelPreparedImport()
-                loadSelectedText()
-                markReadinessChanged()
-            case .selectPolicy(let profileID, let selectorTag, let outboundTag):
-                if selectedID != profileID {
-                    cancelSubscriptionOperation(clearCandidate: true)
-                    subscriptionFailureDiagnostic = nil
-                    try store.select(profileID)
-                    selectedID = profileID
-                    cancelPreparedImport()
-                    loadSelectedText()
-                    markReadinessChanged()
+            let snapshot = try await ProfileBackgroundWork.run {
+                try store.withSerializedAccess {
+                    switch operation {
+                    case .select(let id), .selectPolicy(let id, _, _): try store.select(id)
+                    case .create(let name):
+                        let profile = try store.create(name: name)
+                        try store.select(profile.id)
+                    case .duplicate(let id):
+                        let profile = try store.duplicate(id)
+                        try store.select(profile.id)
+                    case .delete(let id): try store.delete(id)
+                    case .restore(let id):
+                        try store.restorePreviousValidVersion(for: id)
+                        try store.select(id)
+                    case .importCandidate(let candidate, let name): _ = try store.importCandidate(candidate, name: name)
+                    case .applySubscription(let pending):
+                        let profile = try operations.commit(pending)
+                        try store.select(profile.id)
+                    }
+                    return try store.snapshot()
                 }
-                selectPolicy(selectorTag: selectorTag, outboundTag: outboundTag)
-            case .create(let name):
-                subscriptionFailureDiagnostic = nil
-                let profile = try store.create(name: name)
-                try selectAndActivate(profile.id)
-                markReadinessChanged()
-            case .duplicate(let id):
-                subscriptionFailureDiagnostic = nil
-                let profile = try store.duplicate(id)
-                try selectAndActivate(profile.id)
-                markReadinessChanged()
-            case .delete(let id):
-                subscriptionFailureDiagnostic = nil
-                try store.delete(id)
-                activate(try store.selectedProfileID() ?? profiles.first(where: { $0.id != id })?.id)
-                markReadinessChanged()
-            case .restore(let id):
-                subscriptionFailureDiagnostic = nil
-                try store.restorePreviousValidVersion(for: id)
-                activate(id)
-                messageKey = "profile.message.restored"
-                markReadinessChanged()
-            case .importCandidate(let candidate, let name):
-                subscriptionFailureDiagnostic = nil
-                isCommittingImport = true
-                defer { isCommittingImport = false }
-                let profile = try store.importCandidate(candidate, name: name)
-                pendingImportCandidate = nil
-                activate(profile.id)
-                messageKey = "profile.import.success"
-                markReadinessChanged()
-            case .applySubscription(let pending):
-                let profile = try subscriptionOperations.commit(pending)
-                pendingSubscriptionIntake = nil
-                subscriptionFailureDiagnostic = nil
-                activate(profile.id)
-                messageKey = {
-                    if case .newProfile = pending.destination { return "profile.subscription.added" }
-                    return "profile.subscription.applied"
-                }()
-                markReadinessChanged()
             }
+            cancelSubscriptionOperation(clearCandidate: true)
+            subscriptionFailureDiagnostic = nil
+            if case .importCandidate = operation { pendingImportCandidate = nil } else { cancelPreparedImport() }
+            applySnapshot(snapshot)
+            switch operation {
+            case .selectPolicy(_, let selectorTag, let outboundTag): selectPolicy(selectorTag: selectorTag, outboundTag: outboundTag)
+            case .restore: messageKey = "profile.message.restored"
+            case .importCandidate: messageKey = "profile.import.success"
+            case .applySubscription(let pending):
+                if case .newProfile = pending.destination {
+                    messageKey = "profile.subscription.added"
+                } else {
+                    messageKey = "profile.subscription.applied"
+                }
+            default: break
+            }
+            markReadinessChanged()
         } catch let error as ProfileStoreError {
             if case .applySubscription(let pending) = operation {
-                if case .validationFailed(let configurationDiagnostic) = error {
-                    diagnostic = configurationDiagnostic
-                    presentSubscriptionError(SubscriptionIntakeFailure(
-                        cause: .validationFailed,
-                        response: pending.response.metadata
-                    ))
+                if case .validationFailed(let diagnostic) = error {
+                    self.diagnostic = diagnostic
+                    presentSubscriptionError(SubscriptionIntakeFailure(cause: .validationFailed, response: pending.response.metadata))
                 } else {
                     presentSubscriptionError(SubscriptionPersistenceFailure())
                 }
             } else {
                 present(error)
             }
-        } catch {
-            messageKey = "profile.message.operation-failed"
-        }
-    }
-
-    private func activate(_ id: UUID?) {
-        profiles = (try? store.listProfiles()) ?? []
-        selectedID = id
-        loadSelectedText()
-    }
-
-    private func selectAndActivate(_ id: UUID) throws {
-        try store.select(id)
-        activate(id)
+        } catch { messageKey = "profile.message.operation-failed" }
     }
 
     /// For remote subscription state and metadata-only actions. Never invokes
     /// loadSelectedText(), so a task completing after the user edits cannot
     /// replace the current editing buffer or clear its dirty state.
     private func refreshMetadataPreservingEditor() {
-        do { profiles = try store.listProfiles() }
-        catch { messageKey = "profile.message.load-failed" }
+        metadataGeneration &+= 1
+        let generation = metadataGeneration
+        let store = store
+        let expectedID = selectedID
+        Task { [weak self] in
+            do {
+                let snapshot = try await ProfileBackgroundWork.run { try store.snapshot() }
+                guard let self, self.selectedID == expectedID, self.metadataGeneration == generation, !self.isPerformingPersistence else {
+                    return
+                }
+                self.profiles = snapshot.profiles
+                self.cachedCatalogs = snapshot.catalogs
+            } catch { self?.messageKey = "profile.message.load-failed" }
+        }
     }
 
     /// Restores the currently selected editor from authenticated persistent
@@ -804,13 +909,21 @@ final class ProfileViewModel {
     /// fail-closed: a read failure leaves the user's buffer and dirty state
     /// untouched, and the requested operation remains pending.
     @discardableResult
-    private func discardCurrentEditorToPersistedState() -> Bool {
+    private func discardCurrentEditorToPersistedState() async -> Bool {
+        isPerformingPersistence = true
+        defer { isPerformingPersistence = false }
         guard let selectedID else {
             messageKey = "profile.message.operation-failed"
             return false
         }
         do {
-            let persistedText = try configurationLoader(selectedID)
+            let store = store
+            let persistedText =
+                usesCustomConfigurationLoader
+                ? try configurationLoader(selectedID)
+                : try await ProfileBackgroundWork.run { try store.configurationText(for: selectedID) }
+            editorGeneration &+= 1
+            editorDiagnosticTask?.cancel()
             editorText = persistedText
             diagnostic = nil
             isDirty = false
@@ -864,7 +977,7 @@ final class ProfileViewModel {
         policyRefreshGeneration &+= 1
         let generation = policyRefreshGeneration
         do {
-            policyCatalog = try policyCatalogLoader()
+            policyCatalog = usesCustomPolicyCatalogLoader ? try policyCatalogLoader() : selectedID.flatMap { cachedCatalogs[$0] }
             isPolicyCatalogUnavailable = false
         } catch {
             policyCatalog = nil
@@ -889,7 +1002,7 @@ final class ProfileViewModel {
     private func policyMessageKey(for error: TargetPolicyOperationError) -> String {
         switch error {
         case .selectorNotFound, .selectorAmbiguous, .selectorUnavailable,
-             .outboundNotFound, .outboundUnavailable:
+            .outboundNotFound, .outboundUnavailable:
             "policy.catalog.selection.unavailable"
         case .persistenceFailed:
             "policy.catalog.selection.failed"

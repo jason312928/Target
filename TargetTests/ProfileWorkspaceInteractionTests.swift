@@ -189,11 +189,12 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
 
         fixture.model.prepareImport(from: importURL)
         for _ in 0..<1_000 where fixture.model.pendingImportCandidate == nil {
-            await Task.yield()
+            try await Task.sleep(for: .milliseconds(2))
         }
         XCTAssertNotNil(fixture.model.pendingImportCandidate)
 
         fixture.model.commitPreparedImport(name: "Imported")
+        try await waitForProfileWork(fixture.model)
 
         let selectedID = try XCTUnwrap(fixture.model.selectedID)
         XCTAssertEqual(fixture.model.editorText.data(using: .utf8), Data(source.utf8))
@@ -203,7 +204,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertNil(fixture.model.diagnostic)
     }
 
-    func testConfigurationReadFailureIsUnavailableAndCannotOverwriteLastValidRevision() throws {
+    func testConfigurationReadFailureIsUnavailableAndCannotOverwriteLastValidRevision() async throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "TargetProfileReadFailure-\(UUID().uuidString)", directoryHint: .isDirectory)
         let store = ProfileStore(
@@ -226,6 +227,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         let lastValid = try store.validVersion(for: second.id, revision: 1).data
 
         model.requestSelection(second.id)
+        try await waitForProfileWork(model)
 
         XCTAssertEqual(model.selectedID, second.id)
         XCTAssertFalse(model.isConfigurationLoaded)
@@ -236,6 +238,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
 
         model.updateEditor("")
         model.save()
+        try await waitForProfileWork(model)
 
         XCTAssertFalse(model.isDirty)
         XCTAssertEqual(model.messageKey, "profile.message.configuration-read-failed")
@@ -243,7 +246,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(try store.availableValidVersions(for: second.id).map(\.revision), [1])
     }
 
-    func testPolicyCatalogUsesPersistedRevisionAndRefreshesOnlyAfterSave() throws {
+    func testPolicyCatalogUsesPersistedRevisionAndRefreshesOnlyAfterSave() async throws {
         let fixture = try makeFixture()
         let catalogA = #"{"outbounds":[{"type":"selector","tag":"A","outbounds":["a"]},{"type":"direct","tag":"a"}]}"#
         let catalogB = #"{"outbounds":[{"type":"selector","tag":"B","outbounds":["b"]},{"type":"block","tag":"b"}]}"#
@@ -254,14 +257,16 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         model.updateEditor(catalogB)
         XCTAssertEqual(model.policyCatalog?.selectors.first?.tag, "A")
         model.save()
+        try await waitForProfileWork(model)
         XCTAssertEqual(model.policyCatalog?.selectors.first?.tag, "B")
 
         model.updateEditor("{")
         model.save()
+        try await waitForProfileWork(model)
         XCTAssertEqual(model.policyCatalog?.selectors.first?.tag, "B")
     }
 
-    func testPolicyCatalogClearsStaleDataWhenPostSaveReadFailsWithoutReplacingEditor() throws {
+    func testPolicyCatalogClearsStaleDataWhenPostSaveReadFailsWithoutReplacingEditor() async throws {
         let fixture = try makeFixture()
         let catalogA = #"{"outbounds":[{"type":"selector","tag":"A","outbounds":[]}]}"#
         let catalogB = #"{"outbounds":[{"type":"selector","tag":"B","outbounds":[]}]}"#
@@ -279,38 +284,44 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         model.updateEditor(catalogB)
         shouldFailCatalogRead = true
         model.save()
+        try await waitForProfileWork(model)
         XCTAssertFalse(model.isDirty)
         XCTAssertEqual(model.editorText, catalogB)
         XCTAssertNil(model.policyCatalog)
         XCTAssertTrue(model.isPolicyCatalogUnavailable)
     }
 
-    func testPolicyCatalogSaveAndContinuePersistsBeforeSelection() throws {
+    func testPolicyCatalogSaveAndContinuePersistsBeforeSelection() async throws {
         let fixture = try makeFixture()
         let catalogB = #"{"outbounds":[{"type":"selector","tag":"B","outbounds":[]}]}"#
         fixture.model.updateEditor(catalogB)
         fixture.model.requestSelection(fixture.second.id)
-        XCTAssertEqual(fixture.model.resolveUnsavedChanges(.saveAndContinue), .resolved)
+        try await waitForProfileWork(fixture.model)
+        let decisionResult1 = await fixture.model.resolveUnsavedChanges(.saveAndContinue)
+        XCTAssertEqual(decisionResult1, .resolved)
         XCTAssertEqual(fixture.model.selectedID, fixture.second.id)
         fixture.model.requestSelection(fixture.first.id)
+        try await waitForProfileWork(fixture.model)
         XCTAssertEqual(fixture.model.policyCatalog?.selectors.first?.tag, "B")
     }
 
-    func testPolicyCatalogRefreshesOnCleanProfileSelection() throws {
+    func testPolicyCatalogRefreshesOnCleanProfileSelection() async throws {
         let fixture = try makeFixture()
         try fixture.store.save(json: #"{"outbounds":[{"type":"selector","tag":"A","outbounds":[]}]}"#, for: fixture.first.id)
         try fixture.store.save(json: #"{"outbounds":[{"type":"selector","tag":"B","outbounds":[]}]}"#, for: fixture.second.id)
         let model = ProfileViewModel(store: fixture.store, subscriptionFetcher: ControlledSubscriptionFetcher())
         XCTAssertEqual(model.policyCatalog?.selectors.first?.tag, "A")
         model.requestSelection(fixture.second.id)
+        try await waitForProfileWork(model)
         XCTAssertEqual(model.policyCatalog?.selectors.first?.tag, "B")
     }
 
-    func testDirtySelectionRequestRecordsOperationWithoutChangingCommittedEditorState() throws {
+    func testDirtySelectionRequestRecordsOperationWithoutChangingCommittedEditorState() async throws {
         let fixture = try makeFixture()
         fixture.model.updateEditor("{\"edited\":true}")
 
         fixture.model.requestSelection(fixture.second.id)
+        try await waitForProfileWork(fixture.model)
 
         XCTAssertEqual(fixture.model.selectedID, fixture.first.id)
         XCTAssertEqual(fixture.model.editorText, "{\"edited\":true}")
@@ -321,11 +332,12 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(id, fixture.second.id)
     }
 
-    func testCancellingDirtySelectionLeavesPersistentAndEditorStateUntouched() throws {
+    func testCancellingDirtySelectionLeavesPersistentAndEditorStateUntouched() async throws {
         let fixture = try makeFixture()
         fixture.model.updateEditor("{\"edited\":true}")
         fixture.model.requestSelection(fixture.second.id)
-        fixture.model.resolveUnsavedChanges(.cancel)
+        try await waitForProfileWork(fixture.model)
+        await fixture.model.resolveUnsavedChanges(.cancel)
 
         XCTAssertNil(fixture.model.pendingOperation)
         XCTAssertEqual(fixture.model.selectedID, fixture.first.id)
@@ -334,12 +346,13 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertTrue(fixture.model.isDirty)
     }
 
-    func testDiscardingDirtySelectionLoadsTargetOnce() throws {
+    func testDiscardingDirtySelectionLoadsTargetOnce() async throws {
         let fixture = try makeFixture()
         let targetText = try fixture.store.configurationText(for: fixture.second.id)
         fixture.model.updateEditor("{\"edited\":true}")
         fixture.model.requestSelection(fixture.second.id)
-        fixture.model.resolveUnsavedChanges(.discardChanges)
+        try await waitForProfileWork(fixture.model)
+        await fixture.model.resolveUnsavedChanges(.discardChanges)
 
         XCTAssertNil(fixture.model.pendingOperation)
         XCTAssertEqual(fixture.model.selectedID, fixture.second.id)
@@ -348,12 +361,13 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertFalse(fixture.model.isDirty)
     }
 
-    func testSavingDirtySelectionPersistsBeforeSwitching() throws {
+    func testSavingDirtySelectionPersistsBeforeSwitching() async throws {
         let fixture = try makeFixture()
         let saved = "{\"inbounds\":[],\"outbounds\":[],\"route\":{},\"saved\":true}"
         fixture.model.updateEditor(saved)
         fixture.model.requestSelection(fixture.second.id)
-        let result = fixture.model.resolveUnsavedChanges(.saveAndContinue)
+        try await waitForProfileWork(fixture.model)
+        let result = await fixture.model.resolveUnsavedChanges(.saveAndContinue)
 
         XCTAssertEqual(result, .resolved)
         XCTAssertEqual(try fixture.store.configurationText(for: fixture.first.id), saved)
@@ -361,24 +375,25 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertFalse(fixture.model.isDirty)
     }
 
-    func testDiscardingPendingCreationExecutesOnlyOnce() throws {
+    func testDiscardingPendingCreationExecutesOnlyOnce() async throws {
         let fixture = try makeFixture()
         fixture.model.updateEditor("{\"edited\":true}")
         fixture.model.requestCreate(name: "Created")
-        fixture.model.resolveUnsavedChanges(.discardChanges)
+        await fixture.model.resolveUnsavedChanges(.discardChanges)
 
         XCTAssertEqual(fixture.model.profiles.count, 3)
         XCTAssertEqual(fixture.model.selectedProfile?.name, "Created")
-        fixture.model.resolveUnsavedChanges(.discardChanges)
+        await fixture.model.resolveUnsavedChanges(.discardChanges)
         XCTAssertEqual(fixture.model.profiles.count, 3)
     }
 
-    func testSaveFailureDoesNotExecutePendingOperationOrLoseEditor() throws {
+    func testSaveFailureDoesNotExecutePendingOperationOrLoseEditor() async throws {
         let fixture = try makeFixture(checker: InteractionChecker(result: .failure(.init(messageKey: "profile.validation.check-failed", line: nil, column: nil))))
         fixture.model.updateEditor("{\"inbounds\":[],\"outbounds\":[],\"route\":{}}")
         fixture.model.requestSelection(fixture.second.id)
+        try await waitForProfileWork(fixture.model)
         let presentationGeneration = fixture.model.unsavedChangesPresentation.generation
-        let result = fixture.model.resolveUnsavedChanges(.saveAndContinue)
+        let result = await fixture.model.resolveUnsavedChanges(.saveAndContinue)
 
         XCTAssertEqual(fixture.model.selectedID, fixture.first.id)
         XCTAssertEqual(try fixture.store.selectedProfileID(), fixture.first.id)
@@ -400,42 +415,44 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         fixture.model.updateEditor("{\"edited\":true}")
 
         fixture.model.rename(fixture.first.id, to: "Renamed")
+        try await waitForProfileWork(fixture.model)
         XCTAssertEqual(fixture.model.editorText, "{\"edited\":true}")
         XCTAssertTrue(fixture.model.isDirty)
 
         fixture.model.requestCreate(name: "New")
         assertPending(.create, in: fixture.model)
-        fixture.model.resolveUnsavedChanges(.cancel)
+        await fixture.model.resolveUnsavedChanges(.cancel)
         fixture.model.requestDuplicate(fixture.first.id)
         assertPending(.duplicate, in: fixture.model)
-        fixture.model.resolveUnsavedChanges(.cancel)
+        await fixture.model.resolveUnsavedChanges(.cancel)
         fixture.model.requestDelete(fixture.first.id)
         assertPending(.delete, in: fixture.model)
-        fixture.model.resolveUnsavedChanges(.cancel)
+        await fixture.model.resolveUnsavedChanges(.cancel)
         fixture.model.requestRestore(fixture.first.id)
         assertPending(.restore, in: fixture.model)
-        fixture.model.resolveUnsavedChanges(.cancel)
+        await fixture.model.resolveUnsavedChanges(.cancel)
 
         let importURL = FileManager.default.temporaryDirectory.appending(path: "TargetProfileInteractionImport-\(UUID().uuidString).json")
         try Data("{\"inbounds\":[],\"outbounds\":[],\"route\":{}}".utf8).write(to: importURL)
         defer { try? FileManager.default.removeItem(at: importURL) }
         fixture.model.prepareImport(from: importURL)
-        for _ in 0..<100 where fixture.model.pendingImportCandidate == nil { await Task.yield() }
+        try await waitForProfileWork(fixture.model)
         XCTAssertNotNil(fixture.model.pendingImportCandidate)
         fixture.model.commitPreparedImport(name: "Imported")
+        try await waitForProfileWork(fixture.model)
         guard case .importCandidate? = fixture.model.pendingOperation else {
             return XCTFail("Dirty import commit must ask first")
         }
     }
 
-    func testDiscardBeforeFailedDeleteRestoresPersistedEditorAndExecutesOnlyOnce() throws {
+    func testDiscardBeforeFailedDeleteRestoresPersistedEditorAndExecutesOnlyOnce() async throws {
         let usage = CountingProfileUsage(inUse: true)
         let fixture = try makeFixture(runtimeUsage: usage)
         let persistedText = try fixture.store.configurationText(for: fixture.first.id)
         fixture.model.updateEditor("{\"discarded\":true}")
         fixture.model.requestDelete(fixture.first.id)
 
-        let result = fixture.model.resolveUnsavedChanges(.discardChanges)
+        let result = await fixture.model.resolveUnsavedChanges(.discardChanges)
 
         XCTAssertEqual(result, .resolved)
         XCTAssertEqual(usage.checkCount, 1)
@@ -446,18 +463,18 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(fixture.model.messageKey, "profile.message.stop-before-delete")
         XCTAssertNotEqual(fixture.model.editorText, "{\"discarded\":true}")
 
-        fixture.model.resolveUnsavedChanges(.discardChanges)
+        await fixture.model.resolveUnsavedChanges(.discardChanges)
         XCTAssertEqual(usage.checkCount, 1)
     }
 
-    func testDiscardDoesNotExecuteOperationWhenPersistedEditorCannotBeRestored() throws {
+    func testDiscardDoesNotExecuteOperationWhenPersistedEditorCannotBeRestored() async throws {
         let usage = CountingProfileUsage(inUse: true)
         let fixture = try makeFixture(runtimeUsage: usage)
         try FileManager.default.removeItem(at: fixture.store.safeManagedURL("\(fixture.first.id.uuidString)/config.json"))
         fixture.model.updateEditor("{\"keep\":true}")
         fixture.model.requestDelete(fixture.first.id)
 
-        fixture.model.resolveUnsavedChanges(.discardChanges)
+        await fixture.model.resolveUnsavedChanges(.discardChanges)
 
         XCTAssertEqual(usage.checkCount, 0)
         XCTAssertEqual(fixture.model.editorText, "{\"keep\":true}")
@@ -467,29 +484,34 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertTrue(fixture.model.unsavedChangesPresentation.isPresented)
     }
 
-    func testDecisionResultsRetirePresentationOnlyAfterSuccessOrExplicitCancel() throws {
+    func testDecisionResultsRetirePresentationOnlyAfterSuccessOrExplicitCancel() async throws {
         let fixture = try makeFixture()
         fixture.model.updateEditor("{\"edited\":true}")
         fixture.model.requestSelection(fixture.second.id)
+        try await waitForProfileWork(fixture.model)
         XCTAssertTrue(fixture.model.unsavedChangesPresentation.isPresented)
 
-        XCTAssertEqual(fixture.model.resolveUnsavedChanges(.cancel), .cancelled)
+        let decisionResult2 = await fixture.model.resolveUnsavedChanges(.cancel)
+        XCTAssertEqual(decisionResult2, .cancelled)
         XCTAssertNil(fixture.model.pendingOperation)
         XCTAssertFalse(fixture.model.unsavedChangesPresentation.isPresented)
 
         fixture.model.updateEditor("{\"edited\":true}")
         fixture.model.requestSelection(fixture.second.id)
-        XCTAssertEqual(fixture.model.resolveUnsavedChanges(.discardChanges), .resolved)
+        try await waitForProfileWork(fixture.model)
+        let decisionResult3 = await fixture.model.resolveUnsavedChanges(.discardChanges)
+        XCTAssertEqual(decisionResult3, .resolved)
         XCTAssertNil(fixture.model.pendingOperation)
         XCTAssertFalse(fixture.model.unsavedChangesPresentation.isPresented)
         XCTAssertEqual(fixture.model.selectedID, fixture.second.id)
     }
 
-    func testOrdinaryAlertDismissalCannotHidePendingOperationAndMainSaveResolvesIt() throws {
+    func testOrdinaryAlertDismissalCannotHidePendingOperationAndMainSaveResolvesIt() async throws {
         let fixture = try makeFixture()
         let saved = "{\"inbounds\":[],\"outbounds\":[],\"route\":{},\"saved\":true}"
         fixture.model.updateEditor(saved)
         fixture.model.requestSelection(fixture.second.id)
+        try await waitForProfileWork(fixture.model)
         let initialGeneration = fixture.model.unsavedChangesPresentation.generation
 
         fixture.model.unsavedChangesAlertPresentationDidChange(false)
@@ -498,6 +520,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(fixture.model.unsavedChangesPresentation.generation, initialGeneration)
 
         fixture.model.save()
+        try await waitForProfileWork(fixture.model)
         XCTAssertNil(fixture.model.pendingOperation)
         XCTAssertFalse(fixture.model.unsavedChangesPresentation.isPresented)
         XCTAssertEqual(fixture.model.selectedID, fixture.second.id)
@@ -511,14 +534,17 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         try Data("{\"inbounds\":[],\"outbounds\":[],\"route\":{}}".utf8).write(to: importURL)
         defer { try? FileManager.default.removeItem(at: importURL) }
         importFixture.model.prepareImport(from: importURL)
-        for _ in 0..<100 where importFixture.model.pendingImportCandidate == nil { await Task.yield() }
+        try await waitForProfileWork(importFixture.model)
         XCTAssertTrue(importFixture.model.shouldPresentImportConfirmation)
         importFixture.model.updateEditor("{\"inbounds\":[],\"outbounds\":[],\"route\":{}}")
         importFixture.model.commitPreparedImport(name: "Imported")
+        try await waitForProfileWork(importFixture.model)
         XCTAssertFalse(importFixture.model.shouldPresentImportConfirmation)
-        XCTAssertEqual(importFixture.model.resolveUnsavedChanges(.saveAndContinue), .failedAndStillPending)
+        let decisionResult4 = await importFixture.model.resolveUnsavedChanges(.saveAndContinue)
+        XCTAssertEqual(decisionResult4, .failedAndStillPending)
         XCTAssertTrue(importFixture.model.unsavedChangesPresentation.isPresented)
-        XCTAssertEqual(importFixture.model.resolveUnsavedChanges(.cancel), .cancelled)
+        let decisionResult5 = await importFixture.model.resolveUnsavedChanges(.cancel)
+        XCTAssertEqual(decisionResult5, .cancelled)
         XCTAssertNil(importFixture.model.pendingOperation)
         XCTAssertTrue(importFixture.model.shouldPresentImportConfirmation)
 
@@ -533,9 +559,11 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         subscriptionFixture.model.updateEditor("{\"inbounds\":[],\"outbounds\":[],\"route\":{}}")
         subscriptionFixture.model.confirmSubscriptionUpdate()
         XCTAssertFalse(subscriptionFixture.model.shouldPresentSubscriptionPreview)
-        XCTAssertEqual(subscriptionFixture.model.resolveUnsavedChanges(.saveAndContinue), .failedAndStillPending)
+        let decisionResult6 = await subscriptionFixture.model.resolveUnsavedChanges(.saveAndContinue)
+        XCTAssertEqual(decisionResult6, .failedAndStillPending)
         XCTAssertTrue(subscriptionFixture.model.unsavedChangesPresentation.isPresented)
-        XCTAssertEqual(subscriptionFixture.model.resolveUnsavedChanges(.cancel), .cancelled)
+        let decisionResult7 = await subscriptionFixture.model.resolveUnsavedChanges(.cancel)
+        XCTAssertEqual(decisionResult7, .cancelled)
         XCTAssertNil(subscriptionFixture.model.pendingOperation)
         XCTAssertTrue(subscriptionFixture.model.shouldPresentSubscriptionPreview)
     }
@@ -550,6 +578,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
             XCTAssertTrue(fixture.model.isUpdatingSubscription)
 
             fixture.model.updateEditor(editedText)
+            try await waitForEditorDiagnostic(fixture.model)
             let expectedDiagnostic = fixture.model.diagnostic
             XCTAssertEqual(expectedDiagnostic?.messageKey, "profile.validation.json-syntax")
 
@@ -576,6 +605,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
             case .updated:
                 XCTAssertNotNil(fixture.model.pendingSubscriptionUpdate)
                 fixture.model.confirmSubscriptionUpdate()
+        try await waitForProfileWork(fixture.model)
                 guard case .applySubscription? = fixture.model.pendingOperation else {
                     return XCTFail("Applying a candidate after an in-flight edit must ask first")
                 }
@@ -615,6 +645,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertNotNil(successFixture.model.pendingSubscriptionIntake)
         XCTAssertEqual(try successFixture.store.listProfiles().count, beforeCount)
         successFixture.model.confirmSubscriptionUpdate()
+        try await waitForProfileWork(successFixture.model)
         XCTAssertNil(successFixture.model.pendingSubscriptionIntake)
         XCTAssertEqual(try successFixture.store.listProfiles().count, beforeCount + 1)
         XCTAssertEqual(successFixture.model.selectedProfile?.name, "New Provider")
@@ -627,6 +658,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         fixture.model.updateSubscription()
         await fetcher.waitUntilStarted()
         fixture.model.requestSelection(fixture.second.id)
+        try await waitForProfileWork(fixture.model)
         await fetcher.waitUntilCancelled()
         try await waitForSubscriptionCompletion(fixture.model)
         XCTAssertEqual(fixture.model.selectedID, fixture.second.id)
@@ -647,7 +679,8 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
 
         fixture.model.updateEditor("{\"discarded\":true}")
         fixture.model.confirmSubscriptionUpdate()
-        fixture.model.resolveUnsavedChanges(.discardChanges)
+        try await waitForProfileWork(fixture.model)
+        await fixture.model.resolveUnsavedChanges(.discardChanges)
 
         XCTAssertEqual(checker.checkCount, 2)
         XCTAssertNil(fixture.model.pendingOperation)
@@ -679,7 +712,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
 
     private func waitForPolicyMutationToFinish(_ model: ProfileViewModel) async {
         while model.isSelectingPolicy {
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(2))
         }
     }
 

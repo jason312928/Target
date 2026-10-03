@@ -1,12 +1,7 @@
 import SwiftUI
 
-enum AppShellLayout {
-    static let minimumWindowWidth: CGFloat = 740
-    static let minimumWindowHeight: CGFloat = 460
-}
-
 /// Target's main window is intentionally a single Profiles workspace. App-wide
-/// preferences and diagnostics live in the dedicated macOS Settings scene.
+/// preferences live in Settings; runtime details have a Diagnostics window.
 struct AppShellView: View {
     let lifecycle: BackendLifecycleModel
     let preferences: ApplicationPreferencesModel
@@ -39,6 +34,7 @@ struct AppShellView: View {
                 minHeight: AppShellLayout.minimumWindowHeight
             )
             .task {
+                await profileModel.loadInitialState()
                 if refreshOnTask { lifecycle.refresh() }
             }
             .sheet(isPresented: onboardingPresentationBinding) {

@@ -41,6 +41,7 @@ struct PreparedProfileConfiguration: Sendable {
     let primaryPort: UInt16
     let runtimeControl: RuntimeControlDescriptor
     let data: Data
+    var routeBindingsFingerprint: String? = nil
 }
 
 enum ProfileRuntimeConfigurationError: Error, Equatable {
@@ -140,7 +141,8 @@ struct ProfileRuntimeConfigurationPreparer {
             configurationFingerprint: TargetConfigurationFingerprint.sha256(data),
             primaryPort: primaryPort,
             runtimeControl: runtimeControl,
-            data: data
+            data: data,
+            routeBindingsFingerprint: ProfileRouteBinding.fingerprint(version.profile.routeBindings)
         )
     }
 

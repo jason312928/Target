@@ -29,10 +29,10 @@ Target is a native Swift and SwiftUI macOS client for Profile management, subscr
 ## What works today
 
 - **One-action connection** — Connect starts the Target-owned sing-box runtime and establishes the system-proxy session. Disconnect and Restart use the same safe lifecycle.
-- **A complete Profile workspace** — Create, import, export, duplicate, rename, and delete configurations, with JSON highlighting, line numbers, formatting, diagnostics, version history, and previous-valid restore.
+- **A complete Profile workspace** — Create, import, export, duplicate, rename, and delete configurations, with JSON highlighting, formatting, diagnostics, version history, and previous-valid restore.
 - **Local subscription intake** — Detect, convert, validate with `sing-box check`, and preview subscriptions locally without a third-party conversion service.
 - **Proxy and policy controls** — Browse sing-box selectors, search and filter nodes, inspect latency and health, and switch the active runtime policy.
-- **Live observability** — Dashboard shows rates, totals, and active connections; Connections, Traffic, and Logs provide focused runtime views.
+- **Live observability** — The workspace sidebar shows active connections. A separate Diagnostics window provides Connections, Traffic, and Logs, with connection search/sorting/pause, traffic history, and log search. Open it from the toolbar or with `⌘⇧D`.
 - **Native macOS integration** — Menu bar controls, onboarding, Launch at Login, in-app updates, and English / Simplified Chinese localization.
 - **Automation** — The bundled `targetctl` manages Profiles, subscriptions, policies, the engine, System Proxy, and runtime status through a local control plane.
 
@@ -134,3 +134,13 @@ The script downloads the pinned binary from the official sing-box release, verif
 ## License
 
 Target is available under the [GNU General Public License v3.0 or later](LICENSE). See [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party notices.
+
+## Fast regression tests
+
+Run the same production domain sources without launching the app:
+
+```bash
+swift test --jobs 4 --scratch-path "${TMPDIR%/}/target-domain-build"
+```
+
+This lane covers persistence, subscriptions, automation, runtime, and interaction state. Smart, Sparkle updater, and foreground XCUI tests remain outside this lane; Xcode and the relevant isolated qualification remain authoritative for the application and OS integration.

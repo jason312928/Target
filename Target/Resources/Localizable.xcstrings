@@ -1,6 +1,18 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "diagnostics.title" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Diagnostics"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "诊断"}}}},
+    "diagnostics.open" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Open Diagnostics"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "打开诊断窗口"}}}},
+    "diagnostics.search" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Search"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "搜索"}}}},
+    "diagnostics.sort" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Sort"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "排序"}}}},
+    "diagnostics.sort.newest" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Newest first"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "最新连接优先"}}}},
+    "diagnostics.sort.destination" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Destination"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "目标地址"}}}},
+    "diagnostics.sort.traffic" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Most traffic"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "流量最多优先"}}}},
+    "diagnostics.pause" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Pause"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "暂停"}}}},
+    "diagnostics.resume" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Resume"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "继续"}}}},
+    "diagnostics.connections.truncated" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Showing up to 1,000 connection details. Totals include all connections."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "最多显示 1000 条连接明细，总数和流量包含全部连接。"}}}},
+    "profile.runtime.pending" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Saved changes are waiting to be applied."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "更改已保存，等待应用到运行中的内核。"}}}},
+    "profile.runtime.apply" : {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Apply Changes"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "应用更改"}}}},
     "menu-bar.action.unavailable" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Unavailable" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "不可用" } } } },
     "menu-bar.open-target" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Open Target" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开 Target" } } } },
 	"menu-bar.settings" : { "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Settings…" } }, "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "设置…" } } } },

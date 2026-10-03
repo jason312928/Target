@@ -80,7 +80,7 @@ enum ProfileWorkspaceLayout {
 /// An auditable description of a Profile action that must not replace a dirty
 /// editor until the user explicitly resolves its changes. It intentionally
 /// carries data, not arbitrary deferred closures.
-enum ProfileWorkspaceOperation {
+enum ProfileWorkspaceOperation: Sendable {
     case select(UUID)
     case selectPolicy(profileID: UUID, selectorTag: String, outboundTag: String)
     case create(name: String)

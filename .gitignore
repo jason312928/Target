@@ -6,3 +6,5 @@ DerivedData/
 *.xcuserstate
 xcuserdata/
 Target/Resources/Scripts/*.tar.gz
+.build/
+.swiftpm/

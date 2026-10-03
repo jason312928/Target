@@ -4,6 +4,7 @@ import TargetCore
 
 @main
 struct TargetApp: App {
+    @Environment(\.openWindow) private var openWindow
     @State private var lifecycle: BackendLifecycleModel
     @State private var profileModel: ProfileViewModel
     @State private var preferences: ApplicationPreferencesModel
@@ -42,7 +43,8 @@ struct TargetApp: App {
         _lifecycle = State(initialValue: lifecycle)
         _profileModel = State(initialValue: ProfileViewModel(
             store: profileStore,
-            policyOperations: policyOperations
+            policyOperations: policyOperations,
+            loadImmediately: false
         ))
         _preferences = State(initialValue: ApplicationPreferencesModel(loginItemManager: SMAppLoginItemManager()))
         _updateController = State(initialValue: TargetUpdateController())
@@ -82,6 +84,11 @@ struct TargetApp: App {
         }
         .defaultSize(width: 980, height: 680)
 
+        Window("diagnostics.title", id: RuntimeDiagnosticsView.windowID) {
+            RuntimeDiagnosticsView(lifecycle: lifecycle)
+        }
+        .defaultSize(width: 980, height: 640)
+
         Settings {
             SettingsView(
                 lifecycle: lifecycle,
@@ -91,6 +98,10 @@ struct TargetApp: App {
         }
 
         .commands {
+            CommandGroup(after: .windowArrangement) {
+                Button("diagnostics.open") { openWindow(id: RuntimeDiagnosticsView.windowID) }
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
+            }
             CommandGroup(after: .appInfo) {
                 Button("settings.software-update.check", action: updateController.checkForUpdates)
                     .keyboardShortcut("u", modifiers: [.command])

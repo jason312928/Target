@@ -222,3 +222,24 @@ struct FixedPortSelector: LocalEnginePortSelecting {
     let port: UInt16
     func selectAvailablePort() throws -> UInt16 { port }
 }
+
+@MainActor
+func waitForProfileWork(_ model: ProfileViewModel) async throws {
+    await Task.yield()
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(3))
+    while model.isPerformingPersistence || model.isExporting || model.isSelectingPolicy || model.isPreparingImport {
+        guard clock.now < deadline else { XCTFail("Profile operation did not finish within three seconds"); return }
+        try await Task.sleep(for: .milliseconds(2))
+    }
+}
+
+@MainActor
+func waitForEditorDiagnostic(_ model: ProfileViewModel) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+    while model.diagnostic == nil {
+        guard clock.now < deadline else { XCTFail("Editor diagnostic did not appear"); return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+}

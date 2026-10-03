@@ -38,6 +38,10 @@ protocol RuntimeObservationProviding: Sendable {
     func currentRuntimeConnectionTotals() async -> RuntimeConnectionTotals?
 }
 
+protocol RuntimeSnapshotProviding: RuntimeObservationProviding {
+    func currentRuntimeSnapshot() async -> RuntimeConnectionsSnapshot?
+}
+
 protocol RuntimeControlClient: Sendable {
     func selectors(using descriptor: RuntimeControlDescriptor) async throws -> [String: RuntimeSelectorState]
     func select(selector: String, outbound: String, using descriptor: RuntimeControlDescriptor) async throws
@@ -174,9 +178,26 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
         transportError: RuntimeControlError = .unavailable
     ) async throws -> Data {
         let (data, response): (Data, URLResponse)
-        do { (data, response) = try await session.data(for: request) }
+        do {
+            let (bytes, receivedResponse) = try await session.bytes(for: request)
+            response = receivedResponse
+            if receivedResponse.expectedContentLength > Int64(RuntimeConnectionsParser.maximumResponseBytes) {
+                throw RuntimeControlError.malformedResponse
+            }
+            var received = Data()
+            for try await byte in bytes {
+                guard received.count < RuntimeConnectionsParser.maximumResponseBytes else {
+                    throw RuntimeControlError.malformedResponse
+                }
+                received.append(byte)
+                if received.count % 65_536 == 0 { try Task.checkCancellation() }
+            }
+            data = received
+        }
+        catch let error as RuntimeControlError { throw error }
         catch is CancellationError { throw CancellationError() }
         catch { throw transportError }
+        guard data.count <= RuntimeConnectionsParser.maximumResponseBytes else { throw RuntimeControlError.malformedResponse }
         guard let http = response as? HTTPURLResponse else { throw RuntimeControlError.unavailable }
         guard (200...299).contains(http.statusCode) else {
             if http.statusCode == 401 || http.statusCode == 403 { throw RuntimeControlError.selectionRejected }
@@ -259,18 +280,22 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
 }
 
 enum RuntimeConnectionsParser {
+    static let maximumResponseBytes = 8 * 1024 * 1024
+    static let maximumDetailedConnections = 1_000
     /// sing-box 1.13's Clash adapter serializes only this documented snapshot
     /// shape. The product DTO intentionally drops source addresses, process paths,
     /// raw rules, memory values, and unknown controller data.
     static func parse(_ data: Data) throws -> RuntimeConnectionsSnapshot {
+        guard data.count <= maximumResponseBytes else { throw RuntimeControlError.malformedResponse }
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let upload = nonNegativeInt64(root["uploadTotal"]),
               let download = nonNegativeInt64(root["downloadTotal"]),
               let rawConnections = root["connections"] as? [Any] else {
             throw RuntimeControlError.malformedResponse
         }
-        guard rawConnections.count <= 1_000 else { throw RuntimeControlError.malformedResponse }
-        let connections = rawConnections.compactMap(parseConnection)
+        var seenIDs = Set<String>()
+        let connections = rawConnections.prefix(maximumDetailedConnections).compactMap(parseConnection)
+            .filter { seenIDs.insert($0.id).inserted }
         return .init(
             totals: .init(
                 uploadTotalBytes: upload,
@@ -329,10 +354,11 @@ enum RuntimeConnectionsParser {
 
     private static func parseDate(_ value: Any?) -> Date? {
         guard let raw = value as? String else { return nil }
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractional.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
+        return (try? fractionalDateStyle.parse(raw)) ?? (try? dateStyle.parse(raw))
     }
+
+    private static let fractionalDateStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    private static let dateStyle = Date.ISO8601FormatStyle()
 }
 
 final class RedirectRefusingDelegate: NSObject, URLSessionTaskDelegate {
@@ -426,6 +452,18 @@ struct RuntimeObservationReducer: Sendable {
 
 protocol TargetRuntimeObserving: Sendable {
     func read() async -> RuntimeObservation
+    func readActivity() async -> RuntimeActivityObservation
+}
+
+struct RuntimeActivityObservation: Sendable {
+    let summary: RuntimeObservation
+    let snapshot: RuntimeConnectionsSnapshot?
+}
+
+extension TargetRuntimeObserving {
+    func readActivity() async -> RuntimeActivityObservation {
+        .init(summary: await read(), snapshot: nil)
+    }
 }
 
 struct UnavailableRuntimeObservationProvider: TargetRuntimeObserving {
@@ -439,16 +477,27 @@ actor TargetRuntimeObservationOperations: TargetRuntimeObserving {
     init(provider: any RuntimeObservationProviding) { self.provider = provider }
 
     func read() async -> RuntimeObservation {
+        await readActivity().summary
+    }
+
+    func readActivity() async -> RuntimeActivityObservation {
         let availability = await provider.runtimeObservationAvailability()
         guard availability == .loading else {
             reducer.reset()
-            return availability == .stopped ? .stopped : .unavailable
+            return .init(summary: availability == .stopped ? .stopped : .unavailable, snapshot: nil)
+        }
+        if let snapshotProvider = provider as? any RuntimeSnapshotProviding {
+            guard let snapshot = await snapshotProvider.currentRuntimeSnapshot() else {
+                reducer.reset()
+                return .init(summary: .unavailable, snapshot: nil)
+            }
+            return .init(summary: reducer.reduce(totals: snapshot.totals, at: Date()), snapshot: snapshot)
         }
         guard let totals = await provider.currentRuntimeConnectionTotals() else {
             reducer.reset()
-            return .unavailable
+            return .init(summary: .unavailable, snapshot: nil)
         }
-        return reducer.reduce(totals: totals, at: Date())
+        return .init(summary: reducer.reduce(totals: totals, at: Date()), snapshot: nil)
     }
 
     func stopped() {

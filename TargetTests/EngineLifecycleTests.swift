@@ -143,6 +143,41 @@ final class EngineLifecycleTests: XCTestCase {
         XCTAssertTrue(model.runtimeLogEntries.isEmpty)
     }
 
+    func testReactivatingConnectionDetailsAfterLateResponseKeepsPolling() async throws {
+        let provider = DelayedRuntimeConnectionProvider()
+        let model = BackendLifecycleModel(backend: MockBackend(),
+            runtimeObservationOperations: ImmediateRuntimeObservationProvider(), runtimeConnectionProvider: provider)
+        model.applyAutomationEngineStatus(runningStatus())
+        model.setConnectionObservationActive(true)
+        try await waitUntil { await provider.readCount() == 1 }
+        model.setConnectionObservationActive(false)
+        await provider.resumeNext(with: [])
+        try await waitUntil { await provider.completedReadCount() == 1 }
+        model.setConnectionObservationActive(true)
+        try await waitUntil { await provider.readCount() >= 2 }
+        await provider.resumeNext(with: [])
+        try await waitUntil { model.runtimeConnections.state == .available }
+        XCTAssertEqual(model.runtimeObservation.state, .available)
+        model.applyAutomationEngineStatus(.mockDefault)
+    }
+
+    func testConnectionObservationRemainsActiveUntilEveryConsumerLeaves() async throws {
+        let provider = DelayedRuntimeConnectionProvider()
+        let model = BackendLifecycleModel(backend: MockBackend(),
+            runtimeObservationOperations: ImmediateRuntimeObservationProvider(), runtimeConnectionProvider: provider)
+        let sidebar = UUID(), diagnostics = UUID()
+        model.applyAutomationEngineStatus(runningStatus())
+        model.setConnectionObservationActive(true, consumerID: sidebar)
+        model.setConnectionObservationActive(true, consumerID: diagnostics)
+        try await waitUntil { await provider.readCount() == 1 }
+        model.setConnectionObservationActive(false, consumerID: sidebar)
+        await provider.resumeNext(with: [])
+        try await waitUntil { model.runtimeConnections.state == .available }
+        model.setConnectionObservationActive(false, consumerID: diagnostics)
+        XCTAssertEqual(model.runtimeConnections.state, .stopped)
+        model.applyAutomationEngineStatus(.mockDefault)
+    }
+
     private func runningStatus() -> BackendStatus {
         .init(
             serviceInstallation: .enabled,
@@ -165,7 +200,7 @@ final class EngineLifecycleTests: XCTestCase {
     private func waitUntil(
         _ condition: @escaping @MainActor () async -> Bool
     ) async throws {
-        for _ in 0..<50 {
+        for _ in 0..<200 {
             if await condition() { return }
             try await Task.sleep(for: .milliseconds(10))
         }

@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeObservationProviding, RuntimeConnectionProviding, RuntimeLogProviding {
+actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeSnapshotProviding, RuntimeConnectionProviding, RuntimeLogProviding {
     static let applicationSupportDirectoryName = "Target"
     static let engineDirectoryName = "sing-box"
 
@@ -241,14 +241,19 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
     }
 
     func currentRuntimeConnectionTotals() async -> RuntimeConnectionTotals? {
-        guard let descriptor = await verifiedRuntimeControlDescriptor() else { return nil }
-        return try? await runtimeControlClient.connectionTotals(using: descriptor)
+        await currentRuntimeSnapshot()?.totals
     }
 
     func currentRuntimeConnections() async -> [RuntimeConnection]? {
-        guard let descriptor = await verifiedRuntimeControlDescriptor() else { return nil }
-        let snapshot = try? await runtimeControlClient.connections(using: descriptor)
-        return snapshot?.connections
+        await currentRuntimeSnapshot()?.connections
+    }
+
+    func currentRuntimeSnapshot() async -> RuntimeConnectionsSnapshot? {
+        guard let verified = await verifiedRuntimeControlMaterial(),
+              let snapshot = try? await runtimeControlClient.connections(using: verified.descriptor),
+              let current = await verifiedRuntimeControlMaterial(),
+              current.record == verified.record, current.descriptor == verified.descriptor else { return nil }
+        return snapshot
     }
 
     func runtimeConnectionAvailability() async -> RuntimeObservationState {
@@ -353,7 +358,8 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
                 profileRevision: prepared.profileRevision,
                 sourceConfigurationFingerprint: prepared.sourceFingerprint,
                 configurationFingerprint: prepared.configurationFingerprint,
-                runtimeConfigurationID: temporary.id
+                runtimeConfigurationID: temporary.id,
+                routeBindingsFingerprint: prepared.routeBindingsFingerprint
             )
             try Task.checkCancellation()
             guard try await waitForPortReadiness(for: candidate) else {
@@ -543,6 +549,8 @@ enum EngineRuntimeProfileState {
         guard let selected else { return true }
         return record.profileID != selected.profile.id || record.profileRevision != selected.revision
             || record.sourceConfigurationFingerprint != TargetConfigurationFingerprint.sha256(selected.data)
+            || (record.routeBindingsFingerprint ?? ProfileRouteBinding.fingerprint([]))
+                != ProfileRouteBinding.fingerprint(selected.profile.routeBindings)
     }
 }
 

@@ -44,6 +44,7 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         try await waitForSubscriptionCompletion(model)
         XCTAssertNotNil(model.subscriptionFailureDiagnostic)
         model.requestSelection(second.id)
+        try await waitForProfileWork(model)
         XCTAssertNil(model.subscriptionFailureDiagnostic, "A Profile switch must not retain the previous failure")
     }
 
@@ -106,14 +107,15 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(try treeSnapshot(root), beforeCancellation)
 
         model.prepareImport(from: input)
-        for _ in 0..<100 where model.pendingImportCandidate == nil { await Task.yield() }
+        try await waitForProfileWork(model)
         XCTAssertNotNil(model.pendingImportCandidate)
         model.requestSelection(model.selectedID == first.id ? second.id : first.id)
+        try await waitForProfileWork(model)
         XCTAssertNil(model.pendingImportCandidate)
     }
 
     @MainActor
-    func testViewModelExportSuccessCancellationAndFailureMessages() throws {
+    func testViewModelExportSuccessCancellationAndFailureMessages() async throws {
         let root = try temporaryDirectory()
         let store = ProfileStore(rootDirectory: root, checker: TestChecker(result: .success(())), keyProvider: TestProfileKeyProvider())
         _ = try store.create(name: "Messages")
@@ -128,10 +130,12 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
 
         model.requestExport()
         model.exportSelectedProfile(to: directory.appending(path: "success.json"))
+        try await waitForProfileWork(model)
         XCTAssertEqual(model.messageKey, "profile.export.success")
 
         model.requestExport()
         model.exportSelectedProfile(to: directory)
+        try await waitForProfileWork(model)
         XCTAssertEqual(model.messageKey, "profile.export.error.unsafe-destination")
     }
 
@@ -374,6 +378,7 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(model.policyHealthBySelector[selector.id]?["first"]?.state, .testing)
 
         model.requestSelection(second.id)
+        try await waitForProfileWork(model)
         await gate.release()
         for _ in 0..<20 { await Task.yield() }
 
@@ -431,6 +436,7 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         let model = ProfileViewModel(store: store)
 
         model.requestCountrySelection("US", participatingProfileIDs: [japan.id, unitedStates.id])
+        try await waitForProfileWork(model)
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(2))
         while model.isSelectingPolicy, clock.now < deadline {

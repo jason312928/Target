@@ -835,10 +835,14 @@ final class AutomationControlPlaneTests: XCTestCase {
     }
 
     func testTargetctlBinaryHasNoProfileStoreOrKeychainSymbols() throws {
+        #if SWIFT_PACKAGE
+        throw XCTSkip("App bundle helper isolation is verified by the Xcode bundle tests.")
+        #else
         let executable = Bundle.main.bundleURL.appending(path: "Contents/Helpers/targetctl")
         let binary = try Data(contentsOf: executable)
         XCTAssertFalse(binary.range(of: Data("ProfileStore".utf8)) != nil)
         XCTAssertFalse(binary.range(of: Data("Keychain".utf8)) != nil)
+        #endif
     }
 
     private func makeOperations(root: URL) -> TargetAutomationOperations {

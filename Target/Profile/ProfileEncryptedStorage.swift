@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import Security
 
@@ -26,7 +27,7 @@ final class KeychainProfileEncryptionKeyProvider: ProfileEncryptionKeyProviding 
             kSecAttrAccount: Self.account,
             kSecAttrSynchronizable: kCFBooleanFalse as Any,
             kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
+            kSecMatchLimit: kSecMatchLimitOne,
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -47,7 +48,7 @@ final class KeychainProfileEncryptionKeyProvider: ProfileEncryptionKeyProviding 
             kSecAttrAccount: Self.account,
             kSecAttrSynchronizable: kCFBooleanFalse as Any,
             kSecAttrAccessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            kSecValueData: data
+            kSecValueData: data,
         ]
         let status = SecItemAdd(attributes as CFDictionary, nil)
         if status == errSecDuplicateItem { return try loadMasterKey() ?? { throw ProfileEncryptionKeyProviderError.invalidKeyMaterial }() }
@@ -61,6 +62,7 @@ enum ProfilePersistentRecordKind: String, Sendable {
     case selection
     case currentConfiguration
     case version
+    case transaction
 }
 
 enum ProfileStorageFaultPoint: Sendable {
@@ -70,6 +72,11 @@ enum ProfileStorageFaultPoint: Sendable {
     case afterBackupRename
     case afterLiveSwap
     case manifestWrite
+    case mutationAfterSnapshot
+    case mutationAfterCurrentWrite
+    case mutationAfterRevisionWrite
+    case mutationBeforeCommit
+    case mutationAfterCommit
 }
 
 protocol ProfileStorageFaultInjecting {
@@ -87,7 +94,7 @@ final class ProfileEncryptedStorage {
     static let markerName = "storage-format.json"
     private static let manifestName = "profiles.json"
     private static let selectionName = "selected-profile.json"
-    private static let magic = Data([0x54, 0x50, 0x45, 0x31]) // TPE1
+    private static let magic = Data([0x54, 0x50, 0x45, 0x31])  // TPE1
     private static let formatVersion: UInt8 = 1
     private static let bindingDigestLength = 32
     private static let nonceLength = 12
@@ -97,27 +104,51 @@ final class ProfileEncryptedStorage {
     private let fileManager: FileManager
     private let keyProvider: any ProfileEncryptionKeyProviding
     private let faults: any ProfileStorageFaultInjecting
-    private let storageLock = NSRecursiveLock()
+    private let coordinator: ProfileStorageCoordinator
+    private let storageLock: NSRecursiveLock
+    private var authenticatedRecords: [String: (identity: FileIdentity, plaintext: Data)] = [:]
+    private var historicalAuthentications: [String: FileIdentity] = [:]
+    private var cachedPlaintextBytes = 0
+    private(set) var authenticatedRecordDecodeCount = 0
+    private var cachedKeyDigest: Data?
     private var key: SymmetricKey?
 
-    init(root: URL, fileManager: FileManager = .default, keyProvider: any ProfileEncryptionKeyProviding, faults: any ProfileStorageFaultInjecting = NoProfileStorageFaults()) {
+    init(
+        root: URL, fileManager: FileManager = .default, keyProvider: any ProfileEncryptionKeyProviding,
+        faults: any ProfileStorageFaultInjecting = NoProfileStorageFaults()
+    ) {
         self.root = root.standardizedFileURL
         self.fileManager = fileManager
         self.keyProvider = keyProvider
         self.faults = faults
+        let coordinator = ProfileStorageCoordinator.shared(for: root)
+        self.coordinator = coordinator
+        self.storageLock = coordinator.lock
+    }
+
+    private var preparedReadDepth = 0
+
+    /// A compound read validates the tree once and still checks each record identity.
+    func withPreparedTree<T>(_ body: () throws -> T) throws -> T {
+        storageLock.lock()
+        defer { storageLock.unlock() }
+        try prepare()
+        preparedReadDepth += 1
+        defer { preparedReadDepth -= 1 }
+        return try body()
     }
 
     func prepare() throws {
         storageLock.lock()
         defer { storageLock.unlock() }
+        if preparedReadDepth > 0 { return }
         try recoverInterruptedMigration()
         if !fileManager.fileExists(atPath: root.path) {
             try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
             try setDirectoryPermissions(root)
         }
         let entries: [String]
-        do { entries = try fileManager.contentsOfDirectory(atPath: root.path) }
-        catch { throw ProfileStoreError.mixedOrDowngradedStorage }
+        do { entries = try fileManager.contentsOfDirectory(atPath: root.path) } catch { throw ProfileStoreError.mixedOrDowngradedStorage }
         let marker = root.appending(path: Self.markerName)
         if fileManager.fileExists(atPath: marker.path) {
             try setDirectoryPermissions(root)
@@ -155,8 +186,7 @@ final class ProfileEncryptedStorage {
         try setDirectoryPermissions(parent)
         let encrypted = try encrypt(plaintext, kind: kind, logicalPath: logicalPath)
         if kind == .manifest { try checkFault(.manifestWrite, as: .encryptionFailed) }
-        try encrypted.write(to: url, options: .atomic)
-        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try ProfileImportFileOperations(fileManager: fileManager).writeOwnerOnly(encrypted, to: url)
     }
 
     func createProfileDirectory(_ directory: URL) throws {
@@ -176,21 +206,38 @@ final class ProfileEncryptedStorage {
         _ = try validateEncryptedTree()
     }
 
+    func readRecoveryRecord(kind: ProfilePersistentRecordKind, logicalPath: String, url: URL) throws -> Data {
+        storageLock.lock()
+        defer { storageLock.unlock() }
+        try requireExistingKey()
+        try requireRegularFile(url, failure: .profileMutationRecoveryFailed)
+        return try authenticatedRecord(at: url, kind: kind, logicalPath: logicalPath)
+    }
+
     private func createNewEncryptedStore() throws {
         try createKeyIfAllowed()
         try writeMarker(to: root)
         try write(Data("[]".utf8), kind: .manifest, logicalPath: Self.manifestName, url: root.appending(path: Self.manifestName))
-        try write(try JSONEncoder().encode(String?.none), kind: .selection, logicalPath: Self.selectionName, url: root.appending(path: Self.selectionName))
+        try write(
+            try JSONEncoder().encode(String?.none), kind: .selection, logicalPath: Self.selectionName,
+            url: root.appending(path: Self.selectionName))
     }
 
     private func requireExistingKey() throws {
         do {
             guard let material = try keyProvider.loadMasterKey() else { throw ProfileStoreError.encryptedStoreKeyMissing }
             guard material.count == 32 else { throw ProfileStoreError.invalidEncryptionKey }
+            let digest = Data(SHA256.hash(data: material))
+            if cachedKeyDigest != digest {
+                authenticatedRecords.removeAll()
+                historicalAuthentications.removeAll()
+                cachedPlaintextBytes = 0
+                cachedKeyDigest = digest
+            }
             key = SymmetricKey(data: material)
-        } catch let error as ProfileStoreError { throw error }
-        catch ProfileEncryptionKeyProviderError.invalidKeyMaterial { throw ProfileStoreError.invalidEncryptionKey }
-        catch { throw ProfileStoreError.keychainReadFailed }
+        } catch let error as ProfileStoreError { throw error } catch ProfileEncryptionKeyProviderError.invalidKeyMaterial {
+            throw ProfileStoreError.invalidEncryptionKey
+        } catch { throw ProfileStoreError.keychainReadFailed }
     }
 
     private func createKeyIfAllowed() throws {
@@ -203,9 +250,9 @@ final class ProfileEncryptedStorage {
                 guard material.count == 32 else { throw ProfileStoreError.invalidEncryptionKey }
                 key = SymmetricKey(data: material)
             }
-        } catch let error as ProfileStoreError { throw error }
-        catch ProfileEncryptionKeyProviderError.invalidKeyMaterial { throw ProfileStoreError.invalidEncryptionKey }
-        catch { throw ProfileStoreError.keychainReadFailed }
+        } catch let error as ProfileStoreError { throw error } catch ProfileEncryptionKeyProviderError.invalidKeyMaterial {
+            throw ProfileStoreError.invalidEncryptionKey
+        } catch { throw ProfileStoreError.keychainReadFailed }
     }
 
     private func keyForCipher() throws -> SymmetricKey {
@@ -224,13 +271,14 @@ final class ProfileEncryptedStorage {
             let ciphertext = combined.dropFirst(Self.nonceLength).dropLast(Self.tagLength)
             let tag = combined.suffix(Self.tagLength)
             return Self.magic + Data([Self.formatVersion]) + SHA256.hash(data: aad) + nonce + ciphertext + tag
-        } catch let error as ProfileStoreError { throw error }
-        catch { throw ProfileStoreError.encryptionFailed }
+        } catch let error as ProfileStoreError { throw error } catch { throw ProfileStoreError.encryptionFailed }
     }
 
     private func decrypt(_ envelope: Data, kind: ProfilePersistentRecordKind, logicalPath: String) throws -> Data {
         let minimum = Self.magic.count + 1 + Self.bindingDigestLength + Self.nonceLength + Self.tagLength
-        guard envelope.count >= minimum, envelope.prefix(Self.magic.count) == Self.magic else { throw ProfileStoreError.invalidEncryptedEnvelope }
+        guard envelope.count >= minimum, envelope.prefix(Self.magic.count) == Self.magic else {
+            throw ProfileStoreError.invalidEncryptedEnvelope
+        }
         let versionIndex = Self.magic.count
         guard envelope[versionIndex] == Self.formatVersion else { throw ProfileStoreError.unsupportedStorageVersion }
         let aad = additionalAuthenticatedData(kind: kind, logicalPath: logicalPath)
@@ -243,8 +291,7 @@ final class ProfileEncryptedStorage {
         do {
             let box = try AES.GCM.SealedBox(combined: Data(envelope[payloadStart...]))
             return try AES.GCM.open(box, using: try keyForCipher(), authenticating: aad)
-        } catch let error as ProfileStoreError { throw error }
-        catch { throw ProfileStoreError.encryptedStorageAuthenticationFailed }
+        } catch let error as ProfileStoreError { throw error } catch { throw ProfileStoreError.encryptedStorageAuthenticationFailed }
     }
 
     private func additionalAuthenticatedData(kind: ProfilePersistentRecordKind, logicalPath: String) -> Data {
@@ -253,15 +300,17 @@ final class ProfileEncryptedStorage {
 
     private func writeMarker(to directory: URL) throws {
         let marker = directory.appending(path: Self.markerName)
-        let data = try JSONSerialization.data(withJSONObject: ["format": "target-profile-encrypted", "version": Int(Self.formatVersion)], options: [.sortedKeys])
+        let data = try JSONSerialization.data(
+            withJSONObject: ["format": "target-profile-encrypted", "version": Int(Self.formatVersion)], options: [.sortedKeys])
         try data.write(to: marker, options: .atomic)
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: marker.path)
     }
 
     private func verifyMarker(_ marker: URL) throws {
         guard let value = try? JSONSerialization.jsonObject(with: Data(contentsOf: marker)) as? [String: Any],
-              value["format"] as? String == "target-profile-encrypted",
-              value["version"] as? Int == Int(Self.formatVersion) else {
+            value["format"] as? String == "target-profile-encrypted",
+            value["version"] as? Int == Int(Self.formatVersion)
+        else {
             throw ProfileStoreError.unsupportedStorageVersion
         }
     }
@@ -281,7 +330,7 @@ final class ProfileEncryptedStorage {
     }
 
     /// Authenticates and validates the entire encrypted tree without calling `prepare()`.
-    private func validateEncryptedTree() throws -> TreeInventory {
+    private func validateEncryptedTree(retainRevisionData: Bool = false) throws -> TreeInventory {
         let marker = root.appending(path: Self.markerName)
         try requireRegularFile(marker, failure: .mixedOrDowngradedStorage)
         try verifyMarker(marker)
@@ -293,8 +342,9 @@ final class ProfileEncryptedStorage {
         try requireRegularFile(selectionURL, failure: .mixedOrDowngradedStorage)
         let manifestData = try authenticatedRecord(at: manifestURL, kind: .manifest, logicalPath: Self.manifestName)
         let profiles: [Profile]
-        do { profiles = try JSONDecoder().decode([Profile].self, from: manifestData) }
-        catch { throw ProfileStoreError.invalidStoredMetadata }
+        do { profiles = try JSONDecoder().decode([Profile].self, from: manifestData) } catch {
+            throw ProfileStoreError.invalidStoredMetadata
+        }
         let profileIDs = profiles.map(\.id)
         guard Set(profileIDs).count == profileIDs.count, profiles.allSatisfy({ $0.validRevision > 0 }) else {
             throw ProfileStoreError.invalidStoredMetadata
@@ -332,10 +382,16 @@ final class ProfileEncryptedStorage {
             )
             var revisions: [(number: Int, data: Data)] = []
             for revision in revisionURLs {
+                let logicalPath = "\(profilePath)/versions/\(revision.number).json"
+                if !retainRevisionData, revision.number != profile.validRevision {
+                    try authenticateHistoricalRecord(at: revision.url, logicalPath: logicalPath)
+                    revisions.append((revision.number, Data()))
+                    continue
+                }
                 let data = try authenticatedRecord(
                     at: revision.url,
                     kind: .version,
-                    logicalPath: "\(profilePath)/versions/\(revision.number).json"
+                    logicalPath: logicalPath
                 )
                 revisions.append((revision.number, data))
             }
@@ -376,8 +432,9 @@ final class ProfileEncryptedStorage {
         }
         let selectionData = try authenticatedRecord(at: selectionURL, kind: .selection, logicalPath: Self.selectionName)
         let selected: String?
-        do { selected = try JSONDecoder().decode(String?.self, from: selectionData) }
-        catch { throw ProfileStoreError.invalidStoredSelection }
+        do { selected = try JSONDecoder().decode(String?.self, from: selectionData) } catch {
+            throw ProfileStoreError.invalidStoredSelection
+        }
         guard let selected, UUID(uuidString: selected) != nil else { throw ProfileStoreError.invalidStoredSelection }
         try write(
             try JSONEncoder().encode(String?.none),
@@ -418,7 +475,8 @@ final class ProfileEncryptedStorage {
                 let entries = try directoryEntries(directory, failure: failure)
                 let allowed = Set(["config.json", "versions", ".pending-check.json"])
                 guard Set(entries.map(\.lastPathComponent)).isSubset(of: allowed),
-                      Set(entries.map(\.lastPathComponent)).isSuperset(of: ["config.json", "versions"]) else { throw failure }
+                    Set(entries.map(\.lastPathComponent)).isSuperset(of: ["config.json", "versions"])
+                else { throw failure }
                 if let pending = entries.first(where: { $0.lastPathComponent == ".pending-check.json" }) {
                     try requireRegularFile(pending, failure: failure)
                 }
@@ -458,15 +516,21 @@ final class ProfileEncryptedStorage {
         let staged = ProfileEncryptedStorage(root: staging, fileManager: fileManager, keyProvider: keyProvider, faults: faults)
         staged.key = key
         try staged.writeMarker(to: staging)
-        try staged.write(legacy.manifestData, kind: .manifest, logicalPath: Self.manifestName, url: staging.appending(path: Self.manifestName))
-        try staged.write(legacy.selectionData, kind: .selection, logicalPath: Self.selectionName, url: staging.appending(path: Self.selectionName))
+        try staged.write(
+            legacy.manifestData, kind: .manifest, logicalPath: Self.manifestName, url: staging.appending(path: Self.manifestName))
+        try staged.write(
+            legacy.selectionData, kind: .selection, logicalPath: Self.selectionName, url: staging.appending(path: Self.selectionName))
         for record in legacy.records {
             let profilePath = record.profile.id.uuidString
             try staged.createProfileDirectory(staging.appending(path: profilePath, directoryHint: .isDirectory))
             try checkFault(.stagingWrite, as: .plaintextMigrationValidationFailed)
-            try staged.write(record.currentConfiguration, kind: .currentConfiguration, logicalPath: "\(profilePath)/config.json", url: staging.appending(path: "\(profilePath)/config.json"))
+            try staged.write(
+                record.currentConfiguration, kind: .currentConfiguration, logicalPath: "\(profilePath)/config.json",
+                url: staging.appending(path: "\(profilePath)/config.json"))
             for revision in record.revisions {
-                try staged.write(revision.data, kind: .version, logicalPath: "\(profilePath)/versions/\(revision.number).json", url: staging.appending(path: "\(profilePath)/versions/\(revision.number).json"))
+                try staged.write(
+                    revision.data, kind: .version, logicalPath: "\(profilePath)/versions/\(revision.number).json",
+                    url: staging.appending(path: "\(profilePath)/versions/\(revision.number).json"))
             }
         }
         try checkFault(.beforeStagingVerification, as: .plaintextMigrationValidationFailed)
@@ -481,31 +545,33 @@ final class ProfileEncryptedStorage {
             try fileManager.removeItem(at: backup)
         } catch {
             if !fileManager.fileExists(atPath: root.path), fileManager.fileExists(atPath: backup.path) {
-                do { try fileManager.moveItem(at: backup, to: root) }
-                catch { throw ProfileStoreError.plaintextMigrationRecoveryFailed }
+                do { try fileManager.moveItem(at: backup, to: root) } catch { throw ProfileStoreError.plaintextMigrationRecoveryFailed }
             }
             throw ProfileStoreError.plaintextMigrationCommitFailed
         }
     }
 
     private func verifyMigratedTree(matches legacy: TreeInventory) throws {
-        let encrypted = try validateEncryptedTree()
+        let encrypted = try validateEncryptedTree(retainRevisionData: true)
         guard encrypted.manifestData == legacy.manifestData,
-              encrypted.profiles == legacy.profiles,
-              encrypted.selectionData == legacy.selectionData,
-              encrypted.selectedProfileID == legacy.selectedProfileID,
-              encrypted.records.count == legacy.records.count else {
+            encrypted.profiles == legacy.profiles,
+            encrypted.selectionData == legacy.selectionData,
+            encrypted.selectedProfileID == legacy.selectedProfileID,
+            encrypted.records.count == legacy.records.count
+        else {
             throw ProfileStoreError.plaintextMigrationValidationFailed
         }
         for (encryptedRecord, legacyRecord) in zip(encrypted.records, legacy.records) {
             guard encryptedRecord.profile == legacyRecord.profile,
-                  encryptedRecord.currentConfiguration == legacyRecord.currentConfiguration,
-                  encryptedRecord.revisions.count == legacyRecord.revisions.count else {
+                encryptedRecord.currentConfiguration == legacyRecord.currentConfiguration,
+                encryptedRecord.revisions.count == legacyRecord.revisions.count
+            else {
                 throw ProfileStoreError.plaintextMigrationValidationFailed
             }
             for (encryptedRevision, legacyRevision) in zip(encryptedRecord.revisions, legacyRecord.revisions) {
                 guard encryptedRevision.number == legacyRevision.number,
-                      encryptedRevision.data == legacyRevision.data else {
+                    encryptedRevision.data == legacyRevision.data
+                else {
                     throw ProfileStoreError.plaintextMigrationValidationFailed
                 }
             }
@@ -513,8 +579,7 @@ final class ProfileEncryptedStorage {
     }
 
     private func checkFault(_ point: ProfileStorageFaultPoint, as error: ProfileStoreError) throws {
-        do { try faults.check(point) }
-        catch { throw error }
+        do { try faults.check(point) } catch { throw error }
     }
 
     private func decodeSelection(
@@ -523,8 +588,7 @@ final class ProfileEncryptedStorage {
         failure: ProfileStoreError
     ) throws -> UUID? {
         let selected: String?
-        do { selected = try JSONDecoder().decode(String?.self, from: data) }
-        catch { throw failure }
+        do { selected = try JSONDecoder().decode(String?.self, from: data) } catch { throw failure }
         guard let selected else { return nil }
         guard let id = UUID(uuidString: selected), allowedProfileIDs.contains(id) else { throw failure }
         return id
@@ -535,32 +599,75 @@ final class ProfileEncryptedStorage {
         kind: ProfilePersistentRecordKind,
         logicalPath: String
     ) throws -> Data {
+        let identity = try fileIdentity(url)
+        let cacheKey = "\(kind.rawValue)|\(logicalPath)|\(url.path)"
+        if let cached = authenticatedRecords[cacheKey], cached.identity == identity { return cached.plaintext }
         let envelope: Data
-        do { envelope = try Data(contentsOf: url) }
-        catch { throw ProfileStoreError.missingEncryptedRecord }
+        do { envelope = try Data(contentsOf: url) } catch { throw ProfileStoreError.missingEncryptedRecord }
         guard envelope.starts(with: Self.magic) else { throw ProfileStoreError.mixedOrDowngradedStorage }
-        return try decrypt(envelope, kind: kind, logicalPath: logicalPath)
+        let plaintext = try decrypt(envelope, kind: kind, logicalPath: logicalPath)
+        authenticatedRecordDecodeCount += 1
+        guard try fileIdentity(url) == identity else { throw ProfileStoreError.encryptedStorageAuthenticationFailed }
+        // Bound retained cleartext. Large configurations still authenticate on demand.
+        if plaintext.count <= 512 * 1024 {
+            if authenticatedRecords.count >= 32 || cachedPlaintextBytes + plaintext.count > 2 * 1024 * 1024 {
+                authenticatedRecords.removeAll(keepingCapacity: true)
+                cachedPlaintextBytes = 0
+            }
+            if let old = authenticatedRecords[cacheKey] { cachedPlaintextBytes -= old.plaintext.count }
+            authenticatedRecords[cacheKey] = (identity, plaintext)
+            cachedPlaintextBytes += plaintext.count
+        }
+        return plaintext
+    }
+
+    private func authenticateHistoricalRecord(at url: URL, logicalPath: String) throws {
+        let identity = try fileIdentity(url)
+        if historicalAuthentications[logicalPath] == identity { return }
+        _ = try authenticatedRecord(at: url, kind: .version, logicalPath: logicalPath)
+        guard try fileIdentity(url) == identity else { throw ProfileStoreError.encryptedStorageAuthenticationFailed }
+        if historicalAuthentications.count >= 512 { historicalAuthentications.removeAll(keepingCapacity: true) }
+        historicalAuthentications[logicalPath] = identity
+    }
+
+    private struct FileIdentity: Equatable {
+        let device: dev_t
+        let inode: ino_t
+        let size: off_t
+        let mode: mode_t
+        let modificationSeconds: Int
+        let modificationNanoseconds: Int
+        let changeSeconds: Int
+        let changeNanoseconds: Int
+    }
+
+    private func fileIdentity(_ url: URL) throws -> FileIdentity {
+        var info = stat()
+        guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
+            throw ProfileStoreError.missingEncryptedRecord
+        }
+        return FileIdentity(
+            device: info.st_dev, inode: info.st_ino, size: info.st_size, mode: info.st_mode,
+            modificationSeconds: info.st_mtimespec.tv_sec, modificationNanoseconds: info.st_mtimespec.tv_nsec,
+            changeSeconds: info.st_ctimespec.tv_sec, changeNanoseconds: info.st_ctimespec.tv_nsec)
     }
 
     private func directoryEntries(_ directory: URL, failure: ProfileStoreError) throws -> [URL] {
-        do { return try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) }
-        catch { throw failure }
+        do { return try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) } catch { throw failure }
     }
 
     private func requireDirectory(_ url: URL, failure: ProfileStoreError) throws {
         do {
             let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             guard values.isDirectory == true, values.isSymbolicLink != true else { throw failure }
-        } catch let error as ProfileStoreError { throw error }
-        catch { throw failure }
+        } catch let error as ProfileStoreError { throw error } catch { throw failure }
     }
 
     private func requireRegularFile(_ url: URL, failure: ProfileStoreError) throws {
         do {
             let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
             guard values.isRegularFile == true, values.isSymbolicLink != true else { throw failure }
-        } catch let error as ProfileStoreError { throw error }
-        catch { throw failure }
+        } catch let error as ProfileStoreError { throw error } catch { throw failure }
     }
 
     private func validatedRevisionURLs(
@@ -578,12 +685,17 @@ final class ProfileEncryptedStorage {
         }
         revisions.sort { $0.number < $1.number }
         guard !revisions.isEmpty,
-              revisions.map(\.number) == Array(1...revisions.count) else { throw failure }
+            revisions.map(\.number) == Array(1...revisions.count)
+        else { throw failure }
         return revisions
     }
 
-    private var stagingRoot: URL { root.deletingLastPathComponent().appending(path: ".\(root.lastPathComponent).encrypted-staging", directoryHint: .isDirectory) }
-    private var backupRoot: URL { root.deletingLastPathComponent().appending(path: ".\(root.lastPathComponent).plaintext-backup", directoryHint: .isDirectory) }
+    private var stagingRoot: URL {
+        root.deletingLastPathComponent().appending(path: ".\(root.lastPathComponent).encrypted-staging", directoryHint: .isDirectory)
+    }
+    private var backupRoot: URL {
+        root.deletingLastPathComponent().appending(path: ".\(root.lastPathComponent).plaintext-backup", directoryHint: .isDirectory)
+    }
 
     private func recoverInterruptedMigration() throws {
         let staging = stagingRoot
@@ -609,8 +721,7 @@ final class ProfileEncryptedStorage {
 
     private func removeStagingAfterAuthoritativeLiveValidation() throws {
         guard fileManager.fileExists(atPath: stagingRoot.path) else { return }
-        do { try fileManager.removeItem(at: stagingRoot) }
-        catch { throw ProfileStoreError.plaintextMigrationRecoveryFailed }
+        do { try fileManager.removeItem(at: stagingRoot) } catch { throw ProfileStoreError.plaintextMigrationRecoveryFailed }
     }
 
     private func setDirectoryPermissions(_ directory: URL) throws {
@@ -632,16 +743,19 @@ final class ProfileValidationTemporaryStorage {
     ) {
         directory = profileRoot.deletingLastPathComponent().appending(path: ".TargetProfileValidation", directoryHint: .isDirectory)
         self.fileManager = fileManager
-        self.setAttributes = setAttributes ?? { attributes, path in
-            try fileManager.setAttributes(attributes, ofItemAtPath: path)
-        }
+        self.setAttributes =
+            setAttributes ?? { attributes, path in
+                try fileManager.setAttributes(attributes, ofItemAtPath: path)
+            }
     }
 
     func prepare() throws {
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         try setAttributes([.posixPermissions: 0o700], directory.path)
         for url in try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey])
-        where url.lastPathComponent.hasPrefix("validation-") && (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true {
+        where url.lastPathComponent.hasPrefix("validation-")
+            && (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+        {
             try? fileManager.removeItem(at: url)
         }
     }

@@ -53,19 +53,20 @@ struct JSONCodeEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             isEditing = true
-            let selection = textView.selectedRange()
-            JSONSyntaxHighlighter.apply(to: textView)
-            textView.setSelectedRange(selection)
             parent.text = textView.string
-            (textView.enclosingScrollView?.superview as? JSONCodeEditorContainerView)?.updateDocumentSize()
+            (textView.enclosingScrollView?.superview as? JSONCodeEditorContainerView)?.scheduleHighlight()
             isEditing = false
         }
     }
 }
 
-final class JSONCodeEditorContainerView: NSView {
+final class JSONCodeEditorContainerView: NSView, NSTextStorageDelegate {
     let scrollView = NSScrollView()
     let textView = NSTextView()
+    private var highlightTask: Task<Void, Never>?
+    private var generation = 0
+    private var dirtyRange: NSRange?
+    private var previousViewportSize = NSSize.zero
 
     init(accessibilityIdentifier: String?, accessibilityLabel: String?) {
         super.init(frame: .zero)
@@ -106,22 +107,74 @@ final class JSONCodeEditorContainerView: NSView {
             height: CGFloat.greatestFiniteMagnitude
         )
         scrollView.documentView = textView
+        textView.textStorage?.delegate = self
     }
 
     required init?(coder: NSCoder) { nil }
 
     override func layout() {
         super.layout()
-        updateDocumentSize()
+        if previousViewportSize != scrollView.contentSize {
+            previousViewportSize = scrollView.contentSize
+            updateDocumentSize()
+        }
     }
 
     func replaceText(_ text: String, resetScrollPosition: Bool) {
         textView.string = text
-        JSONSyntaxHighlighter.apply(to: textView)
+        textView.textStorage?.setAttributes([.font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+                                           .foregroundColor: NSColor.labelColor], range: NSRange(location: 0, length: (text as NSString).length))
         updateDocumentSize()
+        dirtyRange = NSRange(location: 0, length: (text as NSString).length)
+        scheduleHighlight()
         if resetScrollPosition {
             scrollView.contentView.scroll(to: .zero)
             scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+    }
+
+    func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,
+                     range editedRange: NSRange, changeInLength delta: Int) {
+        guard editedMask.contains(.editedCharacters) else { return }
+        // Adjust the accumulated range when a subsequent edit shifts text.
+        let length = textStorage.length
+        let previous = dirtyRange.map { NSRange(location: min($0.location, length), length: min(max(0, $0.length + delta), length - min($0.location, length))) }
+        dirtyRange = previous.map { NSUnionRange($0, editedRange) } ?? editedRange
+    }
+
+    func scheduleHighlight() {
+        generation &+= 1
+        let expectedGeneration = generation
+        highlightTask?.cancel()
+        highlightTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(160))
+                guard let self, !Task.isCancelled else { return }
+                let source = self.textView.string
+                let string = source as NSString
+                let requested = self.dirtyRange ?? NSRange(location: 0, length: string.length)
+                let bounded = NSIntersectionRange(requested, NSRange(location: 0, length: string.length))
+                let range = string.paragraphRange(for: bounded)
+                let tokens = try await ProfileBackgroundWork.run { JSONSyntaxTokens.tokens(in: source, range: range) }
+                guard !Task.isCancelled, self.generation == expectedGeneration, self.textView.string == source,
+                      let storage = self.textView.textStorage else { return }
+                storage.beginEditing()
+                storage.setAttributes([.font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+                                       .foregroundColor: NSColor.labelColor], range: range)
+                for token in tokens {
+                    let color: NSColor
+                    switch token.kind {
+                    case .key: color = .systemBlue
+                    case .string: color = .systemGreen
+                    case .literal: color = .systemPurple
+                    case .number: color = .systemOrange
+                    }
+                    storage.addAttribute(.foregroundColor, value: color, range: token.range)
+                }
+                storage.endEditing()
+                self.dirtyRange = nil
+                self.updateDocumentSize()
+            } catch { }
         }
     }
 
@@ -135,111 +188,5 @@ final class JSONCodeEditorContainerView: NSView {
             width: max(scrollView.contentSize.width, ceil(usedRect.maxX + inset.width * 2)),
             height: max(scrollView.contentSize.height, ceil(usedRect.maxY + inset.height * 2))
         )
-    }
-}
-
-struct JSONLineNumberCalculation {
-    struct VisibleLine: Equatable {
-        let number: Int
-        let utf16Offset: Int
-    }
-
-    static func lineStartOffsets(in text: String) -> [Int] {
-        let utf16 = Array(text.utf16)
-        var offsets = [0]
-        var index = 0
-
-        while index < utf16.count {
-            let codeUnit = utf16[index]
-            if codeUnit == 0x000D {
-                index += 1
-                if index < utf16.count, utf16[index] == 0x000A {
-                    index += 1
-                }
-                offsets.append(index)
-            } else if codeUnit == 0x000A || codeUnit == 0x2028 || codeUnit == 0x2029 {
-                index += 1
-                offsets.append(index)
-            } else {
-                index += 1
-            }
-        }
-
-        return offsets
-    }
-
-    static func visibleLines(
-        lineStartOffsets: [Int],
-        textUTF16Length: Int,
-        visibleRange: NSRange
-    ) -> [VisibleLine] {
-        guard !lineStartOffsets.isEmpty else { return [] }
-
-        let textLength = max(0, textUTF16Length)
-        let visibleStart = min(visibleRange.location, textLength)
-        let remainingLength = textLength - visibleStart
-        let visibleLength = min(visibleRange.length, remainingLength)
-        let visibleEnd = visibleStart + visibleLength
-        let firstIndex = containingLineIndex(for: visibleStart, in: lineStartOffsets)
-
-        var lines: [VisibleLine] = []
-        var index = firstIndex
-        let includeOnlyContainingLine = visibleLength == 0
-
-        while index < lineStartOffsets.count {
-            let offset = lineStartOffsets[index]
-            guard offset <= textLength else { break }
-            if !includeOnlyContainingLine, offset >= visibleEnd, index != firstIndex { break }
-
-            lines.append(VisibleLine(number: index + 1, utf16Offset: offset))
-            if includeOnlyContainingLine { break }
-
-            let nextIndex = index + 1
-            guard nextIndex > index else { break }
-            index = nextIndex
-        }
-
-        return lines
-    }
-
-    private static func containingLineIndex(for offset: Int, in lineStartOffsets: [Int]) -> Int {
-        var lowerBound = 0
-        var upperBound = lineStartOffsets.count
-
-        while lowerBound < upperBound {
-            let middle = lowerBound + (upperBound - lowerBound) / 2
-            if lineStartOffsets[middle] <= offset {
-                lowerBound = middle + 1
-            } else {
-                upperBound = middle
-            }
-        }
-
-        return max(0, lowerBound - 1)
-    }
-}
-
-private enum JSONSyntaxHighlighter {
-    static func apply(to textView: NSTextView) {
-        let string = textView.string as NSString
-        let fullRange = NSRange(location: 0, length: string.length)
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-            .foregroundColor: NSColor.labelColor
-        ]
-        textView.textStorage?.setAttributes(attributes, range: fullRange)
-        apply(#""(?:\\.|[^"\\])*"\s*:"#, color: .systemBlue, to: textView)
-        apply(#""(?:\\.|[^"\\])*""#, color: .systemGreen, to: textView)
-        apply(#"\b(?:true|false|null)\b"#, color: .systemPurple, to: textView)
-        apply(#"-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b"#, color: .systemOrange, to: textView)
-    }
-
-    private static func apply(_ pattern: String, color: NSColor, to textView: NSTextView) {
-        guard let expression = try? NSRegularExpression(pattern: pattern) else { return }
-        let range = NSRange(textView.string.startIndex..., in: textView.string)
-        expression.enumerateMatches(in: textView.string, range: range) { match, _, _ in
-            guard let match else { return }
-            textView.textStorage?.addAttribute(.foregroundColor, value: color, range: match.range)
-        }
     }
 }

@@ -29,10 +29,10 @@ Target 是使用 Swift 与 SwiftUI 构建的原生 macOS 客户端，提供 Prof
 ## 现在可以做什么
 
 - **一键连接**：Connect 会启动 Target 管理的 sing-box 实例并建立系统代理；Disconnect 与 Restart 使用同一套安全生命周期。
-- **完整的 Profile 工作区**：创建、导入、导出、复制、重命名和删除配置；内置 JSON 高亮、行号、格式化、诊断、版本历史与上一有效版本恢复。
+- **完整的 Profile 工作区**：创建、导入、导出、复制、重命名和删除配置；内置 JSON 高亮、格式化、诊断、版本历史与上一有效版本恢复。
 - **本地订阅转换**：直接读取公共 HTTPS 订阅，在本机完成格式识别、节点转换、`sing-box check` 和脱敏预览，不依赖第三方转换站。
 - **代理与策略选择**：浏览 sing-box selector，搜索和筛选节点，查看延迟与健康状态，并在运行中切换当前策略。
-- **实时可观测性**：Dashboard 展示上下行速率、累计流量和活动连接数；Connections、Traffic、Logs 提供更完整的运行视图。
+- **实时可观测性**：工作区侧栏展示活动连接，独立诊断窗口提供 Connections、Traffic、Logs；支持连接搜索、排序、暂停，以及流量历史和日志搜索。通过工具栏或 `⌘⇧D` 打开诊断窗口。
 - **原生 macOS 集成**：菜单栏快速控制、首次使用引导、启动时运行、应用内更新，以及中英文界面。
 - **可自动化**：随 App 提供 `targetctl`，通过本地控制平面管理 Profile、订阅、策略、引擎、系统代理和运行状态。
 
@@ -134,3 +134,13 @@ Target/Resources/Scripts/install_sing_box.sh
 ## 许可证
 
 Target 以 [GNU General Public License v3.0 or later](LICENSE) 发布。第三方声明见 [NOTICE](NOTICE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+## 快速回归测试
+
+无需启动应用即可运行使用相同生产源码的本地测试：
+
+```bash
+swift test --jobs 4 --scratch-path "${TMPDIR%/}/target-domain-build"
+```
+
+这条测试路径覆盖配置持久化、订阅、自动化、运行时和交互状态，不运行 Smart、Sparkle 更新器或前台 XCUI。应用构建、更新器和系统集成仍以 Xcode 与对应的隔离验证为准。
