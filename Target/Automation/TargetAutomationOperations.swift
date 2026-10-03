@@ -10,6 +10,7 @@ actor TargetAutomationOperations {
     private let profileStore: ProfileStore
     private let subscriptionOperations: TargetSubscriptionOperations
     private let policyOperations: any TargetPolicyOperating
+    private let shadowOperations: SmartPolicyShadowOperations
     private let backend: any EngineBackend
     private let serviceClient: any SystemProxyClient
     private let systemProxyOperations: any TargetSystemProxyOperating
@@ -37,6 +38,10 @@ actor TargetAutomationOperations {
         self.profileStore = profileStore
         self.subscriptionOperations = TargetSubscriptionOperations(store: profileStore, fetcher: subscriptionFetcher)
         self.policyOperations = policyOperations ?? TargetPolicyOperations(profileStore: profileStore)
+        self.shadowOperations = SmartPolicyShadowOperations(
+            catalogReader: PolicyCatalogOperation(profileStore: profileStore),
+            runtime: (backend as? any SmartShadowRuntimeReading) ?? UnavailableSmartShadowRuntime()
+        )
         self.backend = backend
         self.serviceClient = serviceClient
         let resolvedSystemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: serviceClient)
@@ -68,6 +73,7 @@ actor TargetAutomationOperations {
             switch request.action {
             case "capabilities": return capabilities()
             case "status": return await consolidatedStatus()
+            case "smart.shadow": return .success(try await shadowOperations.evaluate().automationJSON())
             case "runtime.status": return await runtimeStatus()
             case "profile.import": return try profileImport(request.arguments)
             case "profile.subscribe": return try await profileSubscribe(request.arguments)
@@ -732,7 +738,7 @@ actor TargetAutomationOperations {
     }
 
     private static let commands = [
-        "capabilities", "status", "runtime.status", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset", "route.list", "route.bind", "route.remove",
+        "capabilities", "status", "runtime.status", "smart.shadow", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset", "route.list", "route.bind", "route.remove",
         "engine.status", "engine.start", "engine.stop", "connection.start", "connection.stop", "connection.restart", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
     ]

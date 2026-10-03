@@ -417,6 +417,7 @@ struct RuntimeProxyHealth: Equatable, Sendable {
     let state: RuntimeProxyHealthState
     let latencyMilliseconds: Int?
     let observedAt: Date?
+    var isConclusiveFailure: Bool = false
 
     static func unknown(tag: String) -> RuntimeProxyHealth {
         RuntimeProxyHealth(tag: tag, state: .unknown, latencyMilliseconds: nil, observedAt: nil)
@@ -440,8 +441,8 @@ struct RuntimeProxyHealth: Equatable, Sendable {
         )
     }
 
-    static func unreachable(tag: String, observedAt: Date) -> RuntimeProxyHealth {
-        RuntimeProxyHealth(tag: tag, state: .unreachable, latencyMilliseconds: nil, observedAt: observedAt)
+    static func unreachable(tag: String, observedAt: Date, isConclusiveFailure: Bool = true) -> RuntimeProxyHealth {
+        RuntimeProxyHealth(tag: tag, state: .unreachable, latencyMilliseconds: nil, observedAt: observedAt, isConclusiveFailure: isConclusiveFailure)
     }
 
     static func runtimeUnavailable(tag: String) -> RuntimeProxyHealth {

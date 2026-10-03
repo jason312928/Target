@@ -59,6 +59,7 @@ let package = Package(
                     "Automation/TargetAutomationOperations.swift",
                     "Profile/ProfileModels.swift",
                     "Profile/SmartPolicyEngine.swift",
+                    "Profile/SmartPolicyShadowOperations.swift",
                     "Profile/ProfileStore.swift",
                     "Profile/ProfileEncryptedStorage.swift",
                     "Profile/ProfileStorageCoordinator.swift",
@@ -89,6 +90,7 @@ let package = Package(
                     sources: [
                     "DeepOptimizationTests.swift",
                     "SmartPolicyEngineTests.swift",
+                    "SmartPolicyShadowTests.swift",
                     "BackendArchitectureTests.swift",
                     "EngineLifecycleTests.swift",
                     "TargetRuntimeOperationsTests.swift",

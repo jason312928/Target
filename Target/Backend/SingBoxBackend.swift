@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeSnapshotProviding, RuntimeConnectionProviding, RuntimeLogProviding {
+actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeSnapshotProviding, RuntimeConnectionProviding, RuntimeLogProviding, SmartShadowRuntimeReading {
     static let applicationSupportDirectoryName = "Target"
     static let engineDirectoryName = "sing-box"
 
@@ -186,7 +186,7 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
                             latencyMilliseconds: latency,
                             observedAt: Date()
                         ) else {
-                            return (index, .unreachable(tag: tag, observedAt: Date()), false, false)
+                            return (index, .unreachable(tag: tag, observedAt: Date(), isConclusiveFailure: false), false, false)
                         }
                         return (index, health, false, false)
                     } catch is CancellationError {
@@ -196,12 +196,14 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
                         case .unavailable, .invalidDescriptor, .redirectRefused, .selectionRejected:
                             return (index, .runtimeUnavailable(tag: tag), true, false)
                         case .probeTransportFailure:
-                            return (index, .unreachable(tag: tag, observedAt: Date()), false, true)
-                        case .malformedResponse, .probeFailed:
+                            return (index, .unreachable(tag: tag, observedAt: Date(), isConclusiveFailure: false), false, true)
+                        case .probeFailed:
                             return (index, .unreachable(tag: tag, observedAt: Date()), false, false)
+                        case .malformedResponse:
+                            return (index, .unreachable(tag: tag, observedAt: Date(), isConclusiveFailure: false), false, false)
                         }
                     } catch {
-                        return (index, .unreachable(tag: tag, observedAt: Date()), false, false)
+                        return (index, .unreachable(tag: tag, observedAt: Date(), isConclusiveFailure: false), false, false)
                     }
                 }
             }
@@ -238,6 +240,59 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
             return .runtimeUnavailable
         }
         return .results(indexedResults.sorted { $0.0 < $1.0 }.map(\.1))
+    }
+
+    func collectShadowEvidence(expectedRuntime: ExpectedPolicyRuntimeIdentity, selector: String, candidates: [String]) async throws -> SmartShadowRuntimeResult {
+        guard !candidates.isEmpty, candidates.count <= SmartPolicyShadowOperations.maximumCandidates,
+              Set(candidates).count == candidates.count,
+              candidates.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 }) else {
+            return .unavailable("runtimeUnavailable")
+        }
+        guard let before = await verifiedRuntimeControlMaterial() else {
+            let disposition = try? await runtimeOwnership.recordDisposition()
+            if case .noRecord? = disposition { return .stopped }
+            if case .processExited? = disposition { return .stopped }
+            return .unavailable("ownershipUnavailable")
+        }
+        guard before.record.profileID == expectedRuntime.profileID,
+              before.record.profileRevision == expectedRuntime.profileRevision,
+              before.record.sourceConfigurationFingerprint == expectedRuntime.sourceFingerprint else {
+            return .unavailable("identityMismatch")
+        }
+        let live: RuntimeSelectorState
+        do {
+            guard let value = try await runtimeControlClient.selectors(using: before.descriptor)[selector] else {
+                return .unavailable("selectorMissing")
+            }
+            live = value
+        } catch is CancellationError { throw CancellationError() }
+        catch { return .unavailable("controllerUnavailable") }
+        guard Set(live.members) == Set(candidates), candidates.contains(live.selected) else {
+            return .unavailable("selectorStale")
+        }
+        let probes = try await probePolicyMemberLatency(expectedRuntime: expectedRuntime, outboundTags: candidates)
+        guard case .results = probes else { return .unavailable("runtimeUnavailable") }
+        // Exactly one bounded connection snapshot. It never closes connections.
+        let snapshot = await currentRuntimeSnapshot()
+        guard let after = await verifiedRuntimeControlMaterial(),
+              after.record == before.record, after.descriptor == before.descriptor else {
+            return .unavailable("identityChanged")
+        }
+        let final: RuntimeSelectorState
+        do {
+            guard let value = try await runtimeControlClient.selectors(using: after.descriptor)[selector] else {
+                return .unavailable("selectorMissing")
+            }
+            final = value
+        } catch is CancellationError { throw CancellationError() }
+        catch { return .unavailable("controllerUnavailable") }
+        guard final == live,
+              let confirmed = await verifiedRuntimeControlMaterial(),
+              confirmed.record == before.record, confirmed.descriptor == before.descriptor else {
+            return .unavailable("runtimeChanged")
+        }
+        return .available(.init(sessionID: before.record.runtimeConfigurationID,
+                                currentOutbound: live.selected, probes: probes, connections: snapshot))
     }
 
     func currentRuntimeConnectionTotals() async -> RuntimeConnectionTotals? {

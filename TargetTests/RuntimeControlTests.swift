@@ -395,6 +395,7 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(results.map(\.tag), ["node-a", "node-b"])
         XCTAssertEqual(results.map(\.state), [.reachable, .unreachable])
         XCTAssertEqual(results.first?.latencyMilliseconds, 1_200)
+        XCTAssertFalse(results[1].isConclusiveFailure)
         let selectorCalls = await client.selectorCallCount()
         XCTAssertEqual(selectorCalls, 1)
     }
@@ -630,6 +631,44 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertFalse(text.contains("127.0.0.1"))
     }
 
+    func testShadowBackendUsesVerifiedReadOnlyBoundaryAndNeverSelects() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: ["a": .latency(100), "b": .latency(40)], selectorMembers: ["a", "b"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+        for _ in 0..<5 {
+            let result = try await fixture.backend.collectShadowEvidence(expectedRuntime: fixture.expectedRuntime, selector: "group", candidates: ["a", "b"])
+            guard case .available(let evidence) = result else { return XCTFail("Expected verified shadow evidence") }
+            XCTAssertEqual(evidence.currentOutbound, "a")
+            guard case .results(let probes) = evidence.probes else { return XCTFail("Expected health facts") }
+            XCTAssertEqual(probes.map(\.state), [.reachable, .reachable])
+        }
+        let calls = await client.selectionCallCount()
+        let snapshots = await client.snapshotCallCount()
+        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(snapshots, 5)
+    }
+
+    func testShadowBackendRejectsIdentityMismatchBeforeControllerAccess() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: ["a": .latency(100)], selectorMembers: ["a"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a"], client: client)
+        let mismatch = ExpectedPolicyRuntimeIdentity(profileID: UUID(), profileRevision: 1, sourceFingerprint: "mismatch")
+        let result = try await fixture.backend.collectShadowEvidence(expectedRuntime: mismatch, selector: "group", candidates: ["a"])
+        guard case .unavailable("identityMismatch") = result else { return XCTFail("Expected identity refusal") }
+        let calls = await client.selectorCallCount()
+        XCTAssertEqual(calls, 0)
+    }
+
+    func testShadowBackendRejectsRuntimeReplacementAndSelectorStaleness() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: ["a": .latency(100)], selectorMembers: ["a"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a"], client: client)
+        let stale = try await fixture.backend.collectShadowEvidence(expectedRuntime: fixture.expectedRuntime, selector: "group", candidates: ["a", "b"])
+        guard case .unavailable("selectorStale") = stale else { return XCTFail("Expected stale selector refusal") }
+        await client.replaceRuntimeIdentityWhenProbing(tag: "a") { fixture.replaceRuntimeConfigurationIdentity() }
+        let changed = try await fixture.backend.collectShadowEvidence(expectedRuntime: fixture.expectedRuntime, selector: "group", candidates: ["a"])
+        guard case .unavailable = changed else { return XCTFail("Expected runtime replacement refusal") }
+        let calls = await client.selectionCallCount()
+        XCTAssertEqual(calls, 0)
+    }
+
     private func makeRuntimePolicyProbeFixture(
         members: [String],
         client: any RuntimeControlClient
@@ -765,23 +804,28 @@ private actor ControlledRuntimeControlClient: RuntimeControlClient {
     private let probeOutcomes: [String: ControlledProbeOutcome]
     private let selectorError: RuntimeControlError?
     private var selectorCalls = 0
+    private var selectionCalls = 0
+    private var snapshotCalls = 0
+    private let selectorMembers: [String]?
     private var identityChange: (tag: String, action: @Sendable () -> Void)?
 
     init(
         probeOutcomes: [String: ControlledProbeOutcome],
-        selectorError: RuntimeControlError? = nil
+        selectorError: RuntimeControlError? = nil,
+        selectorMembers: [String]? = nil
     ) {
         self.probeOutcomes = probeOutcomes
         self.selectorError = selectorError
+        self.selectorMembers = selectorMembers
     }
 
     func selectors(using descriptor: RuntimeControlDescriptor) async throws -> [String: RuntimeSelectorState] {
         selectorCalls += 1
         if let selectorError { throw selectorError }
-        return ["group": .init(tag: "group", selected: "node", members: [])]
+        return ["group": .init(tag: "group", selected: selectorMembers?.first ?? "node", members: selectorMembers ?? [])]
     }
 
-    func select(selector: String, outbound: String, using descriptor: RuntimeControlDescriptor) async throws {}
+    func select(selector: String, outbound: String, using descriptor: RuntimeControlDescriptor) async throws { selectionCalls += 1 }
 
     func connectionTotals(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionTotals {
         .init(uploadTotalBytes: 0, downloadTotalBytes: 0, activeConnectionCount: 0)
@@ -802,6 +846,12 @@ private actor ControlledRuntimeControlClient: RuntimeControlClient {
     }
 
     func selectorCallCount() -> Int { selectorCalls }
+    func selectionCallCount() -> Int { selectionCalls }
+    func snapshotCallCount() -> Int { snapshotCalls }
+    func connections(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionsSnapshot {
+        snapshotCalls += 1
+        return .init(totals: .init(uploadTotalBytes: 0, downloadTotalBytes: 0, activeConnectionCount: 0), connections: [])
+    }
 
     func replaceRuntimeIdentityWhenProbing(tag: String, action: @escaping @Sendable () -> Void) {
         identityChange = (tag, action)
