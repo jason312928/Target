@@ -802,6 +802,60 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertTrue(try fixture.profileStore.selectedValidVersion().profile.policyOverrides.isEmpty)
     }
 
+    func testContinuityUsesOneVerifiedSnapshotWithoutSelectorOrRuntimeMutation() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a"], client: client)
+        let before = try fixture.profileStore.selectedValidVersion()
+        let automation = TargetAutomationOperations(profileStore: fixture.profileStore, backend: fixture.backend)
+        let response = await automation.handle(.init(protocolVersion: 1, action: "smart.continuity"))
+        XCTAssertTrue(response.ok)
+        XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self).contains("\"state\":\"available\""))
+        let snapshots = await client.snapshotCallCount(); XCTAssertEqual(snapshots, 1)
+        let selectors = await client.selectorCallCount(); XCTAssertEqual(selectors, 0)
+        let selections = await client.selectionCallCount(); XCTAssertEqual(selections, 0)
+        let after = try fixture.profileStore.selectedValidVersion()
+        XCTAssertEqual(after.data, before.data)
+        XCTAssertEqual(after.profile, before.profile)
+        XCTAssertEqual(after.revision, before.revision)
+    }
+
+    func testContinuityRejectsIdentityChangeDuringReadAndUnavailableController() async throws {
+        for changeIdentity in [true, false] {
+            let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a"])
+            let fixture = try makeRuntimePolicyProbeFixture(members: ["a"], client: client)
+            if changeIdentity { await client.onNextSnapshotRead { fixture.replaceRuntimeConfigurationIdentity() } }
+            else { await client.failSnapshots() }
+            let result = try await fixture.backend.collectContinuityEvidence()
+            guard case .unavailable = result else { return XCTFail("Expected unavailable evidence") }
+            let snapshots = await client.snapshotCallCount(); XCTAssertEqual(snapshots, 1)
+            let selections = await client.selectionCallCount(); XCTAssertEqual(selections, 0)
+        }
+    }
+
+    func testContinuityRejectsUnverifiedProfileAndStoppedRuntimeBeforeControllerRead() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a"], client: client)
+        try fixture.profileStore.save(json: policyConfiguration(configuredDefault: "b", members: ["a", "b"]), for: fixture.expectedRuntime.profileID)
+        // The recorded revision remains readable; corrupting its runtime material
+        // invalidates ownership-authorized observation without any host action.
+        fixture.removeRuntimeConfiguration()
+        guard case .unavailable = try await fixture.backend.collectContinuityEvidence() else { return XCTFail("Expected unavailable") }
+        fixture.clearRuntimeRecord()
+        guard case .stopped = try await fixture.backend.collectContinuityEvidence() else { return XCTFail("Expected stopped") }
+        let snapshots = await client.snapshotCallCount(); XCTAssertEqual(snapshots, 0)
+    }
+
+    func testContinuityCancellationBeforeReadDoesNotAccessController() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a"], client: client)
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await fixture.backend.collectContinuityEvidence()
+        }
+        do { _ = try await cancelled.value; XCTFail("Expected cancellation") } catch is CancellationError {}
+        let snapshots = await client.snapshotCallCount(); XCTAssertEqual(snapshots, 0)
+    }
+
     private func makeRuntimePolicyProbeFixture(
         members: [String],
         client: any RuntimeControlClient
@@ -940,6 +994,8 @@ private actor ControlledRuntimeControlClient: RuntimeControlClient {
     private var selectorCalls = 0
     private var selectionCalls = 0
     private var snapshotCalls = 0
+    private var snapshotReadAction: (@Sendable () -> Void)?
+    private var snapshotsFail = false
     private let selectorMembers: [String]?
     private var identityChange: (tag: String, action: @Sendable () -> Void)?
     private var selected: String?
@@ -1005,8 +1061,12 @@ private actor ControlledRuntimeControlClient: RuntimeControlClient {
     func selectorCallCount() -> Int { selectorCalls }
     func selectionCallCount() -> Int { selectionCalls }
     func snapshotCallCount() -> Int { snapshotCalls }
+    func onNextSnapshotRead(_ action: @escaping @Sendable () -> Void) { snapshotReadAction = action }
+    func failSnapshots() { snapshotsFail = true }
     func connections(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionsSnapshot {
         snapshotCalls += 1
+        snapshotReadAction?(); snapshotReadAction = nil
+        if snapshotsFail { throw RuntimeControlError.unavailable }
         return .init(totals: .init(uploadTotalBytes: 0, downloadTotalBytes: 0, activeConnectionCount: 0), connections: [])
     }
 
@@ -1042,6 +1102,11 @@ private final class RuntimePolicyProbeFixture: @unchecked Sendable {
     func selectionEvidence() throws -> PolicySelectionEvidence {
         .init(catalog: try PolicyCatalogOperation(profileStore: profileStore).read(), sessionID: try XCTUnwrap(recordStore.current()?.runtimeConfigurationID), selector: "group", currentOutbound: "a", observedAt: .now)
     }
+
+    func removeRuntimeConfiguration() {
+        if let record = recordStore.current() { configurations.remove(id: record.runtimeConfigurationID) }
+    }
+    func clearRuntimeRecord() { try? recordStore.clear() }
 
     func replaceRuntimeConfigurationIdentity() {
         guard let current = recordStore.current() else { return }

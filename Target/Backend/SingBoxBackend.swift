@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeSnapshotProviding, RuntimeConnectionProviding, RuntimeLogProviding, SmartShadowRuntimeReading {
+actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeSnapshotProviding, RuntimeConnectionProviding, RuntimeLogProviding, SmartShadowRuntimeReading, SmartContinuityRuntimeReading {
     static let applicationSupportDirectoryName = "Target"
     static let engineDirectoryName = "sing-box"
 
@@ -368,6 +368,23 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
               let current = await verifiedRuntimeControlMaterial(),
               current.record == verified.record, current.descriptor == verified.descriptor else { return nil }
         return snapshot
+    }
+
+    func collectContinuityEvidence() async throws -> SmartContinuityRuntimeResult {
+        try Task.checkCancellation()
+        guard let before = await verifiedRuntimeControlMaterial() else {
+            let disposition = try? await runtimeOwnership.recordDisposition()
+            if case .noRecord? = disposition { return .stopped }
+            if case .processExited? = disposition { return .stopped }
+            return .unavailable
+        }
+        // Reuse the existing authenticated, bounded Connections read and its
+        // ownership checks; associate it with identity only after revalidation.
+        guard let snapshot = await currentRuntimeSnapshot(),
+              let after = await verifiedRuntimeControlMaterial(),
+              before.record == after.record, before.descriptor == after.descriptor else { return .unavailable }
+        try Task.checkCancellation()
+        return .available(.init(identity: before.record, snapshot: snapshot, observedAt: .now))
     }
 
     func runtimeConnectionAvailability() async -> RuntimeObservationState {
