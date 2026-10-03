@@ -190,4 +190,140 @@ final class SmartPolicyEngineTests: XCTestCase {
         XCTAssertEqual(engine.state, before)
         XCTAssertTrue(engine.state.isFinite)
     }
+
+    func testCandidateAdditionRemovalAndSingleMember() {
+        var engine = SmartPolicyEngine(configuration: .init(explorationEnabled: false))
+        engine.apply(.probeSuccess(tag: "node-01", latencyMilliseconds: 80, at: 1))
+        let single = engine.decision(for: .init(candidates: [nodes[0]], currentOutbound: "node-01", now: 1))
+        XCTAssertEqual(single.recommendedOutbound, "node-01")
+        XCTAssertTrue(single.keepCurrentSelection)
+        engine.apply(.probeSuccess(tag: "node-02", latencyMilliseconds: 40, at: 2))
+        engine.apply(.destinationSuccess(destination: "alpha.example", tag: "node-02", at: 2))
+        XCTAssertEqual(engine.decision(for: .init(candidates: Array(nodes.prefix(2)), now: 2)).recommendedOutbound, "node-02")
+        engine.apply(.candidateRemoved(tag: "node-02", at: 3))
+        XCTAssertNil(engine.state.nodes["node-02"])
+        XCTAssertNil(engine.state.destinations["alpha.example"]?.observations["node-02"])
+        XCTAssertEqual(engine.decision(for: .init(candidates: [nodes[0]], currentOutbound: "node-02", now: 3)).recommendedOutbound, "node-01")
+        XCTAssertNil(engine.decision(for: .init(candidates: [], now: 3)).recommendedOutbound)
+        XCTAssertTrue(engine.state.isFinite)
+    }
+
+    func testStaleNodeEvidenceAndNetworkEpochLoseConfidence() {
+        var engine = SmartPolicyEngine(configuration: .init(staleAfter: 10, explorationEnabled: false))
+        for time in 1...3 { engine.apply(.probeSuccess(tag: "node-01", latencyMilliseconds: 40, at: Double(time))) }
+        XCTAssertEqual(engine.decision(for: .init(candidates: [nodes[0]], now: 3)).confidence, .high)
+        let stale = engine.decision(for: .init(candidates: [nodes[0]], now: 14))
+        XCTAssertEqual(stale.confidence, .low)
+        XCTAssertTrue(stale.reasonCodes.contains(.staleEvidence))
+        engine.apply(.networkEpochChanged(at: 4))
+        XCTAssertEqual(engine.decision(for: .init(candidates: [nodes[0]], now: 4)).confidence, .low)
+        XCTAssertTrue(engine.state.isFinite)
+    }
+
+    func testStaleDestinationAffinityNoLongerOverridesFreshNodeEvidence() {
+        var engine = SmartPolicyEngine(configuration: .init(staleAfter: 10, explorationEnabled: false))
+        for time in 1...3 { engine.apply(.destinationSuccess(destination: "alpha.example", tag: "node-01", at: Double(time))) }
+        for time in 14...16 {
+            engine.apply(.probeSuccess(tag: "node-01", latencyMilliseconds: 100, at: Double(time)))
+            engine.apply(.probeSuccess(tag: "node-02", latencyMilliseconds: 40, at: Double(time)))
+        }
+        let context = SmartPolicyContext(candidates: Array(nodes.prefix(2)), destination: "alpha.example", now: 16)
+        let decision = engine.decision(for: context)
+        XCTAssertEqual(decision.recommendedOutbound, "node-02")
+        XCTAssertFalse(decision.reasonCodes.contains(.destinationPreference))
+        let stale = engine.decision(for: .init(candidates: [nodes[0]], destination: "alpha.example", now: 16))
+        XCTAssertEqual(stale.confidence, .low)
+        XCTAssertTrue(stale.reasonCodes.contains(.staleEvidence))
+    }
+
+    func testProvenFailureOverridesDestinationAffinity() {
+        var engine = SmartPolicyEngine(configuration: .init(explorationEnabled: false))
+        for time in 1...3 {
+            engine.apply(.probeSuccess(tag: "node-01", latencyMilliseconds: 40, at: Double(time)))
+            engine.apply(.probeSuccess(tag: "node-02", latencyMilliseconds: 80, at: Double(time)))
+            engine.apply(.destinationSuccess(destination: "alpha.example", tag: "node-01", at: Double(time)))
+        }
+        for time in 4...6 { engine.apply(.connectionFailure(tag: "node-01", at: Double(time))) }
+        let decision = engine.decision(for: .init(candidates: Array(nodes.prefix(2)), destination: "alpha.example", currentOutbound: "node-01", now: 6))
+        XCTAssertEqual(decision.recommendedOutbound, "node-02")
+        XCTAssertFalse(decision.keepCurrentSelection)
+        XCTAssertFalse(decision.reasonCodes.contains(.destinationPreference))
+        XCTAssertTrue(engine.state.isFinite)
+    }
+
+    func testLocalAndBroadFailureRemainDistinctAfterEligibilityFiltering() {
+        var engine = SmartPolicyEngine(configuration: .init(explorationEnabled: false))
+        for time in 1...3 { for node in nodes { engine.apply(.probeSuccess(tag: node.tag, latencyMilliseconds: 50, at: Double(time))) } }
+        for time in 4...6 { engine.apply(.probeFailure(tag: "node-01", at: Double(time))) }
+        let local = engine.decision(for: .init(candidates: nodes, now: 6))
+        XCTAssertFalse(local.reasonCodes.contains(.networkWideDegradation))
+        XCTAssertEqual(local.confidence, .high)
+        for time in 7...9 { engine.apply(.probeFailure(tag: "node-02", at: Double(time))) }
+        let broad = engine.decision(for: .init(candidates: nodes, now: 9))
+        XCTAssertEqual(broad.recommendedOutbound, "node-03")
+        XCTAssertTrue(broad.reasonCodes.contains(.networkWideDegradation))
+        XCTAssertEqual(broad.confidence, .medium)
+    }
+
+    func testBroadDestinationFailureAndContradictoryEvidenceReduceConfidence() {
+        var engine = SmartPolicyEngine(configuration: .init(explorationEnabled: false))
+        for time in 1...3 { for node in nodes { engine.apply(.probeSuccess(tag: node.tag, latencyMilliseconds: 50, at: Double(time))) } }
+        engine.apply(.destinationFailure(destination: "alpha.example", tag: "node-01", at: 4))
+        XCTAssertEqual(engine.decision(for: .init(candidates: nodes, destination: "alpha.example", now: 4)).confidence, .high)
+        for node in nodes.dropFirst() { engine.apply(.destinationFailure(destination: "alpha.example", tag: node.tag, at: 5)) }
+        let broad = engine.decision(for: .init(candidates: nodes, destination: "alpha.example", currentOutbound: "node-01", now: 5))
+        XCTAssertEqual(broad.confidence, .medium)
+        XCTAssertEqual(broad.recommendedOutbound, "node-01")
+        XCTAssertTrue(broad.keepCurrentSelection)
+        XCTAssertTrue(engine.state.nodes.values.allSatisfy { $0.failureCount == 0 })
+        engine.apply(.destinationSuccess(destination: "alpha.example", tag: "node-01", at: 6))
+        XCTAssertEqual(engine.decision(for: .init(candidates: [nodes[0]], destination: "alpha.example", now: 6)).confidence, .medium)
+        engine.apply(.connectionFailure(tag: "node-01", at: 7))
+        XCTAssertEqual(engine.decision(for: .init(candidates: [nodes[0]], now: 7)).confidence, .medium)
+    }
+
+    func testSeededExplorationRediscoversRecoveredCandidateWithExactReplay() {
+        let configuration = SmartPolicyConfiguration(penaltyHalfLife: 10, explorationRate: 100)
+        var engine = SmartPolicyEngine(configuration: configuration, seed: 42)
+        let events: [SmartPolicyEvent] = [
+            .probeSuccess(tag: "node-01", latencyMilliseconds: 50, at: 1),
+            .probeSuccess(tag: "node-02", latencyMilliseconds: 51, at: 1),
+            .probeFailure(tag: "node-02", at: 2), .probeFailure(tag: "node-02", at: 3),
+            .probeFailure(tag: "node-02", at: 4), .timeAdvanced(to: 100),
+            .probeSuccess(tag: "node-02", latencyMilliseconds: 51, at: 101)
+        ]
+        engine.replay(events)
+        var replayed = SmartPolicyEngine(configuration: configuration, seed: 42)
+        replayed.replay(events)
+        var rediscovered = false
+        for time in 101...120 {
+            let context = SmartPolicyContext(candidates: Array(nodes.prefix(2)), now: Double(time))
+            let decision = engine.decision(for: context)
+            XCTAssertEqual(decision, replayed.decision(for: context))
+            XCTAssertTrue(decision.reasonCodes.contains(.explorationCandidate))
+            rediscovered = rediscovered || decision.recommendedOutbound == "node-02"
+        }
+        XCTAssertTrue(rediscovered)
+        XCTAssertEqual(engine.state, replayed.state)
+        XCTAssertTrue(engine.state.isFinite)
+    }
+
+    func testExplorationAcceptsExtremeFiniteTimesAndBoundsDestinationState() {
+        let configuration = SmartPolicyConfiguration(maximumNodeStates: 2, maximumDestinationStates: 2, maximumObservationsPerNode: 2, maximumDestinationObservations: 2, explorationRate: 100)
+        var engine = SmartPolicyEngine(configuration: configuration, seed: 42)
+        for time in 1...12 {
+            let tag = nodes[time % 3].tag
+            engine.apply(.probeSuccess(tag: tag, latencyMilliseconds: 50, at: Double(time)))
+            engine.apply(.destinationSuccess(destination: "site-\(time % 3).example", tag: tag, at: Double(time)))
+        }
+        for time in [Double.greatestFiniteMagnitude, -Double.greatestFiniteMagnitude] {
+            XCTAssertNotNil(engine.decision(for: .init(candidates: nodes, now: time)).recommendedOutbound)
+        }
+        XCTAssertLessThanOrEqual(engine.state.nodes.count, 2)
+        XCTAssertLessThanOrEqual(engine.state.destinations.count, 2)
+        XCTAssertTrue(engine.state.destinations.values.allSatisfy { $0.observations.count <= 2 })
+        XCTAssertTrue(engine.state.nodes.values.allSatisfy { $0.latencyHistory.count <= 2 && (0...1).contains($0.penalty) })
+        XCTAssertTrue(engine.state.isFinite)
+    }
+
 }

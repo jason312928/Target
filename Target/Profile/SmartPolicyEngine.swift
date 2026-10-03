@@ -272,7 +272,7 @@ struct SmartPolicyEngine: Equatable, Sendable {
         if configuration.explorationEnabled, evaluations.count > 1, shouldExplore(context: context, best: best) {
             let nearBest = evaluations.filter { $0.score <= best.score + max(configuration.switchToleranceMilliseconds, 20) }
             if nearBest.count > 1 {
-                let index = Int(mix(seed ^ UInt64(bitPattern: Int64(context.now.rounded())) ^ stableHash(context.destination ?? "")) % UInt64(nearBest.count))
+                let index = Int(mix(seed ^ context.now.rounded().bitPattern ^ stableHash(context.destination ?? "")) % UInt64(nearBest.count))
                 selected = nearBest[index]
                 reasons.append(SmartPolicyReasonCode.explorationCandidate)
                 keepCurrent = selected.tag == context.currentOutbound
@@ -281,14 +281,21 @@ struct SmartPolicyEngine: Equatable, Sendable {
 
         let evidence = selected.evidenceCount
         let contradiction = selected.destinationFailures > 0 && selected.destinationSuccesses > 0
-        let networkWide = networkWideDegradation(candidates: eligible, at: context.now)
+        let networkWide = networkWideDegradation(candidates: candidates.filter(\.available), at: context.now)
+        let destinationWide = context.destination.map { destination in
+            let observations = eligible.compactMap { state.destinations[destination]?.observations[$0.tag] }
+            return eligible.count > 1 && observations.count == eligible.count && observations.allSatisfy {
+                $0.failures > 0 && !$0.isStale(at: context.now, staleAfter: configuration.staleAfter)
+            }
+        } ?? false
+        if destinationWide { reasons.append(.destinationFailure) }
         if networkWide { reasons.append(SmartPolicyReasonCode.networkWideDegradation) }
         if selected.isStale { reasons.append(SmartPolicyReasonCode.staleEvidence) }
         let confidence: SmartPolicyConfidence
-        if evidence == 0 { confidence = .low; reasons.append(SmartPolicyReasonCode.insufficientEvidence) }
-        else if contradiction || networkWide || evidence < 3 { confidence = .medium }
+        if evidence == 0 || selected.isStale { confidence = .low; reasons.append(SmartPolicyReasonCode.insufficientEvidence) }
+        else if contradiction || selected.hasConflictingNodeEvidence || networkWide || destinationWide || evidence < 3 { confidence = .medium }
         else { confidence = .high }
-        return SmartPolicyDecision(recommendedOutbound: selected.tag, confidence: confidence, keepCurrentSelection: keepCurrent, reasonCodes: stableReasons(reasons))
+        return SmartPolicyDecision(recommendedOutbound: selected.tag, confidence: confidence, keepCurrentSelection: keepCurrent || selected.tag == context.currentOutbound, reasonCodes: stableReasons(reasons))
     }
 
     private struct Evaluation: Sendable {
@@ -299,6 +306,7 @@ struct SmartPolicyEngine: Equatable, Sendable {
         let destinationSuccesses: Int
         let destinationFailures: Int
         let hardFailure: Bool
+        let hasConflictingNodeEvidence: Bool
         let isStale: Bool
         let reasons: [SmartPolicyReasonCode]
     }
@@ -320,11 +328,11 @@ struct SmartPolicyEngine: Equatable, Sendable {
         let destinationIsStale = destinationObservation.map { $0.isStale(at: time, staleAfter: configuration.staleAfter) } ?? false
         if !destinationIsStale && destinationSuccesses >= 2 && destinationFailures == 0 { score -= 120; reasons.append(.destinationPreference) }
         if !destinationIsStale && destinationFailures > 0 { score += Double(Swift.min(destinationFailures, 4)) * 90; reasons.append(.destinationFailure) }
-        let stale = node?.lastSuccessAt.map { time - $0 > configuration.staleAfter } ?? true
+        let stale = node?.lastSuccessAt.map { time - $0 > configuration.staleAfter || $0 < state.networkEpoch.startedAt } ?? true
         if stale || destinationIsStale { score += 25 }
         if node?.recoveryEvidence ?? 0 > 0 && decayedPenalty < 0.5 { reasons.append(.recoveryEvidence) }
         if node != nil && decayedPenalty < (node?.penalty ?? 0) { reasons.append(.penaltyDecay) }
-        return Evaluation(tag: tag, score: finite(score), latency: finite(latency), evidenceCount: (node?.successCount ?? 0) + (node?.failureCount ?? 0), destinationSuccesses: destinationSuccesses, destinationFailures: destinationFailures, hardFailure: isHardIneligible(tag, at: time), isStale: stale || destinationIsStale, reasons: reasons)
+        return Evaluation(tag: tag, score: finite(score), latency: finite(latency), evidenceCount: (node?.successCount ?? 0) + (node?.failureCount ?? 0), destinationSuccesses: destinationSuccesses, destinationFailures: destinationFailures, hardFailure: isHardIneligible(tag, at: time), hasConflictingNodeEvidence: failures > 0 && (node?.successCount ?? 0) > 0, isStale: stale || destinationIsStale, reasons: reasons)
     }
 
     private func isHardIneligible(_ tag: String, at time: TimeInterval) -> Bool {
@@ -340,7 +348,7 @@ struct SmartPolicyEngine: Equatable, Sendable {
 
     private func shouldExplore(context: SmartPolicyContext, best: Evaluation) -> Bool {
         guard best.evidenceCount > 0 else { return false }
-        let value = mix(seed ^ stableHash(best.tag) ^ UInt64(bitPattern: Int64(context.now.rounded())))
+        let value = mix(seed ^ stableHash(best.tag) ^ context.now.rounded().bitPattern)
         return value % 100 < configuration.explorationRate
     }
 

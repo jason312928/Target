@@ -40,8 +40,6 @@ let package = Package(
                     "Profile/ProfileWorkspaceView.swift",
                     "Profile/ProfilePolicyWorkspaceView.swift",
                     "Profile/ProfileSiteRouteViews.swift",
-
-                    "Profile/SmartPolicyEngine.swift",
                 ],
                 sources: [
                     "Activity/RuntimeConnectionPresentation.swift",
@@ -60,6 +58,7 @@ let package = Package(
                     "Service/TargetServiceXPCProtocol.swift",
                     "Automation/TargetAutomationOperations.swift",
                     "Profile/ProfileModels.swift",
+                    "Profile/SmartPolicyEngine.swift",
                     "Profile/ProfileStore.swift",
                     "Profile/ProfileEncryptedStorage.swift",
                     "Profile/ProfileStorageCoordinator.swift",
@@ -86,9 +85,10 @@ let package = Package(
                     "Shared/TargetStatusLevel.swift",
                 ]),
         .testTarget(name: "TargetDomainTests", dependencies: ["Target", "TargetCore"], path: "TargetTests",
-                    exclude: ["AppShellRoutingTests.swift", "SmartPolicyEngineTests.swift", "TargetUpdateControllerTests.swift"],
+                    exclude: ["AppShellRoutingTests.swift", "TargetUpdateControllerTests.swift"],
                     sources: [
                     "DeepOptimizationTests.swift",
+                    "SmartPolicyEngineTests.swift",
                     "BackendArchitectureTests.swift",
                     "EngineLifecycleTests.swift",
                     "TargetRuntimeOperationsTests.swift",
