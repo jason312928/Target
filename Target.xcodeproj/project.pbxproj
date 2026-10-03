@@ -87,7 +87,6 @@
 		A10000000000000000000252 /* SmartPolicyEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000253 /* SmartPolicyEngineTests.swift */; };
 		A10000000000000000000256 /* SmartPolicyShadowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000257 /* SmartPolicyShadowTests.swift */; };
 		A10000000000000000000258 /* SmartPolicyApplyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000259 /* SmartPolicyApplyTests.swift */; };
-		A10000000000000000000258 /* SmartPolicyApplyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000259 /* SmartPolicyApplyTests.swift */; };
 		F00100000000000000000001 /* TargetPresentationTestHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000011 /* TargetPresentationTestHostApp.swift */; };
 		F00100000000000000000002 /* PresentationFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000012 /* PresentationFixture.swift */; };
 		F00100000000000000000003 /* PresentationLifecycleShim.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00100000000000000000013 /* PresentationLifecycleShim.swift */; };
