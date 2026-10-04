@@ -77,6 +77,21 @@ final class AutomationControlPlaneTests: XCTestCase {
         XCTAssertThrowsError(try TargetCtlCommandParser.parse(["policy", "list", "extra", "--json"]))
     }
 
+    func testTargetCtlProfileSelectParserRequiresIDOrNone() throws {
+        let id = UUID().uuidString
+        for value in [id, "none"] {
+            let parsed = try TargetCtlCommandParser.parse(["profile", "select", value, "--json"])
+            XCTAssertEqual(parsed.action, "profile.select")
+            XCTAssertEqual(parsed.arguments, ["id": value])
+        }
+        for arguments in [["profile", "select", id], ["profile", "select", "--json"],
+                          ["profile", "select", "invalid", "--json"],
+                          ["profile", "select", id, "extra", "--json"],
+                          ["profile", "select", "--id", id, "--json"]] {
+            XCTAssertThrowsError(try TargetCtlCommandParser.parse(arguments))
+        }
+    }
+
     func testTargetCtlPolicyResetParserRequiresExactArgumentFreeGrammar() throws {
         let parsed = try TargetCtlCommandParser.parse(["policy", "reset", "--json"])
         XCTAssertEqual(parsed.action, "policy.reset")
@@ -700,6 +715,56 @@ final class AutomationControlPlaneTests: XCTestCase {
         XCTAssertTrue(try store.configurationText(for: profiles[0].id).contains(secretFixture))
     }
 
+    func testProfileSelectionUsesSharedEncryptedStoreAndPreservesRunningEngine() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDirectory: root.appending(path: "Profiles"),
+                                 checker: AutomationPassingChecker(), keyProvider: TestProfileKeyProvider())
+        let first = try store.create(name: "Private first")
+        let second = try store.create(name: "Private second")
+        let backend = ProfileSelectionBackendSpy()
+        let operations = TargetAutomationOperations(profileStore: store, backend: backend)
+        for profile in [second, first] {
+            let response = await operations.handle(.init(protocolVersion: 1, action: "profile.select",
+                                                        arguments: ["id": profile.id.uuidString]))
+            XCTAssertTrue(response.ok)
+            XCTAssertEqual(response.result, .object(["id": .string(profile.id.uuidString.lowercased()), "selected": .boolean(true)]))
+            XCTAssertEqual(try store.selectedProfileID(), profile.id)
+            let reopened = ProfileStore(rootDirectory: root.appending(path: "Profiles"),
+                                        checker: AutomationPassingChecker(), keyProvider: TestProfileKeyProvider())
+            XCTAssertEqual(try reopened.selectedProfileID(), profile.id)
+            let output = String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self)
+            XCTAssertFalse(output.contains(profile.name))
+            XCTAssertFalse(output.contains(root.path))
+        }
+        let cleared = await operations.handle(.init(protocolVersion: 1, action: "profile.select", arguments: ["id": "none"]))
+        XCTAssertTrue(cleared.ok)
+        XCTAssertEqual(cleared.result, .object(["id": .null, "selected": .boolean(false)]))
+        XCTAssertNil(try store.selectedProfileID())
+        let calls = await backend.calls
+        XCTAssertEqual(calls, 0)
+        let capabilities = await operations.handle(.init(protocolVersion: 1, action: "capabilities"))
+        XCTAssertTrue(String(decoding: AutomationProtocol.encodeResponse(capabilities), as: UTF8.self).contains("profile.select"))
+    }
+
+    func testProfileSelectionRejectsInvalidAndMissingIDsWithoutChangingSelection() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ProfileStore(rootDirectory: root.appending(path: "Profiles"),
+                                 checker: AutomationPassingChecker(), keyProvider: TestProfileKeyProvider())
+        let profile = try store.create(name: "Existing")
+        try store.select(profile.id)
+        let operations = TargetAutomationOperations(profileStore: store, backend: MockBackend())
+        for arguments in [[:], ["id": "invalid"], ["id": "none", "file": "private-path"]] {
+            let response = await operations.handle(.init(protocolVersion: 1, action: "profile.select", arguments: arguments))
+            XCTAssertEqual(response.error?.code, "invalid_arguments")
+            XCTAssertEqual(try store.selectedProfileID(), profile.id)
+        }
+        let missing = await operations.handle(.init(protocolVersion: 1, action: "profile.select", arguments: ["id": UUID().uuidString]))
+        XCTAssertEqual(missing.error?.code, "profile_not_found")
+        XCTAssertEqual(try store.selectedProfileID(), profile.id)
+    }
+
     func testProfileSubscribeAutomationUsesSharedOperationAndReturnsSafeFacts() async throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -865,6 +930,14 @@ final class AutomationControlPlaneTests: XCTestCase {
 
 private struct AutomationPassingChecker: SingBoxConfigurationChecking {
     func check(configurationURL: URL) -> Result<Void, ConfigurationDiagnostic> { .success(()) }
+}
+
+private actor ProfileSelectionBackendSpy: EngineBackend {
+    private(set) var calls = 0
+    func queryStatus() async throws -> BackendStatus { calls += 1; var status = BackendStatus.mockDefault; status.engineState = .running; return status }
+    func validateConfiguration(_ request: XPCConfigurationRequest) async throws { calls += 1 }
+    func startEngine() async throws -> BackendStatus { calls += 1; return .mockDefault }
+    func stopEngine() async throws -> BackendStatus { calls += 1; return .mockDefault }
 }
 
 private struct AutomationSubscriptionFetcher: ProfileSubscriptionFetching {

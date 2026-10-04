@@ -39,6 +39,10 @@ public enum TargetCtlCommandParser {
            values[2] == "--file", values[4] == "--name" {
             return ("profile.import", ["file": values[3], "name": values[5]])
         }
+        if values.count == 3, values[0...1] == ["profile", "select"],
+           values[2] == "none" || UUID(uuidString: values[2]) != nil {
+            return ("profile.select", ["id": values[2]])
+        }
         if values.count == 6, values[0...1] == ["profile", "subscribe"],
            values[2] == "--name", values[4] == "--url-stdin", values[5] == "--confirm" {
             return ("profile.subscribe", ["name": values[3], "confirm": "true", "urlStdin": "true"])

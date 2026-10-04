@@ -90,6 +90,7 @@ actor TargetAutomationOperations {
             case "profile.subscribe": return try await profileSubscribe(request.arguments)
             case "profile.subscription-update": return try await profileSubscriptionUpdate(request.arguments)
             case "profile.list": return try profileList()
+            case "profile.select": return try profileSelect(request.arguments)
             case "policy.list": return try await policyList()
             case "policy.select": return try await policySelect(request.arguments)
             case "policy.probe": return try await policyProbe(request.arguments)
@@ -261,6 +262,22 @@ actor TargetAutomationOperations {
             ])
         }
         return .success(.object(["profiles": .array(profiles)]))
+    }
+
+    private func profileSelect(_ arguments: [String: String]) throws -> AutomationResponse {
+        guard Set(arguments.keys) == ["id"], let idText = arguments["id"] else {
+            return .failure(code: "invalid_arguments", message: "Profile selection requires a Profile ID or none.")
+        }
+        let id = UUID(uuidString: idText)
+        guard idText == "none" || id != nil else {
+            return .failure(code: "invalid_arguments", message: "Profile selection requires a Profile ID or none.")
+        }
+        try profileStore.select(id)
+        let selected = try profileStore.selectedProfileID()
+        return .success(.object([
+            "id": id.map { .string($0.uuidString.lowercased()) } ?? .null,
+            "selected": .boolean(id != nil && selected == id)
+        ]))
     }
 
     private func policyList() async throws -> AutomationResponse {
@@ -749,11 +766,11 @@ actor TargetAutomationOperations {
     }
 
     private static let commands = [
-        "capabilities", "status", "runtime.status", "smart.shadow", "smart.apply", "smart.continuity", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset", "route.list", "route.bind", "route.remove",
+        "capabilities", "status", "runtime.status", "smart.shadow", "smart.apply", "smart.continuity", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.select", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset", "route.list", "route.bind", "route.remove",
         "engine.status", "engine.start", "engine.stop", "connection.start", "connection.stop", "connection.restart", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
     ]
     private static let argumentFreeActions = Set(commands).subtracting([
-        "profile.import", "profile.subscribe", "profile.subscription-update", "profile.delete", "policy.select", "policy.probe", "route.bind", "route.remove"
+        "profile.import", "profile.subscribe", "profile.subscription-update", "profile.select", "profile.delete", "policy.select", "policy.probe", "route.bind", "route.remove"
     ])
 }
