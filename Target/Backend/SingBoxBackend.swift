@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeSnapshotProviding, RuntimeConnectionProviding, RuntimeLogProviding, SmartShadowRuntimeReading, SmartContinuityRuntimeReading {
+actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeSnapshotProviding, RuntimeConnectionProviding, RuntimeLogProviding, SmartShadowRuntimeReading, SmartContinuityRuntimeReading, SmartContinuityRuntimeClosing {
     static let applicationSupportDirectoryName = "Target"
     static let engineDirectoryName = "sing-box"
 
@@ -197,7 +197,7 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
             let converged = try await performLivePolicySelection(selectorTag: evidence.selector, outboundTag: outboundTag, descriptor: before.descriptor)
             guard converged, let after = await verifiedRuntimeControlMaterial(),
                   after.record == before.record, after.descriptor == before.descriptor else { return .refused(.mutationUnconfirmed) }
-            return .init(applied: true, after: outboundTag, reason: .applied)
+            return .init(applied: true, after: outboundTag, reason: .applied, runtimeIdentity: before.record)
         } catch {
             // A dispatched request can have taken effect even when its reply is
             // unavailable. Never retry or claim convergence in that situation.
@@ -387,6 +387,105 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         return .available(.init(identity: before.record, snapshot: snapshot, observedAt: .now))
     }
 
+    func closeContinuityConnection(_ request: SmartContinuityCloseRequest,
+                                   authorize: @escaping @Sendable (_ dispatch: @Sendable () -> Void) throws -> Void) async throws -> SmartContinuityCloseOutcome {
+        guard !policyMutationInProgress else { return .preserved("mutationInProgress") }
+        policyMutationInProgress = true
+        defer { policyMutationInProgress = false }
+        let receipt = request.receipt
+        let dispatchState = ContinuityCloseDispatchState()
+        guard receipt.oldOutbound != receipt.newOutbound,
+              receipt.identity == request.plan.evidence.identity,
+              request.plan.classifications[request.connection.id] == .replaceable,
+              SmartContinuityPlan.isRelevantOldConnection(request.connection, receipt: receipt) else {
+            return .preserved("unrelatedConnection")
+        }
+        do {
+            try Task.checkCancellation()
+            guard let before = await verifiedRuntimeControlMaterial(), before.record == receipt.identity else {
+                return .preserved("identityChanged")
+            }
+            // Validate the UUID before any destructive call. The client has no
+            // endpoint, path, method, close-all or caller-selected URL surface.
+            _ = try SingBoxRuntimeControlClient.makeConnectionCloseRequest(id: request.connection.id, descriptor: before.descriptor)
+            let expectedMembers = receipt.catalog.selectors.filter { $0.tag == receipt.selector }
+            guard expectedMembers.count == 1, expectedMembers[0].isMutable,
+                  let live = try await runtimeControlClient.selectors(using: before.descriptor)[receipt.selector],
+                  live.selected == receipt.newOutbound,
+                  Set(live.members) == Set(expectedMembers[0].members.map(\.tag)) else {
+                return .preserved("liveSelectionChanged")
+            }
+            guard let current = await verifiedRuntimeControlMaterial(), current.record == before.record,
+                  current.descriptor == before.descriptor else { return .preserved("identityChanged") }
+            guard try await runtimeControlClient.selectors(using: before.descriptor)[receipt.selector] == live,
+                  let confirmed = await verifiedRuntimeControlMaterial(), confirmed.record == before.record,
+                  confirmed.descriptor == before.descriptor else { return .preserved("liveSelectionChanged") }
+            // Connections is the last controller read before dispatch. Selector
+            // and asynchronous ownership reconciliation must not add another
+            // round trip after the candidate's final activity observation.
+            let snapshot = try await runtimeControlClient.connections(using: before.descriptor)
+            let observedAt = Date()
+            guard !snapshot.isTruncated,
+                  let connection = snapshot.connections.first(where: { $0.id == request.connection.id }),
+                  snapshot.connections.filter({ $0.id == request.connection.id }).count == 1 else {
+                return .preserved(snapshot.isTruncated ? "snapshotTruncated" : "connectionDisappeared")
+            }
+            let fresh = SmartContinuityEvidence(identity: before.record, snapshot: snapshot, observedAt: observedAt)
+            guard request.plan.permitsClose(connection, with: fresh, now: .now),
+                  SmartContinuityPlan.isRelevantOldConnection(connection, receipt: receipt) else {
+                return .preserved("connectionChanged")
+            }
+            try Task.checkCancellation()
+            let ownership = runtimeOwnership
+            let record = before.record
+            try await runtimeControlClient.closeConnection(id: connection.id, using: before.descriptor) { dispatch in
+                // This executes inside the client's final synchronous dispatch
+                // callback; lifecycle writes remain excluded by the backend lease.
+                guard ownership.currentRecord() == record, ownership.ownsProcess(record) else {
+                    throw ContinuityDispatchRefusal.identityChanged
+                }
+                let age = Date().timeIntervalSince(observedAt)
+                let planAge = Date().timeIntervalSince(request.plan.evidence.observedAt)
+                guard age.isFinite, planAge.isFinite,
+                      (0...SmartPolicyApplyOperations.maximumEvidenceAge).contains(age),
+                      (0...SmartPolicyApplyOperations.maximumEvidenceAge).contains(planAge) else {
+                    throw ContinuityDispatchRefusal.staleEvidence
+                }
+                try Task.checkCancellation()
+                try authorize {
+                    dispatchState.markDispatched()
+                    dispatch()
+                }
+            }
+            // sing-box returns 204 even when an ID was already absent. Confirm
+            // disappearance through the same verified runtime, never infer it
+            // from the status code or retry a possibly dispatched close.
+            guard let after = await verifiedRuntimeControlMaterial(), after.record == before.record,
+                  after.descriptor == before.descriptor,
+                  let remaining = await currentRuntimeSnapshot(), !remaining.isTruncated,
+                  !remaining.connections.contains(where: { $0.id == connection.id }),
+                  let final = await verifiedRuntimeControlMaterial(), final.record == before.record,
+                  final.descriptor == before.descriptor else { return .failed }
+            return .closed
+        } catch is CancellationError {
+            // Cancellation after dispatch cannot prove preservation: the peer
+            // may already have closed the connection before cancellation won.
+            return dispatchState.wasDispatched ? .failed : .cancelled
+        } catch ContinuityDispatchRefusal.identityChanged {
+            return .preserved("identityChanged")
+        } catch ContinuityDispatchRefusal.staleEvidence {
+            return .preserved("staleEvidence")
+        } catch PolicySelectionApplyRefusal.selectionChanged {
+            return dispatchState.wasDispatched ? .failed : .preserved("selectionChanged")
+        } catch PolicySelectionApplyRefusal.profileChanged {
+            return dispatchState.wasDispatched ? .failed : .preserved("profileChanged")
+        } catch RuntimeControlError.invalidDescriptor {
+            return dispatchState.wasDispatched ? .failed : .preserved("invalidConnectionID")
+        } catch {
+            return .failed
+        }
+    }
+
     func runtimeConnectionAvailability() async -> RuntimeObservationState {
         await runtimeObservationAvailability()
     }
@@ -427,6 +526,9 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
     }
 
     func installEngine() async throws -> BackendStatus {
+        guard !policyMutationInProgress else { throw BackendError.invalidLifecycleTransition }
+        policyMutationInProgress = true
+        defer { policyMutationInProgress = false }
         guard let installerURL = Bundle.main.url(forResource: "install_sing_box", withExtension: "sh") else {
             throw BackendError.engineInstallationFailed
         }
@@ -447,6 +549,9 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
     }
 
     func startEngine() async throws -> BackendStatus {
+        guard !policyMutationInProgress else { throw BackendError.invalidLifecycleTransition }
+        policyMutationInProgress = true
+        defer { policyMutationInProgress = false }
         try Task.checkCancellation()
         let disposition: EngineRuntimeRecordDisposition
         do {
@@ -512,6 +617,9 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
     }
 
     func stopEngine() async throws -> BackendStatus {
+        guard !policyMutationInProgress else { throw BackendError.invalidLifecycleTransition }
+        policyMutationInProgress = true
+        defer { policyMutationInProgress = false }
         guard let record = runtimeOwnership.currentRecord(), runtimeOwnership.ownsProcess(record) else {
             throw BackendError.invalidLifecycleTransition
         }
@@ -673,6 +781,15 @@ enum EngineRuntimeReadiness {
     static func startupFailure(processStillRunning: Bool) -> BackendError {
         processStillRunning ? .enginePortUnavailable : .engineLaunchFailed
     }
+}
+
+private enum ContinuityDispatchRefusal: Error { case identityChanged, staleEvidence }
+
+private final class ContinuityCloseDispatchState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var dispatched = false
+    var wasDispatched: Bool { lock.lock(); defer { lock.unlock() }; return dispatched }
+    func markDispatched() { lock.lock(); dispatched = true; lock.unlock() }
 }
 
 enum EngineRuntimeProfileState {

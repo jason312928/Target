@@ -430,7 +430,32 @@ struct PolicySelectionApplyResult: Equatable, Sendable {
     let applied: Bool
     let after: String?
     let reason: PolicySelectionApplyReason
+    // Internal dispatch authority; never serialized into automation output.
+    var runtimeIdentity: EngineRuntimeRecord? = nil
+    var receipt: PolicySelectionReceipt? = nil
     static func refused(_ reason: PolicySelectionApplyReason) -> Self { .init(applied: false, after: nil, reason: reason) }
+}
+
+struct PolicySelectionReceipt: Equatable, Sendable {
+    let identity: EngineRuntimeRecord
+    let catalog: PolicyCatalog
+    let generation: UInt64
+    let selector: String
+    let oldOutbound: String
+    let newOutbound: String
+}
+
+private final class PolicySelectionCommitCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var committed: (catalog: PolicyCatalog, generation: UInt64)?
+    func record(catalog: PolicyCatalog, generation: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        committed = (catalog, generation)
+    }
+    func read() -> (catalog: PolicyCatalog, generation: UInt64)? {
+        lock.lock(); defer { lock.unlock() }
+        return committed
+    }
 }
 
 enum RuntimeProxyHealthState: String, Codable, Equatable, Sendable {
@@ -730,12 +755,16 @@ protocol TargetPolicyOperating: Sendable {
     func probeLatency(selectorTag: String) async throws -> PolicyLatencyProbeResult
     func selectionGeneration() -> UInt64
     func selectIfUnchanged(evidence: PolicySelectionEvidence, outboundTag: String, generation: UInt64) async throws -> PolicySelectionApplyResult
+    func closeContinuityConnectionIfUnchanged(_ request: SmartContinuityCloseRequest) async throws -> SmartContinuityCloseOutcome
 }
 
 extension TargetPolicyOperating {
     func selectionGeneration() -> UInt64 { 0 }
     func selectIfUnchanged(evidence: PolicySelectionEvidence, outboundTag: String, generation: UInt64) async throws -> PolicySelectionApplyResult {
         .refused(.runtimeUnavailable)
+    }
+    func closeContinuityConnectionIfUnchanged(_ request: SmartContinuityCloseRequest) async throws -> SmartContinuityCloseOutcome {
+        .preserved("runtimeUnavailable")
     }
     func probeLatency(selectorTag: String) async throws -> PolicyLatencyProbeResult {
         throw TargetPolicyOperationError.selectorUnavailable
@@ -796,14 +825,48 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
         defer { endConditionalSelection() }
         guard let runtime = runtimeEvidenceProvider as? any RuntimePolicyApplying else { return .refused(.runtimeUnavailable) }
         try Task.checkCancellation()
-        return try await runtime.applyLivePolicySelectionIfUnchanged(evidence: evidence, outboundTag: outboundTag) { [self] in
+        let capture = PolicySelectionCommitCapture()
+        var outcome = try await runtime.applyLivePolicySelectionIfUnchanged(evidence: evidence, outboundTag: outboundTag) { [self] in
             mutationLock.lock()
             defer { mutationLock.unlock() }
             try profileStore.withSerializedAccess {
                 try Task.checkCancellation()
                 guard generation == expectedGeneration else { throw PolicySelectionApplyRefusal.selectionChanged }
                 guard try readPersisted() == evidence.catalog else { throw PolicySelectionApplyRefusal.profileChanged }
-                _ = try commitSelectionLocked(selectorTag: evidence.selector, outboundTag: outboundTag)
+                let committed = try commitSelectionLocked(selectorTag: evidence.selector, outboundTag: outboundTag)
+                capture.record(catalog: committed, generation: generation)
+            }
+        }
+        if outcome.applied, outcome.after == outboundTag,
+           let identity = outcome.runtimeIdentity, let committed = capture.read() {
+            outcome.receipt = .init(identity: identity, catalog: committed.catalog, generation: committed.generation,
+                                    selector: evidence.selector, oldOutbound: evidence.currentOutbound, newOutbound: outboundTag)
+        }
+        return outcome
+    }
+
+    func closeContinuityConnectionIfUnchanged(_ request: SmartContinuityCloseRequest) async throws -> SmartContinuityCloseOutcome {
+        guard beginConditionalSelection() else { return .preserved("mutationInProgress") }
+        defer { endConditionalSelection() }
+        guard let runtime = runtimeEvidenceProvider as? any SmartContinuityRuntimeClosing else { return .preserved("runtimeUnavailable") }
+        try Task.checkCancellation()
+        return try await runtime.closeContinuityConnection(request) { [self] dispatch in
+            mutationLock.lock()
+            defer { mutationLock.unlock() }
+            try profileStore.withSerializedAccess {
+                try Task.checkCancellation()
+                guard generation == request.receipt.generation else { throw PolicySelectionApplyRefusal.selectionChanged }
+                do {
+                    guard try readPersisted() == request.receipt.catalog,
+                          !EngineRuntimeProfileState.requiresRestart(record: request.receipt.identity,
+                                                                      selected: try profileStore.selectedValidVersion()) else {
+                        throw PolicySelectionApplyRefusal.profileChanged
+                    }
+                } catch is CancellationError { throw CancellationError() }
+                catch { throw PolicySelectionApplyRefusal.profileChanged }
+                // The verified client's actual resume occurs while both guards
+                // remain held. No lock is retained across an asynchronous wait.
+                dispatch()
             }
         }
     }

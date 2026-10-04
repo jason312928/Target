@@ -13,6 +13,7 @@ actor TargetAutomationOperations {
     private let shadowOperations: SmartPolicyShadowOperations
     private let smartApplyOperations: SmartPolicyApplyOperations
     private let continuityOperations: SmartContinuityOperations
+    private let continuityApplyOperations: SmartContinuityApplyOperations
     private let backend: any EngineBackend
     private let serviceClient: any SystemProxyClient
     private let systemProxyOperations: any TargetSystemProxyOperating
@@ -47,9 +48,14 @@ actor TargetAutomationOperations {
             runtime: (backend as? any SmartShadowRuntimeReading) ?? UnavailableSmartShadowRuntime()
         )
         self.shadowOperations = shadow
-        self.smartApplyOperations = SmartPolicyApplyOperations(evaluator: shadow, policy: resolvedPolicy)
-        self.continuityOperations = SmartContinuityOperations(
+        let smartApply = SmartPolicyApplyOperations(evaluator: shadow, policy: resolvedPolicy)
+        self.smartApplyOperations = smartApply
+        let continuity = SmartContinuityOperations(
             runtime: (backend as? any SmartContinuityRuntimeReading) ?? UnavailableSmartContinuityRuntime()
+        )
+        self.continuityOperations = continuity
+        self.continuityApplyOperations = SmartContinuityApplyOperations(
+            continuity: continuity, smartApply: smartApply, policy: resolvedPolicy
         )
         self.backend = backend
         self.serviceClient = serviceClient
@@ -85,6 +91,7 @@ actor TargetAutomationOperations {
             case "smart.shadow": return .success(try await shadowOperations.evaluate().automationJSON())
             case "smart.apply": return .success(await smartApplyOperations.apply().automationJSON())
             case "smart.continuity": return .success(await continuityOperations.evaluate().automationJSON())
+            case "smart.continuity.apply": return .success(await continuityApplyOperations.apply().automationJSON())
             case "runtime.status": return await runtimeStatus()
             case "profile.import": return try profileImport(request.arguments)
             case "profile.subscribe": return try await profileSubscribe(request.arguments)
@@ -766,7 +773,7 @@ actor TargetAutomationOperations {
     }
 
     private static let commands = [
-        "capabilities", "status", "runtime.status", "smart.shadow", "smart.apply", "smart.continuity", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.select", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset", "route.list", "route.bind", "route.remove",
+        "capabilities", "status", "runtime.status", "smart.shadow", "smart.apply", "smart.continuity", "smart.continuity.apply", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.select", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset", "route.list", "route.bind", "route.remove",
         "engine.status", "engine.start", "engine.stop", "connection.start", "connection.stop", "connection.restart", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
     ]

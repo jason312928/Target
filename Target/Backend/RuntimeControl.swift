@@ -48,6 +48,8 @@ protocol RuntimeControlClient: Sendable {
     func probeLatency(outbound: String, using descriptor: RuntimeControlDescriptor) async throws -> Int
     func connectionTotals(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionTotals
     func connections(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionsSnapshot
+    func closeConnection(id: String, using descriptor: RuntimeControlDescriptor,
+                         authorize: @escaping @Sendable (_ dispatch: @Sendable () -> Void) throws -> Void) async throws
 }
 
 struct RuntimeControlTimeoutPolicy: Equatable, Sendable {
@@ -82,11 +84,17 @@ extension RuntimeControlClient {
     func connections(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionsSnapshot {
         throw RuntimeControlError.unavailable
     }
+
+    func closeConnection(id: String, using descriptor: RuntimeControlDescriptor,
+                         authorize: @escaping @Sendable (_ dispatch: @Sendable () -> Void) throws -> Void) async throws {
+        throw RuntimeControlError.unavailable
+    }
 }
 
 /// Fixed-purpose, loopback-only client for sing-box's local Clash-compatible
 /// adapter. This is deliberately not a general HTTP client.
 actor SingBoxRuntimeControlClient: RuntimeControlClient {
+    static let maximumCloseResponseBytes = 4_096
     enum ProbePolicy {
         /// This fixed HTTPS endpoint matches the connectivity semantics used by
         /// the pinned sing-box URL tester. It is intentionally not configurable
@@ -160,6 +168,41 @@ actor SingBoxRuntimeControlClient: RuntimeControlClient {
     func connections(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionsSnapshot {
         let data = try await request(path: "/connections", method: "GET", descriptor: descriptor, body: nil)
         return try RuntimeConnectionsParser.parse(data)
+    }
+
+    func closeConnection(id: String, using descriptor: RuntimeControlDescriptor,
+                         authorize: @escaping @Sendable (_ dispatch: @Sendable () -> Void) throws -> Void) async throws {
+        let request = try Self.makeConnectionCloseRequest(id: id, descriptor: descriptor)
+        let receiver = BoundedConnectionCloseReceiver()
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let task = session.dataTask(with: request)
+                task.delegate = receiver
+                guard receiver.prepare(task: task, continuation: continuation) else { return }
+                do {
+                    try Task.checkCancellation()
+                    // The shared authorization holds its synchronous locks through
+                    // resume itself. No actor hop or await follows its final guard.
+                    try authorize { receiver.dispatch() }
+                    receiver.requireDispatch()
+                } catch {
+                    receiver.refuse(error)
+                }
+            }
+        } onCancel: {
+            receiver.cancel()
+        }
+    }
+
+    static func makeConnectionCloseRequest(id: String, descriptor: RuntimeControlDescriptor) throws -> URLRequest {
+        guard id.utf8.count == 36, let parsed = UUID(uuidString: id),
+              parsed.uuidString.lowercased() == id.lowercased(),
+              parsed != UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) else {
+            throw RuntimeControlError.invalidDescriptor
+        }
+        return try makeRequest(path: "/connections/\(escapedPathComponent(parsed.uuidString.lowercased()))",
+                               method: "DELETE", descriptor: descriptor, body: nil)
     }
 
     private func request(
@@ -359,6 +402,116 @@ enum RuntimeConnectionsParser {
 
     private static let fractionalDateStyle = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
     private static let dateStyle = Date.ISO8601FormatStyle()
+}
+
+/// A single fixed-purpose close response. It retains no controller body and
+/// cancels while streaming once the small response bound is exceeded.
+private final class BoundedConnectionCloseReceiver: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var task: URLSessionDataTask?
+    private var cancelled = false
+    private var dispatched = false
+    private var response: HTTPURLResponse?
+    private var receivedBytes = 0
+
+    func prepare(task: URLSessionDataTask, continuation: CheckedContinuation<Void, Error>) -> Bool {
+        lock.lock()
+        if cancelled {
+            lock.unlock()
+            task.cancel()
+            continuation.resume(throwing: CancellationError())
+            return false
+        }
+        self.task = task
+        self.continuation = continuation
+        lock.unlock()
+        return true
+    }
+
+    func dispatch() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled, !dispatched, continuation != nil else { return }
+        dispatched = true
+        task?.resume()
+    }
+
+    func requireDispatch() {
+        lock.lock()
+        let missing = !dispatched && !cancelled
+        lock.unlock()
+        if missing { refuse(RuntimeControlError.unavailable) }
+    }
+
+    func refuse(_ error: Error) {
+        lock.lock()
+        let task = task
+        lock.unlock()
+        finish(.failure(error))
+        task?.cancel()
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let task = task
+        lock.unlock()
+        finish(.failure(CancellationError()))
+        task?.cancel()
+    }
+
+    private func finish(_ result: Result<Void, Error>) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(with: result)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        guard let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel); refuse(RuntimeControlError.unavailable); return
+        }
+        guard response.expectedContentLength <= Int64(SingBoxRuntimeControlClient.maximumCloseResponseBytes) else {
+            completionHandler(.cancel); refuse(RuntimeControlError.malformedResponse); return
+        }
+        lock.lock()
+        self.response = http
+        lock.unlock()
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        receivedBytes += data.count
+        let exceeded = receivedBytes > SingBoxRuntimeControlClient.maximumCloseResponseBytes
+        lock.unlock()
+        if exceeded { refuse(RuntimeControlError.malformedResponse) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let response = response
+        let cancelled = cancelled
+        lock.unlock()
+        if cancelled { finish(.failure(CancellationError())); return }
+        if error != nil { finish(.failure(RuntimeControlError.unavailable)); return }
+        guard let response else { finish(.failure(RuntimeControlError.unavailable)); return }
+        switch response.statusCode {
+        case 204: finish(.success(()))
+        case 401, 403: finish(.failure(RuntimeControlError.selectionRejected))
+        case 300...399: finish(.failure(RuntimeControlError.redirectRefused))
+        default: finish(.failure(RuntimeControlError.unavailable))
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
 }
 
 final class RedirectRefusingDelegate: NSObject, URLSessionTaskDelegate {

@@ -62,6 +62,68 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(SingBoxRuntimeControlClient.makeSession().configuration.connectionProxyDictionary?.isEmpty, true)
     }
 
+    func testSingleConnectionCloseRequestHasFixedUUIDContract() throws {
+        let id = "A92B264D-42E6-4E1C-AF55-A7D960040A1B"
+        let request = try SingBoxRuntimeControlClient.makeConnectionCloseRequest(id: id, descriptor: runtimeDescriptor)
+        XCTAssertEqual(request.httpMethod, "DELETE")
+        XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:51234/connections/\(id.lowercased())")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer unit-test-secret-not-production")
+        XCTAssertNil(request.httpBody)
+        XCTAssertNil(request.url?.query)
+        for unsafe in ["", "/", "../connections", id + "/extra", "00000000-0000-0000-0000-000000000000"] {
+            XCTAssertThrowsError(try SingBoxRuntimeControlClient.makeConnectionCloseRequest(id: unsafe, descriptor: runtimeDescriptor))
+        }
+        XCTAssertThrowsError(try SingBoxRuntimeControlClient.makeConnectionCloseRequest(id: id, descriptor: .init(host: "localhost", port: 51_234, secret: "fixture")))
+    }
+
+    func testCloseAuthorizationRunsAtDispatchAndRefusalNeverSendsRequest() async throws {
+        let id = UUID().uuidString
+        let client = makeRuntimeControlClient(status: 204, body: Data())
+        do {
+            try await client.closeConnection(id: id, using: runtimeDescriptor) { _ in
+                throw PolicySelectionApplyRefusal.selectionChanged
+            }
+            XCTFail("Expected final authorization refusal")
+        } catch PolicySelectionApplyRefusal.selectionChanged {}
+        XCTAssertNil(RuntimeControlURLProtocol.lastRequest)
+        try await client.closeConnection(id: id, using: runtimeDescriptor) { dispatch in dispatch() }
+        XCTAssertEqual(RuntimeControlURLProtocol.lastRequest?.httpMethod, "DELETE")
+        XCTAssertEqual(RuntimeControlURLProtocol.lastRequest?.url?.path, "/connections/\(id.lowercased())")
+    }
+
+    func testCloseMissingDispatchFailsClosedAndCancellationNeverSends() async throws {
+        let client = makeRuntimeControlClient(status: 204, body: Data())
+        do {
+            try await client.closeConnection(id: UUID().uuidString, using: runtimeDescriptor) { _ in }
+            XCTFail("Expected missing dispatch refusal")
+        } catch let error as RuntimeControlError { XCTAssertEqual(error, .unavailable) }
+        XCTAssertNil(RuntimeControlURLProtocol.lastRequest)
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await client.closeConnection(id: UUID().uuidString, using: runtimeDescriptor) { dispatch in dispatch() }
+        }
+        do { try await cancelled.value; XCTFail("Expected cancellation") } catch is CancellationError {}
+        XCTAssertNil(RuntimeControlURLProtocol.lastRequest)
+    }
+
+    func testCloseRejectsAuthenticationRedirectFailureAndNonContractSuccess() async throws {
+        for (status, expected) in [(401, RuntimeControlError.selectionRejected), (403, .selectionRejected), (302, .redirectRefused), (404, .unavailable), (200, .unavailable)] {
+            let client = makeRuntimeControlClient(status: status, body: Data())
+            do {
+                try await client.closeConnection(id: UUID().uuidString, using: runtimeDescriptor) { dispatch in dispatch() }
+                XCTFail("Expected close response refusal")
+            } catch let error as RuntimeControlError { XCTAssertEqual(error, expected) }
+        }
+    }
+
+    func testCloseResponseBoundCancelsWithoutRetainingControllerBody() async throws {
+        let client = makeRuntimeControlClient(status: 200, body: Data(repeating: 65, count: SingBoxRuntimeControlClient.maximumCloseResponseBytes + 1))
+        do {
+            try await client.closeConnection(id: UUID().uuidString, using: runtimeDescriptor) { dispatch in dispatch() }
+            XCTFail("Expected bounded response refusal")
+        } catch let error as RuntimeControlError { XCTAssertEqual(error, .malformedResponse) }
+    }
+
     func testLatencyTimeoutPolicyIsBoundedAndOrdered() throws {
         let policy = SingBoxRuntimeControlClient.ProbePolicy.timeout
         XCTAssertTrue(policy.isValid)
@@ -856,6 +918,159 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         let snapshots = await client.snapshotCallCount(); XCTAssertEqual(snapshots, 0)
     }
 
+    func testContinuityCloseOnlyDispatchesVerifiedRelevantReplaceableAndConfirmsDisappearance() async throws {
+        let (fixture, policy, client, request) = try await makeContinuityCloseFixture()
+        let original = request.receipt.identity
+        let outcome = try await policy.closeContinuityConnectionIfUnchanged(request)
+        guard case .closed = outcome else { return XCTFail("Expected confirmed single-ID close") }
+        let closes = await client.closeCallCount(); XCTAssertEqual(closes, 1)
+        XCTAssertEqual(fixture.currentRuntimeRecord(), original)
+        let selected = try await client.selectors(using: runtimeDescriptor)["group"]?.selected
+        XCTAssertEqual(selected, "b")
+        let ids = await client.closedIDs(); XCTAssertEqual(ids, [request.connection.id])
+    }
+
+    func testContinuityClosePreservesProtectUnknownUnrelatedAndNewSelection() async throws {
+        for scenario in ["protect", "unknown", "unrelated", "newSelection"] {
+            let (_, policy, client, initial) = try await makeContinuityCloseFixture()
+            let chain = scenario == "unrelated" ? ["a", "other"] : scenario == "newSelection" ? ["b", "group"] : ["a", "group"]
+            let connection = continuityConnection(id: initial.connection.id, at: initial.plan.evidence.observedAt, chain: chain)
+            let plan = continuityPlan(identity: initial.receipt.identity, connection: connection,
+                                      observedAt: initial.plan.evidence.observedAt,
+                                      classification: scenario == "protect" ? .protect : scenario == "unknown" ? .unknown : nil)
+            await client.setSnapshot(plan.evidence.snapshot)
+            let result = try await policy.closeContinuityConnectionIfUnchanged(.init(plan: plan, connection: connection, receipt: initial.receipt))
+            guard case .preserved = result else { return XCTFail("Expected preservation: \(scenario)") }
+            let closes = await client.closeCallCount(); XCTAssertEqual(closes, 0, scenario)
+        }
+    }
+
+    func testContinuityFreshDisappearanceReuseActivityChainAndTruncationPreserve() async throws {
+        for scenario in ["disappeared", "reused", "activity", "chain", "truncated"] {
+            let (_, policy, client, initial) = try await makeContinuityCloseFixture()
+            let old = initial.connection
+            let changed = RuntimeConnection(id: old.id, destinationHost: old.destinationHost, destinationIP: old.destinationIP,
+                                            destinationPort: old.destinationPort, network: old.network, inbound: old.inbound,
+                                            outboundChain: scenario == "chain" ? ["a", "other", "group"] : old.outboundChain,
+                                            uploadBytes: scenario == "activity" ? 1 : old.uploadBytes, downloadBytes: old.downloadBytes,
+                                            startedAt: scenario == "reused" ? old.startedAt?.addingTimeInterval(1) : old.startedAt)
+            let values = scenario == "disappeared" ? [] : [changed]
+            await client.setSnapshot(.init(totals: .init(uploadTotalBytes: 0, downloadTotalBytes: 0,
+                                                       activeConnectionCount: scenario == "truncated" ? 2 : values.count), connections: values))
+            let result = try await policy.closeContinuityConnectionIfUnchanged(initial)
+            guard case .preserved = result else { return XCTFail("Expected preservation: \(scenario)") }
+            let closes = await client.closeCallCount(); XCTAssertEqual(closes, 0, scenario)
+        }
+    }
+
+    func testContinuityActivityDuringSecondSelectorReadIsObservedBeforeClose() async throws {
+        let (_, policy, client, request) = try await makeContinuityCloseFixture()
+        let selectorsBefore = await client.selectorCallCount()
+        await client.activateConnectionOnSelectorRead(after: 2)
+        let outcome = try await policy.closeContinuityConnectionIfUnchanged(request)
+        guard case .preserved(let reason) = outcome else { return XCTFail("New activity must preserve the candidate") }
+        XCTAssertEqual(reason, "connectionChanged")
+        let selectorsAfter = await client.selectorCallCount(); XCTAssertEqual(selectorsAfter - selectorsBefore, 2)
+        let closes = await client.closeCallCount(); XCTAssertEqual(closes, 0)
+    }
+
+    func testContinuityRuntimeIdentityAndProfileChangesPreserve() async throws {
+        for scenario in ["session", "start", "pid", "configuration", "profile", "revision", "generation", "route"] {
+            let (fixture, policy, client, request) = try await makeContinuityCloseFixture()
+            switch scenario {
+            case "session": fixture.replaceRuntimeConfigurationIdentity()
+            case "start", "pid": fixture.replaceRuntimeProcessIdentity(changePID: scenario == "pid")
+            case "configuration": fixture.removeRuntimeConfiguration()
+            case "profile":
+                let other = try fixture.profileStore.create(name: "Other")
+                try fixture.profileStore.save(json: policyConfiguration(configuredDefault: "a", members: ["a", "b"]), for: other.id)
+                try fixture.profileStore.select(other.id)
+            case "revision":
+                try fixture.profileStore.save(json: policyConfiguration(configuredDefault: "a", members: ["a", "b"]), for: request.receipt.identity.profileID)
+            case "generation":
+                _ = try await policy.select(selectorTag: "group", outboundTag: "a")
+                _ = try await policy.select(selectorTag: "group", outboundTag: "b")
+            default:
+                try fixture.profileStore.persistRouteBinding(profileID: request.receipt.identity.profileID,
+                                                           expectedRevision: request.receipt.identity.profileRevision,
+                                                           binding: try XCTUnwrap(.init(domain: "fixture.invalid", outboundTag: "a", countryCode: "US")))
+            }
+            let result = try await policy.closeContinuityConnectionIfUnchanged(request)
+            guard case .preserved = result else { return XCTFail("Expected preservation: \(scenario)") }
+            let closes = await client.closeCallCount(); XCTAssertEqual(closes, 0, scenario)
+        }
+    }
+
+    func testContinuityFinalDispatchGuardsCatchActorHopRuntimeAndProfileRaces() async throws {
+        for race in ["runtime", "profile"] {
+            let (fixture, policy, client, request) = try await makeContinuityCloseFixture()
+            await client.onNextClose {
+                if race == "runtime" { fixture.replaceRuntimeConfigurationIdentity() }
+                else { try? fixture.profileStore.select(nil) }
+            }
+            let outcome = try await policy.closeContinuityConnectionIfUnchanged(request)
+            guard case .preserved(let reason) = outcome else { return XCTFail("Expected dispatch guard preservation") }
+            XCTAssertEqual(reason, race == "runtime" ? "identityChanged" : "profileChanged")
+            let closes = await client.closeCallCount(); XCTAssertEqual(closes, 0)
+        }
+    }
+
+    func testContinuityCloseRequiresPost204DisappearanceAndNeverRetries() async throws {
+        let (_, policy, client, request) = try await makeContinuityCloseFixture()
+        await client.keepClosedConnections()
+        let result = try await policy.closeContinuityConnectionIfUnchanged(request)
+        guard case .failed = result else { return XCTFail("204 alone must not confirm close") }
+        let closes = await client.closeCallCount(); XCTAssertEqual(closes, 1)
+    }
+
+    func testContinuityCloseLeaseRejectsConcurrentMutationAndCancellationAfterDispatchIsUnconfirmed() async throws {
+        let (fixture, policy, client, request) = try await makeContinuityCloseFixture()
+        await client.gateNextClose()
+        let closing = Task { try await policy.closeContinuityConnectionIfUnchanged(request) }
+        await client.waitUntilClosing()
+        let concurrent = try await fixture.backend.closeContinuityConnection(request) { dispatch in dispatch() }
+        guard case .preserved(let reason) = concurrent else { return XCTFail("Expected lease refusal") }
+        XCTAssertEqual(reason, "mutationInProgress")
+        do { _ = try await fixture.backend.startEngine(); XCTFail("Expected lifecycle lease refusal") }
+        catch BackendError.invalidLifecycleTransition {}
+        closing.cancel()
+        await client.releaseClose()
+        let result = try await closing.value
+        guard case .failed = result else { return XCTFail("Dispatched cancellation must be unconfirmed") }
+        let closes = await client.closeCallCount(); XCTAssertEqual(closes, 1)
+    }
+
+    private func makeContinuityCloseFixture() async throws -> (RuntimePolicyProbeFixture, TargetPolicyOperations, ControlledRuntimeControlClient, SmartContinuityCloseRequest) {
+        let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a", "b"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+        let policy = TargetPolicyOperations(profileStore: fixture.profileStore, runtimeEvidenceProvider: fixture.backend)
+        let applied = try await policy.selectIfUnchanged(evidence: fixture.selectionEvidence(), outboundTag: "b", generation: 0)
+        let receipt = try XCTUnwrap(applied.receipt)
+        let time = Date().addingTimeInterval(-0.1)
+        let connection = continuityConnection(id: UUID().uuidString, at: time)
+        let plan = continuityPlan(identity: receipt.identity, connection: connection, observedAt: time)
+        XCTAssertEqual(plan.classifications[connection.id], .replaceable)
+        await client.setSnapshot(plan.evidence.snapshot)
+        return (fixture, policy, client, .init(plan: plan, connection: connection, receipt: receipt))
+    }
+
+    private func continuityConnection(id: String, at time: Date, chain: [String] = ["a", "group"]) -> RuntimeConnection {
+        .init(id: id, destinationHost: "fixture.invalid", destinationIP: nil, destinationPort: 80, network: "tcp", inbound: "mixed/local",
+              outboundChain: chain, uploadBytes: 0, downloadBytes: 0, startedAt: time.addingTimeInterval(-40))
+    }
+
+    private func continuityPlan(identity: EngineRuntimeRecord, connection: RuntimeConnection, observedAt: Date,
+                                classification: SmartContinuityClassification? = nil) -> SmartContinuityPlan {
+        let snapshot = RuntimeConnectionsSnapshot(totals: .init(uploadTotalBytes: 0, downloadTotalBytes: 0, activeConnectionCount: 1), connections: [connection])
+        var classifier = SmartContinuityClassifier()
+        var summary = SmartContinuitySummary.unavailable("warming")
+        for offset in [-30.0, -20, -10, 0] {
+            summary = classifier.observe(.init(identity: identity, snapshot: snapshot, observedAt: observedAt.addingTimeInterval(offset)))
+        }
+        return .init(evidence: .init(identity: identity, snapshot: snapshot, observedAt: observedAt), classifier: classifier,
+                     classifications: classification.map { [connection.id: $0] } ?? classifier.classifications, summary: summary)
+    }
+
     private func makeRuntimePolicyProbeFixture(
         members: [String],
         client: any RuntimeControlClient
@@ -1003,6 +1218,14 @@ private actor ControlledRuntimeControlClient: RuntimeControlClient {
     private var shouldGateSelection = false
     private var selectionGate: CheckedContinuation<Void, Never>?
     private var selectionWaiting: CheckedContinuation<Void, Never>?
+    private var snapshot: RuntimeConnectionsSnapshot?
+    private var closeReadAction: (@Sendable () -> Void)?
+    private var closes: [String] = []
+    private var removesClosedConnections = true
+    private var shouldGateClose = false
+    private var closeGate: CheckedContinuation<Void, Never>?
+    private var closeWaiting: CheckedContinuation<Void, Never>?
+    private var activateOnSelectorRead: Int?
 
 
     init(
@@ -1018,6 +1241,18 @@ private actor ControlledRuntimeControlClient: RuntimeControlClient {
     func selectors(using descriptor: RuntimeControlDescriptor) async throws -> [String: RuntimeSelectorState] {
         selectorCalls += 1
         if let selectorError { throw selectorError }
+        if selectorCalls == activateOnSelectorRead, let snapshot {
+            activateOnSelectorRead = nil
+            let connections = snapshot.connections.map { connection in
+                RuntimeConnection(id: connection.id, destinationHost: connection.destinationHost, destinationIP: connection.destinationIP,
+                                  destinationPort: connection.destinationPort, network: connection.network, inbound: connection.inbound,
+                                  outboundChain: connection.outboundChain, uploadBytes: (connection.uploadBytes ?? 0) + 1,
+                                  downloadBytes: connection.downloadBytes, startedAt: connection.startedAt)
+            }
+            self.snapshot = .init(totals: .init(uploadTotalBytes: snapshot.totals.uploadTotalBytes + 1,
+                                               downloadTotalBytes: snapshot.totals.downloadTotalBytes,
+                                               activeConnectionCount: snapshot.totals.activeConnectionCount), connections: connections)
+        }
         selectorReadAction?(); selectorReadAction = nil
         return ["group": .init(tag: "group", selected: selected ?? selectorMembers?.first ?? "node", members: selectorMembers ?? [])]
     }
@@ -1062,11 +1297,43 @@ private actor ControlledRuntimeControlClient: RuntimeControlClient {
     func selectionCallCount() -> Int { selectionCalls }
     func snapshotCallCount() -> Int { snapshotCalls }
     func onNextSnapshotRead(_ action: @escaping @Sendable () -> Void) { snapshotReadAction = action }
+    func setSnapshot(_ value: RuntimeConnectionsSnapshot) { snapshot = value }
+    func activateConnectionOnSelectorRead(after reads: Int) { activateOnSelectorRead = selectorCalls + reads }
+    func onNextClose(_ action: @escaping @Sendable () -> Void) { closeReadAction = action }
+    func closeCallCount() -> Int { closes.count }
+    func closedIDs() -> [String] { closes }
+    func keepClosedConnections() { removesClosedConnections = false }
+    func gateNextClose() { shouldGateClose = true }
+    func waitUntilClosing() async {
+        if closeGate != nil { return }
+        await withCheckedContinuation { closeWaiting = $0 }
+    }
+    func releaseClose() { closeGate?.resume(); closeGate = nil }
+    func closeConnection(id: String, using descriptor: RuntimeControlDescriptor,
+                         authorize: @escaping @Sendable (_ dispatch: @Sendable () -> Void) throws -> Void) async throws {
+        closeReadAction?(); closeReadAction = nil
+        let state = TestCloseDispatchState()
+        try authorize { state.markDispatched() }
+        guard state.wasDispatched else { throw RuntimeControlError.unavailable }
+        closes.append(id)
+        if shouldGateClose {
+            shouldGateClose = false
+            await withCheckedContinuation { closeGate = $0; closeWaiting?.resume(); closeWaiting = nil }
+        }
+        try Task.checkCancellation()
+        if removesClosedConnections, let snapshot {
+            let remaining = snapshot.connections.filter { $0.id != id }
+            self.snapshot = .init(totals: .init(uploadTotalBytes: snapshot.totals.uploadTotalBytes,
+                                              downloadTotalBytes: snapshot.totals.downloadTotalBytes,
+                                              activeConnectionCount: remaining.count), connections: remaining)
+        }
+    }
     func failSnapshots() { snapshotsFail = true }
     func connections(using descriptor: RuntimeControlDescriptor) async throws -> RuntimeConnectionsSnapshot {
         snapshotCalls += 1
         snapshotReadAction?(); snapshotReadAction = nil
         if snapshotsFail { throw RuntimeControlError.unavailable }
+        if let snapshot { return snapshot }
         return .init(totals: .init(uploadTotalBytes: 0, downloadTotalBytes: 0, activeConnectionCount: 0), connections: [])
     }
 
@@ -1107,6 +1374,19 @@ private final class RuntimePolicyProbeFixture: @unchecked Sendable {
         if let record = recordStore.current() { configurations.remove(id: record.runtimeConfigurationID) }
     }
     func clearRuntimeRecord() { try? recordStore.clear() }
+    func currentRuntimeRecord() -> EngineRuntimeRecord? { recordStore.current() }
+
+    func replaceRuntimeProcessIdentity(changePID: Bool) {
+        guard let current = recordStore.current() else { return }
+        recordStore.replace(.init(pid: changePID ? current.pid + 10_000 : current.pid,
+                                  executablePath: current.executablePath, executableFingerprint: current.executableFingerprint,
+                                  endpoint: current.endpoint, profileID: current.profileID, profileRevision: current.profileRevision,
+                                  sourceConfigurationFingerprint: current.sourceConfigurationFingerprint,
+                                  configurationFingerprint: current.configurationFingerprint,
+                                  startedAt: changePID ? current.startedAt : current.startedAt.addingTimeInterval(1),
+                                  runtimeConfigurationID: current.runtimeConfigurationID,
+                                  routeBindingsFingerprint: current.routeBindingsFingerprint))
+    }
 
     func replaceRuntimeConfigurationIdentity() {
         guard let current = recordStore.current() else { return }
@@ -1125,6 +1405,13 @@ private final class RuntimePolicyProbeFixture: @unchecked Sendable {
             runtimeConfigurationID: replacementID
         ))
     }
+}
+
+private final class TestCloseDispatchState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var dispatched = false
+    var wasDispatched: Bool { lock.lock(); defer { lock.unlock() }; return dispatched }
+    func markDispatched() { lock.lock(); dispatched = true; lock.unlock() }
 }
 
 private final class MutableEngineRuntimeStore: EngineRuntimeStoring, @unchecked Sendable {

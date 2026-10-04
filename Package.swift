@@ -94,6 +94,7 @@ let package = Package(
                     "SmartPolicyShadowTests.swift",
                     "SmartPolicyApplyTests.swift",
                     "SmartContinuityTests.swift",
+                    "SmartContinuityApplyTests.swift",
                     "BackendArchitectureTests.swift",
                     "EngineLifecycleTests.swift",
                     "TargetRuntimeOperationsTests.swift",

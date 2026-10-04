@@ -201,6 +201,7 @@ struct SmartPolicyApplyResult: Sendable {
     let applied: Bool
     let after: String?
     let reasonCode: String
+    var receipt: PolicySelectionReceipt? = nil
 
     func automationJSON() -> JSONValue {
         var fields: [String: JSONValue] = [
@@ -216,6 +217,10 @@ struct SmartPolicyApplyResult: Sendable {
         }
         return .object(fields)
     }
+}
+
+protocol SmartPolicyApplying: Sendable {
+    func apply() async -> SmartPolicyApplyResult
 }
 
 /// An explicit invocation evaluates once and may request one shared Policy write.
@@ -266,8 +271,10 @@ actor SmartPolicyApplyOperations {
             guard !value.keepCurrent else { return result("keepCurrent", value) }
             guard recommended != evidence.currentOutbound else { return result("alreadySelected", value) }
             let outcome = try await policy.selectIfUnchanged(evidence: evidence, outboundTag: recommended, generation: generation)
-            return .init(recommendation: value, applied: outcome.applied, after: outcome.after, reasonCode: outcome.reason.rawValue)
+            return .init(recommendation: value, applied: outcome.applied, after: outcome.after,
+                         reasonCode: outcome.reason.rawValue, receipt: outcome.receipt)
         } catch is CancellationError { return result("cancelled", recommendation) }
         catch { return result("operationUnavailable", recommendation) }
     }
 }
+extension SmartPolicyApplyOperations: SmartPolicyApplying {}

@@ -153,6 +153,19 @@ final class AutomationControlPlaneTests: XCTestCase {
         ]))
     }
 
+    func testContinuityApplyAcceptsOnlyTheExplicitAggregateCommand() throws {
+        let command = try TargetCtlCommandParser.parse(["smart", "continuity", "apply", "--json"])
+        XCTAssertEqual(command.action, "smart.continuity.apply")
+        XCTAssertEqual(command.arguments, [:])
+        for arguments in [
+            ["smart", "continuity", "apply"],
+            ["smart", "continuity", "apply", "private-id", "--json"],
+            ["smart", "continuity", "apply", "--url", "http://127.0.0.1", "--json"],
+            ["smart", "continuity", "close-all", "--json"],
+            ["smart", "continuity", "apply", "--method", "DELETE", "--json"]
+        ] { XCTAssertThrowsError(try TargetCtlCommandParser.parse(arguments)) }
+    }
+
     func testTargetCtlPolicyProbeParserRequiresExactSelector() throws {
         let parsed = try TargetCtlCommandParser.parse([
             "policy", "probe", "--selector", "group", "--json"
