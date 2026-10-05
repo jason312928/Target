@@ -607,6 +607,33 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
         )
     }
 
+    func testTrojanURIRejectsRealityFieldsWhilePreservingInsecureSemantics() throws {
+        for fields in ["pbk=fixture", "sid=fixture", "pbk=fixture&sid=fixture"] {
+            assertIntakeError(
+                .variantUnsupported,
+                "trojan://fixture-password@example.com:443?security=tls&\(fields)#Reality"
+            )
+            assertIntakeError(
+                .variantUnsupported,
+                "trojan://fixture-password@example.com:443?security=tls&insecure=true&\(fields)#Reality%20Insecure"
+            )
+        }
+
+        let insecure = try SubscriptionNormalizer().normalize(Data(
+            "trojan://fixture-password@example.com:443?security=tls&insecure=true#Trojan%20Insecure".utf8
+        ))
+        XCTAssertEqual((try generatedOutbounds(insecure.data)[1]["tls"] as? [String: Any])?["insecure"] as? Bool, true)
+
+        assertIntakeError(
+            .variantUnsupported,
+            "vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&pbk=fixture#VLESS%20Reality"
+        )
+        assertIntakeError(
+            .variantUnsupported,
+            "vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&sid=fixture#VLESS%20Reality"
+        )
+    }
+
     func testURIListAndBase64URIListKeepTLSVerificationPerOutbound() throws {
         let list = [
             "vless://11111111-1111-4111-8111-111111111111@one.example.com:443?security=tls&insecure=true#Insecure",

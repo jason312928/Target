@@ -341,7 +341,10 @@ struct SubscriptionNormalizer: Sendable {
             throw SubscriptionIntakeError.payloadInvalid
         }
         let query = queryMap(components)
-        guard let insecure = uriTLSInsecure(query) else { throw SubscriptionIntakeError.variantUnsupported }
+        guard query["pbk"] == nil, query["sid"] == nil,
+              let insecure = uriTLSInsecure(query) else {
+            throw SubscriptionIntakeError.variantUnsupported
+        }
         let network = query["type"] ?? "tcp"
         let security = query["security"] ?? "tls"
         guard ["tcp", "ws"].contains(network), security == "tls" else {
