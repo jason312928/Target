@@ -309,6 +309,11 @@ struct SmartApplicationResult: Equatable, Sendable {
         preservedConnectionCount = result.preservedConnectionCount
         if result.failedCloseCount > 0 {
             reasonCode = "closeFailed"
+        } else if result.reasonCodes.contains("cancelled") {
+            // A cancellation may arrive after one or more closes have already
+            // succeeded. Preserve the aggregate counts, but keep the UI from
+            // presenting the partial operation as a completed apply.
+            reasonCode = "cancelled"
         } else if result.closedConnectionCount > 0 {
             reasonCode = "completed"
         } else if let reason = Self.continuityPresentationReason(in: result.reasonCodes) {

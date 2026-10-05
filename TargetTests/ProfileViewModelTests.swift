@@ -272,6 +272,29 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(completed.reasonCode, "completed")
         XCTAssertEqual(SmartApplicationPresentation(result: completed).symbolName, "checkmark.circle.fill")
 
+        let cancelledAfterPartialClose = SmartApplicationResult(
+            action: .continuityApply,
+            result: continuityResult(
+                reason: "cancelled", selectorApplied: true, eligible: 3,
+                closed: 1, preserved: 2, failed: 0
+            )
+        )
+        let cancelledPresentation = SmartApplicationPresentation(result: cancelledAfterPartialClose)
+        XCTAssertEqual(cancelledAfterPartialClose.reasonCode, "cancelled")
+        XCTAssertEqual(cancelledPresentation.messageKey, "policy.smart.result.cancelled")
+        XCTAssertEqual(cancelledPresentation.symbolName, "xmark.circle")
+        XCTAssertEqual(cancelledAfterPartialClose.closedConnectionCount, 1)
+        XCTAssertEqual(cancelledAfterPartialClose.preservedConnectionCount, 2)
+
+        let failedAfterPartialClose = SmartApplicationResult(
+            action: .continuityApply,
+            result: continuityResult(
+                reason: "cancelled", selectorApplied: true, eligible: 3,
+                closed: 1, preserved: 1, failed: 1
+            )
+        )
+        XCTAssertEqual(failedAfterPartialClose.reasonCode, "closeFailed")
+
         // A non-presentation reason must never turn a failed selector apply into
         // a misleading preserved/no-eligible outcome.
         let unavailable = SmartApplicationResult(
