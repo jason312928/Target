@@ -26,6 +26,8 @@ struct EngineRuntimeRecord: Codable, Equatable, Sendable {
     let sourceConfigurationFingerprint: String
     let configurationFingerprint: String
     let startedAt: Date
+    /// Kernel-reported process start time, used to reject reused PIDs.
+    var processStartedAt: Date? = nil
     let runtimeConfigurationID: UUID
     var routeBindingsFingerprint: String? = nil
 
@@ -210,6 +212,11 @@ final class FileEngineRuntimeStore: EngineRuntimeStoring, @unchecked Sendable {
 
 protocol EngineProcessInspecting: Sendable {
     func matches(pid: Int32, executablePath: String) -> Bool
+    func processStartTime(pid: Int32) -> Date?
+}
+
+extension EngineProcessInspecting {
+    func processStartTime(pid: Int32) -> Date? { nil }
 }
 
 struct DarwinEngineProcessInspector: EngineProcessInspecting {
@@ -220,6 +227,18 @@ struct DarwinEngineProcessInspector: EngineProcessInspecting {
         let actual = URL(fileURLWithPath: String(cString: buffer)).resolvingSymlinksInPath().path
         let expected = URL(fileURLWithPath: executablePath).resolvingSymlinksInPath().path
         return actual == expected
+    }
+
+    func processStartTime(pid: Int32) -> Date? {
+        guard pid > 0 else { return nil }
+        var info = proc_bsdinfo()
+        let result = proc_pidinfo(
+            pid_t(pid), PROC_PIDTBSDINFO, 0, &info,
+            Int32(MemoryLayout<proc_bsdinfo>.size)
+        )
+        guard result == Int32(MemoryLayout<proc_bsdinfo>.size) else { return nil }
+        let value = TimeInterval(info.pbi_start_tvsec) + TimeInterval(info.pbi_start_tvusec) / 1_000_000
+        return value.isFinite ? Date(timeIntervalSince1970: value) : nil
     }
 }
 
@@ -320,9 +339,7 @@ final class EngineRuntimeOwnership: @unchecked Sendable {
     func recordDisposition() async throws -> EngineRuntimeRecordDisposition {
         guard let record = try store.load() else { return .noRecord }
         guard processExists(record.pid) else { return .processExited(record) }
-        guard record.isValid,
-              processInspector.matches(pid: record.pid, executablePath: record.executablePath),
-              executableFingerprintMatches(record),
+        guard ownsProcess(record),
               await portProbe.isListening(on: record.endpoint.port) else {
             return .liveUnproven(record)
         }
@@ -337,8 +354,13 @@ final class EngineRuntimeOwnership: @unchecked Sendable {
     func ownedEndpoint() async -> LocalEngineEndpoint? { await ownedRecord()?.endpoint }
 
     func ownsProcess(_ record: EngineRuntimeRecord) -> Bool {
-        record.isValid && processInspector.matches(pid: record.pid, executablePath: record.executablePath)
-            && executableFingerprintMatches(record)
+        guard record.isValid,
+              processInspector.matches(pid: record.pid, executablePath: record.executablePath),
+              executableFingerprintMatches(record) else { return false }
+        guard let expected = record.processStartedAt else { return true }
+        guard let actual = processInspector.processStartTime(pid: record.pid) else { return false }
+        let delta = actual.timeIntervalSince(expected)
+        return delta.isFinite && abs(delta) <= 0.001
     }
 
     func recordLaunchedProcess(
@@ -363,6 +385,7 @@ final class EngineRuntimeOwnership: @unchecked Sendable {
             sourceConfigurationFingerprint: sourceConfigurationFingerprint,
             configurationFingerprint: configurationFingerprint,
             startedAt: Date(),
+            processStartedAt: processInspector.processStartTime(pid: pid),
             runtimeConfigurationID: runtimeConfigurationID,
             routeBindingsFingerprint: routeBindingsFingerprint
         )

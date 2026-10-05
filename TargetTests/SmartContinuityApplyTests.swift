@@ -50,8 +50,23 @@ final class SmartContinuityApplyTests: XCTestCase, ProfileTestCaseSupport {
     private func applying(_ plan: SmartContinuityPlan, policy: ContinuityApplyPolicySpy,
                           selection: SmartPolicyApplyResult? = nil, time: TimeInterval = 31) -> SmartContinuityApplyOperations {
         let fixed = epoch.addingTimeInterval(time)
+        let authority = receipt()
+        let defaultRecommendation = SmartShadowRecommendation(
+            state: "available", observedAt: epoch, selector: authority.selector,
+            currentOutbound: authority.oldOutbound, recommendedOutbound: authority.newOutbound,
+            confidence: .high, keepCurrent: false, reasonCodes: [], candidateCount: 2,
+            connectionSnapshotAvailable: true,
+            selectionEvidence: .init(catalog: authority.catalog,
+                                     sessionID: identity.runtimeConfigurationID,
+                                     selector: authority.selector,
+                                     currentOutbound: authority.oldOutbound,
+                                     observedAt: epoch))
         return .init(continuity: ContinuityPlanSpy(plan),
-                     smartApply: ContinuitySelectorSpy(selection ?? .init(recommendation: nil, applied: true, after: "b", reasonCode: "applied", receipt: receipt())),
+                     smartApply: ContinuitySelectorSpy(selection ?? .init(recommendation: defaultRecommendation,
+                                                                            applied: true,
+                                                                            after: authority.newOutbound,
+                                                                            reasonCode: "applied",
+                                                                            receipt: authority)),
                      policy: policy, clock: { fixed })
     }
 
@@ -145,6 +160,23 @@ final class SmartContinuityApplyTests: XCTestCase, ProfileTestCaseSupport {
             XCTAssertEqual(result.closedConnectionCount, 0)
             XCTAssertTrue(policy.ids.isEmpty)
         }
+    }
+
+    func testCancellationWhilePreparingPlanIsReportedAsCancelled() async {
+        let gate = NilPlanGate()
+        let fixed = epoch
+        let operation = SmartContinuityApplyOperations(
+            continuity: WaitingNilPlanSpy(gate: gate),
+            smartApply: ContinuitySelectorSpy(.init(recommendation: nil, applied: false, after: nil, reasonCode: "keepCurrent")),
+            policy: ContinuityApplyPolicySpy(),
+            clock: { fixed })
+        let task = Task { await operation.apply() }
+        await Task.yield()
+        task.cancel()
+        await gate.release()
+        let result = await task.value
+        XCTAssertTrue(result.reasonCodes.contains("cancelled"))
+        XCTAssertFalse(result.reasonCodes.contains("runtimeUnavailable"))
     }
 
     func testCloseFailureAndCancellationStopLaterClosesWithoutRollbackClaim() async {
@@ -250,6 +282,29 @@ private struct ContinuityPlanSpy: SmartContinuityPlanning {
     let value: SmartContinuityPlan
     init(_ value: SmartContinuityPlan) { self.value = value }
     func preparePlan() async -> SmartContinuityPlan? { value }
+}
+private actor NilPlanGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private struct WaitingNilPlanSpy: SmartContinuityPlanning {
+    let gate: NilPlanGate
+
+    func preparePlan() async -> SmartContinuityPlan? {
+        await gate.wait()
+        return nil
+    }
 }
 private struct ContinuitySelectorSpy: SmartPolicyApplying {
     let value: SmartPolicyApplyResult

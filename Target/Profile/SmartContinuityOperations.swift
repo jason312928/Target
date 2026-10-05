@@ -336,7 +336,9 @@ actor SmartContinuityApplyOperations {
         defer { applying = false }
         do {
             try Task.checkCancellation()
-            guard let plan = await continuity.preparePlan() else { return result("runtimeUnavailable") }
+            guard let plan = await continuity.preparePlan() else {
+                return result(Task.isCancelled ? "cancelled" : "runtimeUnavailable")
+            }
             observed = plan.summary.observedConnectionCount
             protect = plan.summary.protectCount; unknown = plan.summary.unknownCount; replaceable = plan.summary.replaceableCount
             try Task.checkCancellation()
@@ -344,7 +346,21 @@ actor SmartContinuityApplyOperations {
             selectorApplied = selection.applied
             try Task.checkCancellation()
             guard selection.applied else { return result(selection.reasonCode) }
-            guard let receipt = selection.receipt, selection.after == receipt.newOutbound,
+            guard let recommendation = selection.recommendation,
+                  recommendation.state == "available",
+                  let recommendationSelector = recommendation.selector,
+                  let recommendationCurrent = recommendation.currentOutbound,
+                  let recommendationRecommended = recommendation.recommendedOutbound,
+                  let recommendationEvidence = recommendation.selectionEvidence,
+                  recommendationSelector == recommendationEvidence.selector,
+                  recommendationCurrent == recommendationEvidence.currentOutbound,
+                  !recommendation.keepCurrent,
+                  recommendation.confidence != .low,
+                  let receipt = selection.receipt,
+                  recommendationRecommended == receipt.newOutbound,
+                  recommendationCurrent == receipt.oldOutbound,
+                  recommendationSelector == receipt.selector,
+                  selection.after == receipt.newOutbound,
                   receipt.identity == plan.evidence.identity else { return result("selectionUnconfirmed") }
             guard !plan.evidence.snapshot.isTruncated else { return result("snapshotTruncated") }
             let age = clock().timeIntervalSince(plan.evidence.observedAt)

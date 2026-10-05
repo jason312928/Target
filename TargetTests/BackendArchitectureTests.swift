@@ -240,6 +240,27 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertNil(endpoint)
     }
 
+    func testOwnedRuntimeRejectsReusedPIDWhenProcessStartTimeChanges() async throws {
+        let directory = try temporaryDirectory()
+        let executable = directory.appending(path: "sing-box")
+        try Data("runtime".utf8).write(to: executable)
+        let expected = Date(timeIntervalSince1970: 1_700_000_000)
+        let record = EngineRuntimeRecord(
+            pid: 42, executablePath: executable.path,
+            executableFingerprint: try EngineExecutableFingerprint.sha256(of: executable),
+            endpoint: .init(port: 51_234), profileID: UUID(), profileRevision: 1,
+            sourceConfigurationFingerprint: "source", configurationFingerprint: "runtime",
+            startedAt: expected, processStartedAt: expected, runtimeConfigurationID: UUID())
+        let ownership = EngineRuntimeOwnership(
+            store: FixedEngineRuntimeStore(record: record),
+            processInspector: FixedEngineProcessInspector(shouldMatch: true,
+                                                           processStartTime: expected.addingTimeInterval(1)),
+            portProbe: FixedEnginePortProbe(listening: true))
+        XCTAssertFalse(ownership.ownsProcess(record))
+        let endpoint = await ownership.ownedEndpoint()
+        XCTAssertNil(endpoint)
+    }
+
     func testCrossUIDRuntimeStoreAcceptsOnlyFixedOwnedRuntime() throws {
         let fixture = try CrossUIDRuntimeFixture()
         defer { fixture.remove() }
@@ -927,8 +948,10 @@ private final class CrossUIDRuntimeFixture {
 
 private struct FixedEngineProcessInspector: EngineProcessInspecting {
     let shouldMatch: Bool
+    var processStartTime: Date? = nil
 
     func matches(pid: Int32, executablePath: String) -> Bool { shouldMatch }
+    func processStartTime(pid: Int32) -> Date? { processStartTime }
 }
 
 private struct FixedEnginePortProbe: LocalEnginePortProbing {
