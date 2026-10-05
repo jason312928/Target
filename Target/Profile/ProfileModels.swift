@@ -438,6 +438,11 @@ struct PolicySelectionApplyResult: Equatable, Sendable {
 
 struct PolicySelectionReceipt: Equatable, Sendable {
     let identity: EngineRuntimeRecord
+    /// The catalog that was observed by the selector before committing the
+    /// override. This is the authority for matching recommendation evidence.
+    let preSelectionCatalog: PolicyCatalog
+    /// The catalog read after the override was persisted. This remains the
+    /// post-selection authority for close dispatch revalidation.
     let catalog: PolicyCatalog
     let generation: UInt64
     let selector: String
@@ -839,7 +844,8 @@ final class TargetPolicyOperations: TargetPolicyOperating, @unchecked Sendable {
         }
         if outcome.applied, outcome.after == outboundTag,
            let identity = outcome.runtimeIdentity, let committed = capture.read() {
-            outcome.receipt = .init(identity: identity, catalog: committed.catalog, generation: committed.generation,
+            outcome.receipt = .init(identity: identity, preSelectionCatalog: evidence.catalog,
+                                    catalog: committed.catalog, generation: committed.generation,
                                     selector: evidence.selector, oldOutbound: evidence.currentOutbound, newOutbound: outboundTag)
         }
         return outcome

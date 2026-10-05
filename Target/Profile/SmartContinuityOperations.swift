@@ -357,7 +357,7 @@ actor SmartContinuityApplyOperations {
                   !recommendation.keepCurrent,
                   recommendation.confidence != .low,
                   let receipt = selection.receipt,
-                  recommendationEvidence.catalog == receipt.catalog,
+                  recommendationEvidence.catalog == receipt.preSelectionCatalog,
                   recommendationEvidence.sessionID == receipt.identity.runtimeConfigurationID,
                   recommendationEvidence.observedAt == recommendation.observedAt,
                   recommendationRecommended == receipt.newOutbound,

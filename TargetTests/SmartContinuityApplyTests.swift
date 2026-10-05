@@ -24,7 +24,8 @@ final class SmartContinuityApplyTests: XCTestCase, ProfileTestCaseSupport {
               observedAt: epoch.addingTimeInterval(offset))
     }
 
-    private func plan(_ connections: [RuntimeConnection], activeIDs: Set<String> = [], truncated: Bool = false) -> SmartContinuityPlan {
+    private func plan(_ connections: [RuntimeConnection], activeIDs: Set<String> = [], truncated: Bool = false,
+                      record: EngineRuntimeRecord? = nil) -> SmartContinuityPlan {
         var classifier = SmartContinuityClassifier()
         var last: SmartContinuityEvidence!
         var summary: SmartContinuitySummary!
@@ -33,17 +34,19 @@ final class SmartContinuityApplyTests: XCTestCase, ProfileTestCaseSupport {
                 activeIDs.contains(value.id) ? flow(value.id, chain: value.outboundChain, download: Int64(time) * 1_024,
                                                     start: value.startedAt) : value
             }
-            last = evidence(values, at: time, truncated: truncated)
+            last = evidence(values, at: time, record: record, truncated: truncated)
             summary = classifier.observe(last)
         }
         return .init(evidence: last, classifier: classifier, classifications: classifier.classifications, summary: summary)
     }
 
     private func receipt(record: EngineRuntimeRecord? = nil, generation: UInt64 = 1) -> PolicySelectionReceipt {
-        let catalog = PolicyCatalogParser.parse(Data(policyConfiguration(configuredDefault: "a", members: ["a", "b"]).utf8),
-                                               profileID: identity.profileID, profileRevision: 1,
-                                               overrides: ["group": "b"])
-        return .init(identity: record ?? identity, catalog: catalog, generation: generation,
+        let preSelectionCatalog = PolicyCatalogParser.parse(Data(policyConfiguration(configuredDefault: "a", members: ["a", "b"]).utf8),
+                                                            profileID: identity.profileID, profileRevision: 1)
+        let committedCatalog = PolicyCatalogParser.parse(Data(policyConfiguration(configuredDefault: "a", members: ["a", "b"]).utf8),
+                                                          profileID: identity.profileID, profileRevision: 1,
+                                                          overrides: ["group": "b"])
+        return .init(identity: record ?? identity, preSelectionCatalog: preSelectionCatalog, catalog: committedCatalog, generation: generation,
                      selector: "group", oldOutbound: "a", newOutbound: "b")
     }
 
@@ -56,7 +59,7 @@ final class SmartContinuityApplyTests: XCTestCase, ProfileTestCaseSupport {
             currentOutbound: authority.oldOutbound, recommendedOutbound: authority.newOutbound,
             confidence: .high, keepCurrent: false, reasonCodes: [], candidateCount: 2,
             connectionSnapshotAvailable: true,
-            selectionEvidence: .init(catalog: authority.catalog,
+            selectionEvidence: .init(catalog: authority.preSelectionCatalog,
                                      sessionID: identity.runtimeConfigurationID,
                                      selector: authority.selector,
                                      currentOutbound: authority.oldOutbound,
@@ -162,6 +165,31 @@ final class SmartContinuityApplyTests: XCTestCase, ProfileTestCaseSupport {
         }
     }
 
+    func testMismatchedPreSelectionRecommendationAndReceiptNeverCloses() async {
+        let authority = receipt()
+        let recommendation = SmartShadowRecommendation(
+            state: "available", observedAt: epoch, selector: authority.selector,
+            currentOutbound: authority.oldOutbound, recommendedOutbound: authority.newOutbound,
+            confidence: .high, keepCurrent: false, reasonCodes: [], candidateCount: 2,
+            connectionSnapshotAvailable: true,
+            selectionEvidence: .init(catalog: authority.catalog,
+                                     sessionID: authority.identity.runtimeConfigurationID,
+                                     selector: authority.selector, currentOutbound: authority.oldOutbound,
+                                     observedAt: epoch))
+        let policy = ContinuityApplyPolicySpy()
+        let fixed = epoch.addingTimeInterval(1)
+        let operation = SmartContinuityApplyOperations(
+            continuity: ContinuityPlanSpy(plan([flow()])),
+            smartApply: ContinuitySelectorSpy(.init(recommendation: recommendation, applied: true,
+                                                    after: authority.newOutbound, reasonCode: "applied",
+                                                    receipt: authority)),
+            policy: policy, clock: { fixed })
+        let result = await operation.apply()
+        XCTAssertEqual(result.closedConnectionCount, 0)
+        XCTAssertTrue(policy.ids.isEmpty)
+        XCTAssertTrue(result.reasonCodes.contains("selectionUnconfirmed"))
+    }
+
     func testCancellationWhilePreparingPlanIsReportedAsCancelled() async {
         let gate = NilPlanGate()
         let fixed = epoch
@@ -243,6 +271,8 @@ final class SmartContinuityApplyTests: XCTestCase, ProfileTestCaseSupport {
                 selector: "group", currentOutbound: "a", observedAt: .now), outboundTag: "b", generation: policy.selectionGeneration())
             let receipt = try XCTUnwrap(selection.receipt)
             XCTAssertEqual(receipt.generation, 1)
+            XCTAssertNotEqual(receipt.preSelectionCatalog, receipt.catalog)
+            XCTAssertEqual(receipt.preSelectionCatalog, catalog)
             XCTAssertEqual(receipt.catalog, try policy.readPersisted())
             XCTAssertEqual(receipt.identity, record)
             if race == "manual" { _ = try await policy.select(selectorTag: "group", outboundTag: "a"); _ = try await policy.select(selectorTag: "group", outboundTag: "b") }
@@ -258,6 +288,43 @@ final class SmartContinuityApplyTests: XCTestCase, ProfileTestCaseSupport {
             XCTAssertEqual(dispatched, race == "none" ? 1 : 0, race)
             if case .closed = outcome { XCTAssertEqual(race, "none") }
         }
+    }
+
+    func testAtoBTransitionUsesPreSelectionAuthorityAndClosesEligibleOldConnection() async throws {
+        let store = try makeStore()
+        let profile = try store.create(name: "Synthetic")
+        try store.save(json: policyConfiguration(configuredDefault: "a", members: ["a", "b"]), for: profile.id)
+        let version = try store.selectedValidVersion()
+        let record = EngineRuntimeRecord(pid: 1, executablePath: "/synthetic/engine", executableFingerprint: "fixture",
+            endpoint: .init(port: 51_234), profileID: profile.id, profileRevision: version.revision,
+            sourceConfigurationFingerprint: TargetConfigurationFingerprint.sha256(version.data),
+            configurationFingerprint: "runtime", startedAt: epoch, runtimeConfigurationID: UUID())
+        let runtime = ReceiptRuntimeSpy(record: record)
+        let policy = TargetPolicyOperations(profileStore: store, runtimeEvidenceProvider: runtime)
+        let preSelectionCatalog = try policy.readPersisted()
+        let recommendation = SmartShadowRecommendation(
+            state: "available", observedAt: epoch, selector: "group", currentOutbound: "a",
+            recommendedOutbound: "b", confidence: .high, keepCurrent: false, reasonCodes: [], candidateCount: 2,
+            connectionSnapshotAvailable: true,
+            selectionEvidence: .init(catalog: preSelectionCatalog, sessionID: record.runtimeConfigurationID,
+                                     selector: "group", currentOutbound: "a", observedAt: epoch))
+        let continuityPlan = plan([flow()], record: record)
+        let fixed = epoch
+        let applyFixed = epoch.addingTimeInterval(31)
+        let operation = SmartContinuityApplyOperations(
+            continuity: ContinuityPlanSpy(continuityPlan),
+            smartApply: SmartPolicyApplyOperations(evaluator: ContinuityRecommendationSpy(recommendation),
+                                                    policy: policy, clock: { fixed }),
+            policy: policy, clock: { applyFixed })
+        let result = await operation.apply()
+        XCTAssertTrue(result.selectorApplied)
+        XCTAssertEqual(result.eligibleConnectionCount, 1)
+        XCTAssertEqual(result.closedConnectionCount, 1)
+        XCTAssertEqual(result.preservedConnectionCount, 0)
+        let dispatches = await runtime.dispatches
+        XCTAssertEqual(dispatches, 1)
+        XCTAssertNotEqual(preSelectionCatalog, try policy.readPersisted())
+        XCTAssertEqual(try policy.readPersisted().selectors.first?.effectiveDesired, "b")
     }
 
     func testExistingSmartApplyNeverCallsContinuityClose() async {
