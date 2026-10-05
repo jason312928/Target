@@ -544,7 +544,86 @@ final class ProfileSubscriptionTests: XCTestCase, ProfileTestCaseSupport {
                 XCTFail("Generated AnyTLS configuration failed sing-box validation: \(diagnostic.messageKey)")
             }
         }
-        assertIntakeError(.variantUnsupported, "anytls://fixture-password@example.com:443?security=tls&insecure=1#AnyTLS")
+        let insecureURI = try SubscriptionNormalizer().normalize(Data(
+            "anytls://fixture-password@example.com:443?security=tls&insecure=1#AnyTLS".utf8
+        ))
+        XCTAssertEqual((try generatedOutbounds(insecureURI.data)[1]["tls"] as? [String: Any])?["insecure"] as? Bool, true)
+    }
+
+    func testURITLSVerificationSemanticsAreSharedAcrossVLESSTrojanAndAnyTLS() throws {
+        let cases: [(String, Bool)] = [
+            (
+                "vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls#VLESS%20Absent",
+                false
+            ),
+            (
+                "vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&insecure=0#VLESS%20False",
+                false
+            ),
+            (
+                "vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&insecure=1#VLESS%20True",
+                true
+            ),
+            (
+                "trojan://fixture-password@example.com:443?security=tls&allowInsecure=false#Trojan%20False",
+                false
+            ),
+            (
+                "trojan://fixture-password@example.com:443?security=tls&allowInsecure=true#Trojan%20True",
+                true
+            ),
+            (
+                "anytls://fixture-password@example.com:443?security=tls&INSECURE=FALSE#AnyTLS%20False",
+                false
+            ),
+            (
+                "anytls://fixture-password@example.com:443?security=tls&ALLOWINSECURE=TRUE#AnyTLS%20True",
+                true
+            )
+        ]
+
+        for (uri, expected) in cases {
+            let result = try SubscriptionNormalizer().normalize(Data(uri.utf8))
+            let tls = try XCTUnwrap(try generatedOutbounds(result.data)[1]["tls"] as? [String: Any])
+            XCTAssertEqual(tls["insecure"] as? Bool, expected, uri)
+        }
+
+        let sameValue = try SubscriptionNormalizer().normalize(Data(
+            "vless://11111111-1111-4111-8111-111111111111@example.com:443?security=tls&insecure=1&ALLOWINSECURE=true#Same".utf8
+        ))
+        XCTAssertEqual((try generatedOutbounds(sameValue.data)[1]["tls"] as? [String: Any])?["insecure"] as? Bool, true)
+
+        assertIntakeError(
+            .variantUnsupported,
+            "trojan://fixture-password@example.com:443?security=tls&insecure=1&allowInsecure=false#Conflict"
+        )
+        assertIntakeError(
+            .variantUnsupported,
+            "anytls://fixture-password@example.com:443?security=tls&insecure=maybe#Invalid"
+        )
+        assertIntakeError(
+            .variantUnsupported,
+            "vless://11111111-1111-4111-8111-111111111111@example.com:443?security=none&insecure=true#NoTLS"
+        )
+    }
+
+    func testURIListAndBase64URIListKeepTLSVerificationPerOutbound() throws {
+        let list = [
+            "vless://11111111-1111-4111-8111-111111111111@one.example.com:443?security=tls&insecure=true#Insecure",
+            "trojan://fixture-password@two.example.com:443?security=tls#Verified",
+            "anytls://fixture-password@three.example.com:443?security=tls&allowInsecure=0#Verified%20AnyTLS"
+        ].joined(separator: "\n")
+
+        for payload in [Data(list.utf8), Data(Data(list.utf8).base64EncodedString().utf8)] {
+            let result = try SubscriptionNormalizer().normalize(payload)
+            XCTAssertEqual(result.summary.nodeCount, 3)
+            XCTAssertEqual(result.summary.skippedNodeCount, 0)
+            XCTAssertEqual(result.summary.skippedTLSVerificationNodeCount, 0)
+            let outbounds = try generatedOutbounds(result.data)
+            XCTAssertEqual((outbounds[1]["tls"] as? [String: Any])?["insecure"] as? Bool, true)
+            XCTAssertEqual((outbounds[2]["tls"] as? [String: Any])?["insecure"] as? Bool, false)
+            XCTAssertEqual((outbounds[3]["tls"] as? [String: Any])?["insecure"] as? Bool, false)
+        }
     }
 
     func testMultipleClashAnyTLSInsecureNodesImportWithoutTLSSkipAccounting() throws {

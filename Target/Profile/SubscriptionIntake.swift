@@ -316,19 +316,22 @@ struct SubscriptionNormalizer: Sendable {
         let components = try standardComponents(value)
         guard let uuid = components.user, UUID(uuidString: uuid) != nil else { throw SubscriptionIntakeError.payloadInvalid }
         let query = queryMap(components)
+        guard let insecure = uriTLSInsecure(query), query["pbk"] == nil, query["sid"] == nil else {
+            throw SubscriptionIntakeError.variantUnsupported
+        }
         guard (query["encryption"] ?? "none") == "none", query["flow"] == nil else {
             throw SubscriptionIntakeError.variantUnsupported
         }
         let network = query["type"] ?? "tcp"
         let security = query["security"] ?? "none"
-        guard ["tcp", "ws"].contains(network), ["none", "tls"].contains(security), safeTLSQuery(query) else {
+        guard ["tcp", "ws"].contains(network), ["none", "tls"].contains(security), security == "tls" || !insecure else {
             throw SubscriptionIntakeError.variantUnsupported
         }
         var outbound: [String: Any] = [
             "type": "vless", "server": components.host!, "server_port": components.port!, "uuid": uuid
         ]
         try applyTransport(network: network, path: query["path"], host: query["host"], to: &outbound)
-        if security == "tls" { outbound["tls"] = tlsObject(serverName: query["sni"] ?? components.host!) }
+        if security == "tls" { outbound["tls"] = tlsObject(serverName: query["sni"] ?? components.host!, insecure: insecure) }
         return ProviderNode(name: safeName(decoded(components.fragment), fallback: "VLESS"), protocolKind: .vless, outbound: outbound)
     }
 
@@ -338,14 +341,15 @@ struct SubscriptionNormalizer: Sendable {
             throw SubscriptionIntakeError.payloadInvalid
         }
         let query = queryMap(components)
+        guard let insecure = uriTLSInsecure(query) else { throw SubscriptionIntakeError.variantUnsupported }
         let network = query["type"] ?? "tcp"
         let security = query["security"] ?? "tls"
-        guard ["tcp", "ws"].contains(network), security == "tls", safeTLSQuery(query) else {
+        guard ["tcp", "ws"].contains(network), security == "tls" else {
             throw SubscriptionIntakeError.variantUnsupported
         }
         var outbound: [String: Any] = [
             "type": "trojan", "server": components.host!, "server_port": components.port!, "password": password,
-            "tls": tlsObject(serverName: query["sni"] ?? components.host!)
+            "tls": tlsObject(serverName: query["sni"] ?? components.host!, insecure: insecure)
         ]
         try applyTransport(network: network, path: query["path"], host: query["host"], to: &outbound)
         return ProviderNode(name: safeName(decoded(components.fragment), fallback: "Trojan"), protocolKind: .trojan, outbound: outbound)
@@ -355,7 +359,10 @@ struct SubscriptionNormalizer: Sendable {
         let components = try anyTLSComponents(value)
         let query = queryMap(components)
         let security = (query["security"] ?? "tls").lowercased()
-        guard security == "tls", safeAnyTLSQuery(query) else {
+        guard security == "tls", let insecure = uriTLSInsecure(query) else {
+            throw SubscriptionIntakeError.variantUnsupported
+        }
+        if let fingerprint = query["fp"], !Self.clashClientFingerprints.contains(fingerprint.lowercased()) {
             throw SubscriptionIntakeError.variantUnsupported
         }
         let password = [components.password, components.user, query["password"]]
@@ -366,7 +373,11 @@ struct SubscriptionNormalizer: Sendable {
         let outbound: [String: Any] = [
             "type": "anytls", "server": components.host!, "server_port": components.port!,
             "password": password,
-            "tls": anyTLSTLSObject(serverName: query["sni"] ?? query["servername"] ?? components.host!, query: query)
+            "tls": anyTLSTLSObject(
+                serverName: query["sni"] ?? query["servername"] ?? components.host!,
+                query: query,
+                insecure: insecure
+            )
         ]
         return ProviderNode(
             name: safeName(decoded(components.fragment), fallback: "AnyTLS"),
@@ -628,24 +639,30 @@ struct SubscriptionNormalizer: Sendable {
         Dictionary(components.queryItems?.compactMap { item in item.value.map { (item.name.lowercased(), $0) } } ?? [], uniquingKeysWith: { _, last in last })
     }
 
-    private func safeTLSQuery(_ query: [String: String]) -> Bool {
-        let insecure = query["allowinsecure"] ?? query["insecure"] ?? "0"
-        return ["0", "false"].contains(insecure.lowercased()) && query["pbk"] == nil && query["sid"] == nil
+    /// Returns the source-declared per-outbound TLS verification setting.
+    /// Missing fields default to verification enabled; malformed or conflicting
+    /// declarations fail closed with nil.
+    private func uriTLSInsecure(_ query: [String: String]) -> Bool? {
+        var values: [Bool] = []
+        for key in ["insecure", "allowinsecure"] {
+            guard let raw = query[key] else { continue }
+            switch raw.lowercased() {
+            case "0", "false": values.append(false)
+            case "1", "true": values.append(true)
+            default: return nil
+            }
+        }
+        guard let first = values.first else { return false }
+        guard values.dropFirst().allSatisfy({ $0 == first }) else { return nil }
+        return first
     }
 
-    private func safeAnyTLSQuery(_ query: [String: String]) -> Bool {
-        let insecure = query["allowinsecure"] ?? query["insecure"] ?? "0"
-        guard ["0", "false"].contains(insecure.lowercased()) else { return false }
-        if let fingerprint = query["fp"], !Self.clashClientFingerprints.contains(fingerprint.lowercased()) { return false }
-        return true
+    private func tlsObject(serverName: String, insecure: Bool = false) -> [String: Any] {
+        ["enabled": true, "server_name": serverName, "insecure": insecure]
     }
 
-    private func tlsObject(serverName: String) -> [String: Any] {
-        ["enabled": true, "server_name": serverName, "insecure": false]
-    }
-
-    private func anyTLSTLSObject(serverName: String, query: [String: String]) -> [String: Any] {
-        var tls = tlsObject(serverName: serverName)
+    private func anyTLSTLSObject(serverName: String, query: [String: String], insecure: Bool) -> [String: Any] {
+        var tls = tlsObject(serverName: serverName, insecure: insecure)
         if let alpn = query["alpn"]?.split(separator: ",").map({ String($0).trimmingCharacters(in: .whitespacesAndNewlines) }).filter({ !$0.isEmpty }), !alpn.isEmpty {
             tls["alpn"] = alpn
         }
