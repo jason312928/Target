@@ -5,7 +5,7 @@
 <h1 align="center">Target</h1>
 
 <p align="center">
-  一款原生、克制、以安全边界为先的 macOS sing-box 客户端。
+  把代理变成一个安静、可解释的 macOS 工作台。
 </p>
 
 <p align="center">
@@ -24,17 +24,101 @@
 
 ## 关于 Target
 
-Target 是使用 Swift 与 SwiftUI 构建的原生 macOS 客户端，提供 Profile 管理、订阅导入、策略选择、运行状态观察和系统代理控制。sing-box 以内核进程的形式在当前用户下运行，Target 只在用户明确连接时修改 macOS 系统代理。
+Target 是使用 Swift 与 SwiftUI 构建的原生 macOS sing-box 客户端。它把 Profile、节点、策略和运行状态放在同一个工作区里：你可以看见流量正在经过哪里，知道一次切换为什么发生，也能在需要时把控制权交还给自己。sing-box 以内核进程的形式在当前用户下运行，Target 只在用户明确连接时修改 macOS 系统代理。
 
 ## 现在可以做什么
 
-- **一键连接**：Connect 会启动 Target 管理的 sing-box 实例并建立系统代理；Disconnect 与 Restart 使用同一套安全生命周期。
-- **完整的 Profile 工作区**：创建、导入、导出、复制、重命名和删除配置；内置 JSON 高亮、格式化、诊断、版本历史与上一有效版本恢复。
-- **本地订阅转换**：直接读取公共 HTTPS 订阅，在本机完成格式识别、节点转换、`sing-box check` 和脱敏预览，不依赖第三方转换站。
-- **代理与策略选择**：浏览 sing-box selector，搜索和筛选节点，查看延迟与健康状态，并在运行中切换当前策略。
-- **实时可观测性**：工作区侧栏展示活动连接，独立诊断窗口提供 Connections、Traffic、Logs；支持连接搜索、排序、暂停，以及流量历史和日志搜索。通过工具栏或 `⌘⇧D` 打开诊断窗口。
-- **原生 macOS 集成**：菜单栏快速控制、首次使用引导、启动时运行、应用内更新，以及中英文界面。
-- **可自动化**：随 App 提供 `targetctl`，通过本地控制平面管理 Profile、订阅、策略、引擎、系统代理和运行状态。
+- **一键进入连接状态**：Connect 启动 Target 管理的 sing-box 实例并建立系统代理；Disconnect 与 Restart 共享同一套安全生命周期。
+- **Profile 是工作台，不是文件夹**：创建、导入、导出、复制、重命名和删除配置；用 JSON 高亮、格式化、诊断、版本历史和上一有效版本恢复来持续整理它。
+- **让节点有一张地图**：在 Proxies 中按国家查看节点和路线，测试延迟，选择最低延迟的可用节点；还可以把网站拖到国家节点上，保存站点路由。
+- **Smart Routing，给每次切换一个理由**：Smart Switch 根据近期健康、目标和网络证据为新连接收敛选择器，同时保留现有连接；Smart Apply 会先确认选择，再只处理证据充分、可安全替换的连接，受保护或不确定的连接会被保留。
+- **订阅在本地变得可读**：直接读取公共 HTTPS 订阅，在本机完成格式识别、节点转换、`sing-box check` 和脱敏预览，不依赖第三方转换站。
+- **诊断像一个小型控制室**：工作区侧栏展示活动连接，独立诊断窗口提供 Connections、Traffic、Logs；支持连接搜索、排序、暂停，查看流量历史和搜索日志。通过工具栏或 `⌘⇧D` 打开诊断窗口。
+- **把 macOS 的日常入口接上**：菜单栏快速控制、首次使用引导、启动时运行、应用内更新，以及中英文界面。
+- **需要脚本时也有同一套控制面**：随 App 提供 `targetctl`，通过本地控制平面管理 Profile、订阅、策略、Smart 操作、引擎、系统代理和运行状态。
+
+这些 Smart 操作是用户主动触发的一次性动作，不会在后台悄悄改写选择；当运行证据不足时，Target 会选择保留连接并明确告诉你原因。
+
+## 先看界面
+
+下面这张图来自 Target 的实际 SwiftUI 界面。为了适合公开文档，Proxies 图裁掉了 Profile 标识，并在图头加入 `DEMO DATA` 说明；图片不包含真实订阅地址、节点凭据或本机路径。
+
+![Target Proxies：国家地图、节点分组与站点路由](docs/screenshots/target-proxies-demo.png)
+
+*Proxies：把节点按国家铺在地图上，也可以从国家列表进入节点选择；站点路由区域支持把网站链接拖到国家节点。*
+
+## 典型工作流
+
+### 1. 把 Profile 变成可运行的配置
+
+Profiles 工作区承接从“拿到一份 JSON”到“开始连接”的完整过程：
+
+1. 新建 Profile，导入 JSON，或添加一个受支持的 HTTPS 订阅。
+2. 在 Configuration 中编辑 JSON；编辑器提供语法高亮、格式化和错误定位。
+3. 保存前与启动前都运行 `sing-box check`。校验失败时，上一份有效版本继续保留。
+4. 通过版本历史查看变更，需要时恢复上一有效版本，再回到 Overview 或 Proxies。
+5. 在 Dashboard 或 Profile 工作区启动内核；系统代理可以单独启用或关闭。
+
+Profile 的长期存储使用 macOS Keychain 管理的认证加密，导入、导出、复制、重命名和删除也都从同一个 Profile 操作菜单完成。
+
+### 2. 用 Proxies 选择节点，而不是翻一长串标签
+
+Proxies 页面把 selector 变成可读的选择空间：地图显示参与 Profile 聚合的国家，国家列表显示节点数量，搜索框同时筛选国家和节点。选择国家时，Target 会优先选择该国家中已测速且可用的最低延迟节点；也可以展开国家卡片，直接选择具体节点。
+
+每个 selector 都会显示运行状态：选择已保存但尚未应用时，会明确提示需要 Apply 或 Restart；运行环境不可用时，页面会把原因显示在选择器附近。点按 `Automatic` 可以恢复 Profile 中的默认选择。
+
+站点路由是另一层持久化选择：把一个网站 URL 拖到国家节点，Target 保存域名到国家/节点的绑定；绑定节点失效时会标记为不可用，不会静默指向另一个未知节点。
+
+### 3. Smart Routing 的两种明确动作
+
+Smart 目前是 Proxies 页面里的显式菜单，不是后台循环任务。两种动作分别处理“新连接怎么走”和“已有连接要不要动”：
+
+| 动作 | 做什么 | 连接策略 |
+| --- | --- | --- |
+| **Smart Switch** | 结合近期健康、目标、网络状态和历史惩罚，给当前 selector 一个可解释的推荐并应用 | 只影响新连接，已有连接继续保持 |
+| **Smart Apply** | 先完成 selector 收敛，再检查连接的运行证据与连续性 | 只关闭逐条确认、低风险且可替换的连接；受保护或不确定的连接保留 |
+
+如果证据不足，界面会显示“需要更明确的运行证据”或“保留现有连接”，而不是为了追求切换结果强行重启整个内核。Smart 的操作结果还会告诉你 selector 是否改变、关闭了多少条连接、保留了多少条连接。
+
+脚本也使用同一套应用操作：
+
+```sh
+targetctl smart shadow --json       # 只观察，不改变选择
+targetctl smart apply --json        # 应用一次 Smart Switch
+targetctl smart continuity --json   # 读取连接连续性分类
+targetctl smart continuity apply --json
+```
+
+### 4. 订阅导入先预览，再保存
+
+订阅操作分成下载、识别、转换、校验、预览、确认六步。Target 不把原始订阅直接塞进 Profile，而是在本机生成受限的 sing-box 配置，并展示节点数量、支持的协议、跳过的协议和兼容性警告。
+
+当前支持 sing-box JSON、URI 列表、Base64 URI 列表和 Clash/Mihomo YAML；节点转换覆盖 Shadowsocks、VMess、VLESS、Trojan、AnyTLS。SSR、Hysteria2/Hy2、TUIC 可以被识别并在仍有可用节点时跳过。服务商私有规则、代理组和 DNS 语义不会被假装成完整兼容。
+
+### 5. 从 Diagnostics 看见运行时发生了什么
+
+Diagnostics 是独立窗口，不会把运行日志塞进 Profile 编辑器：
+
+- **Connections**：搜索目标、按最新连接/目标地址/流量排序，暂停或继续实时刷新；明细包含目标、网络、路由链和流量统计。
+- **Traffic**：查看上传、下载与连接数量的时间变化，适合判断是单个节点变慢还是整体流量异常。
+- **Logs**：按关键字筛选运行日志，定位启动、策略应用和系统代理状态变化。
+
+工作区侧栏会保留一份轻量的活动连接摘要；完整诊断窗口可从工具栏或 `⌘⇧D` 打开。Target 对明细数量设置上限，避免诊断窗口把大量连接变成新的负担。
+
+### 6. macOS 入口与自动化
+
+Target 提供菜单栏快速控制、首次使用引导、Launch at Login 和 Sparkle 2 应用内更新。更新器使用固定 HTTPS appcast、EdDSA 签名校验，并保留现有 Profile、选择状态、普通偏好和 Keychain 加密身份。
+
+`targetctl` 通过本地控制平面复用同一套应用操作，不另起一套 CLI 业务逻辑。除了 Smart 操作，还可以查询状态、管理 Profile、列出/选择策略、绑定站点路由、启动/停止引擎、控制系统代理和执行恢复：
+
+```sh
+targetctl status --json
+targetctl profile list --json
+targetctl policy list --json
+targetctl route list --json
+targetctl connect --json
+targetctl proxy status --json
+```
 
 ## 订阅兼容范围
 
@@ -119,6 +203,7 @@ Target/Resources/Scripts/install_sing_box.sh
 - **没有 TUN**：当前连接方式是本地 HTTP/SOCKS mixed listener + macOS 系统代理。
 - **没有稳定发行版**：现有下载均用于开发测试，尚未完成 Developer ID 签名、公证与完整发布资格验证。
 - **订阅兼容是有边界的**：复杂的服务商私有字段、路由和 DNS 行为可能需要手动调整。
+- **Smart 仍然是显式控制**：当前提供 Smart Switch 与 Smart Apply 的单次操作，不是后台自动选路或自适应重试系统。
 
 ## 项目结构
 
