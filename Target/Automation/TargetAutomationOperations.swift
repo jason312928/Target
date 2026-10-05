@@ -10,10 +10,7 @@ actor TargetAutomationOperations {
     private let profileStore: ProfileStore
     private let subscriptionOperations: TargetSubscriptionOperations
     private let policyOperations: any TargetPolicyOperating
-    private let shadowOperations: SmartPolicyShadowOperations
-    private let smartApplyOperations: SmartPolicyApplyOperations
-    private let continuityOperations: SmartContinuityOperations
-    private let continuityApplyOperations: SmartContinuityApplyOperations
+    private let smartOperations: any SmartApplicationOperating
     private let backend: any EngineBackend
     private let serviceClient: any SystemProxyClient
     private let systemProxyOperations: any TargetSystemProxyOperating
@@ -35,6 +32,7 @@ actor TargetAutomationOperations {
         connectionOperations: (any TargetConnectionOperating)? = nil,
         runtimeObservationOperations: any TargetRuntimeObserving = UnavailableRuntimeObservationProvider(),
         hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode,
+        smartOperations: (any SmartApplicationOperating)? = nil,
         engineStatusObserver: (@Sendable (BackendStatus) async -> Void)? = nil,
         systemProxyStatusObserver: (@Sendable (SystemProxyStatus) async -> Void)? = nil
     ) {
@@ -43,20 +41,24 @@ actor TargetAutomationOperations {
         let resolvedPolicy = policyOperations ?? TargetPolicyOperations(profileStore: profileStore,
             runtimeEvidenceProvider: (backend as? any PolicyRuntimeEvidenceProviding) ?? StoppedPolicyRuntimeEvidenceProvider())
         self.policyOperations = resolvedPolicy
-        let shadow = SmartPolicyShadowOperations(
-            catalogReader: PolicyCatalogOperation(profileStore: profileStore),
-            runtime: (backend as? any SmartShadowRuntimeReading) ?? UnavailableSmartShadowRuntime()
-        )
-        self.shadowOperations = shadow
-        let smartApply = SmartPolicyApplyOperations(evaluator: shadow, policy: resolvedPolicy)
-        self.smartApplyOperations = smartApply
-        let continuity = SmartContinuityOperations(
-            runtime: (backend as? any SmartContinuityRuntimeReading) ?? UnavailableSmartContinuityRuntime()
-        )
-        self.continuityOperations = continuity
-        self.continuityApplyOperations = SmartContinuityApplyOperations(
-            continuity: continuity, smartApply: smartApply, policy: resolvedPolicy
-        )
+        if let smartOperations {
+            self.smartOperations = smartOperations
+        } else {
+            let shadow = SmartPolicyShadowOperations(
+                catalogReader: PolicyCatalogOperation(profileStore: profileStore),
+                runtime: (backend as? any SmartShadowRuntimeReading) ?? UnavailableSmartShadowRuntime()
+            )
+            let smartApply = SmartPolicyApplyOperations(evaluator: shadow, policy: resolvedPolicy)
+            let continuity = SmartContinuityOperations(
+                runtime: (backend as? any SmartContinuityRuntimeReading) ?? UnavailableSmartContinuityRuntime()
+            )
+            let continuityApply = SmartContinuityApplyOperations(
+                continuity: continuity, smartApply: smartApply, policy: resolvedPolicy
+            )
+            self.smartOperations = TargetSmartApplicationOperations(
+                shadow: shadow, smartApply: smartApply, continuity: continuity, continuityApply: continuityApply
+            )
+        }
         self.backend = backend
         self.serviceClient = serviceClient
         let resolvedSystemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: serviceClient)
@@ -88,10 +90,11 @@ actor TargetAutomationOperations {
             switch request.action {
             case "capabilities": return capabilities()
             case "status": return await consolidatedStatus()
-            case "smart.shadow": return .success(try await shadowOperations.evaluate().automationJSON())
-            case "smart.apply": return .success(await smartApplyOperations.apply().automationJSON())
-            case "smart.continuity": return .success(await continuityOperations.evaluate().automationJSON())
-            case "smart.continuity.apply": return .success(await continuityApplyOperations.apply().automationJSON())
+            case "smart.shadow": return .success(try await smartOperations.evaluateShadow().automationJSON())
+            case "smart.apply": return .success(await smartOperations.applySwitch().automationJSON())
+            case "smart.continuity":
+                return .success((await smartOperations.evaluateContinuity()).automationJSON())
+            case "smart.continuity.apply": return .success(await smartOperations.applyContinuity().automationJSON())
             case "runtime.status": return await runtimeStatus()
             case "profile.import": return try profileImport(request.arguments)
             case "profile.subscribe": return try await profileSubscribe(request.arguments)

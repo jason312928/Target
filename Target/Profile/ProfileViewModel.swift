@@ -6,6 +6,7 @@ import Observation
 final class ProfileViewModel {
     private let store: ProfileStore
     private let policyOperations: any TargetPolicyOperating
+    private let smartOperations: (any SmartApplicationOperating)?
     private let policyCatalogLoader: () throws -> PolicyCatalog
     private let usesCustomPolicyCatalogLoader: Bool
     private let configurationLoader: (UUID) throws -> String
@@ -27,6 +28,8 @@ final class ProfileViewModel {
     private var policyProbeTask: Task<Void, Never>?
     private var policyRefreshGeneration = 0
     private var policyHealthGeneration = 0
+    private var smartApplicationGeneration = 0
+    private var smartApplicationTask: Task<Void, Never>?
 
     private(set) var profiles: [Profile] = []
     private(set) var selectedID: UUID?
@@ -56,18 +59,22 @@ final class ProfileViewModel {
     private(set) var isSelectingPolicy = false
     private(set) var testingPolicySelectorID: Int?
     private(set) var policyHealthBySelector: [Int: [String: RuntimeProxyHealth]] = [:]
+    private(set) var isApplyingSmart = false
+    private(set) var smartApplicationResult: SmartApplicationResult?
 
     init(
         store: ProfileStore = ProfileStore(),
         subscriptionFetcher: any ProfileSubscriptionFetching = SecureSubscriptionFetcher(),
         configurationLoader: ((UUID) throws -> String)? = nil,
         policyOperations: (any TargetPolicyOperating)? = nil,
+        smartOperations: (any SmartApplicationOperating)? = nil,
         policyCatalogLoader: (() throws -> PolicyCatalog)? = nil,
         loadImmediately: Bool = true
     ) {
         self.store = store
         let resolvedPolicyOperations = policyOperations ?? TargetPolicyOperations(profileStore: store)
         self.policyOperations = resolvedPolicyOperations
+        self.smartOperations = smartOperations
         self.policyCatalogLoader = policyCatalogLoader ?? resolvedPolicyOperations.readPersisted
         self.usesCustomPolicyCatalogLoader = policyCatalogLoader != nil
         self.subscriptionOperations = TargetSubscriptionOperations(store: store, fetcher: subscriptionFetcher)
@@ -80,6 +87,7 @@ final class ProfileViewModel {
     }
 
     var selectedProfile: Profile? { profiles.first { $0.id == selectedID } }
+    var smartActionsAvailable: Bool { smartOperations != nil && selectedProfile != nil }
     var canEditConfiguration: Bool { selectedProfile != nil && isConfigurationLoaded && !isPerformingPersistence }
     var canExport: Bool { canEditConfiguration && !isDirty && !isExporting && !isPerformingPersistence }
     var defaultExportFileName: String {
@@ -446,6 +454,52 @@ final class ProfileViewModel {
         }
     }
 
+    /// Runs one explicit Smart action through the shared application stack.
+    /// Completion is accepted only while the same Profile generation remains
+    /// selected; runtime changes call `invalidateSmartApplication()` as well.
+    func applySmart(_ action: SmartApplicationAction) {
+        guard let operations = smartOperations,
+              let profile = selectedProfile,
+              !isApplyingSmart,
+              !isDirty,
+              !isPerformingPersistence
+        else { return }
+        smartApplicationGeneration &+= 1
+        let generation = smartApplicationGeneration
+        let expectedID = profile.id
+        let expectedRevision = profile.validRevision
+        isApplyingSmart = true
+        smartApplicationResult = nil
+        smartApplicationTask = Task { [weak self] in
+            let result: SmartApplicationResult
+            switch action {
+            case .switchAction:
+                result = SmartApplicationResult(action: action, result: await operations.applySwitch())
+            case .continuityApply:
+                result = SmartApplicationResult(action: action, result: await operations.applyContinuity())
+            }
+            guard let self,
+                  !Task.isCancelled,
+                  self.smartApplicationGeneration == generation,
+                  self.selectedID == expectedID,
+                  self.selectedProfile?.validRevision == expectedRevision
+            else { return }
+            self.smartApplicationResult = result
+            self.isApplyingSmart = false
+            self.smartApplicationTask = nil
+            self.refreshPolicyState()
+            self.markReadinessChanged()
+        }
+    }
+
+    func invalidateSmartApplication() {
+        smartApplicationGeneration &+= 1
+        smartApplicationTask?.cancel()
+        smartApplicationTask = nil
+        isApplyingSmart = false
+        smartApplicationResult = nil
+    }
+
     func refreshPolicyState() {
         invalidatePolicyHealth()
         refreshPolicyCatalog()
@@ -675,6 +729,7 @@ final class ProfileViewModel {
     }
 
     private func applySnapshot(_ snapshot: ProfileStoreSnapshot) {
+        invalidateSmartApplication()
         metadataGeneration &+= 1
         invalidatePolicyHealth()
         profiles = snapshot.profiles
@@ -806,6 +861,7 @@ final class ProfileViewModel {
         // A recovery decision owns the next replacement action. This also
         // prevents a clean editor from overwriting a recoverable older intent.
         guard pendingOperation == nil, !isPerformingPersistence, !isExporting, persistenceTask == nil else { return }
+        invalidateSmartApplication()
         guard !isDirty else {
             pendingOperation = operation
             unsavedChangesPresentation.requestPresentation()

@@ -26,6 +26,26 @@ struct TargetApp: App {
             profileStore: profileStore,
             runtimeEvidenceProvider: backend
         )
+        let shadowOperations = SmartPolicyShadowOperations(
+            catalogReader: PolicyCatalogOperation(profileStore: profileStore),
+            runtime: backend
+        )
+        let smartApplyOperations = SmartPolicyApplyOperations(
+            evaluator: shadowOperations,
+            policy: policyOperations
+        )
+        let continuityOperations = SmartContinuityOperations(runtime: backend)
+        let continuityApplyOperations = SmartContinuityApplyOperations(
+            continuity: continuityOperations,
+            smartApply: smartApplyOperations,
+            policy: policyOperations
+        )
+        let smartOperations = TargetSmartApplicationOperations(
+            shadow: shadowOperations,
+            smartApply: smartApplyOperations,
+            continuity: continuityOperations,
+            continuityApply: continuityApplyOperations
+        )
         let systemProxyClient = TargetServiceXPCClient()
         let systemProxyOperations = TargetSystemProxyOperations(client: systemProxyClient)
         let runtimeOperations = TargetRuntimeOperations(
@@ -44,6 +64,7 @@ struct TargetApp: App {
         _profileModel = State(initialValue: ProfileViewModel(
             store: profileStore,
             policyOperations: policyOperations,
+            smartOperations: smartOperations,
             loadImmediately: false
         ))
         _preferences = State(initialValue: ApplicationPreferencesModel(loginItemManager: SMAppLoginItemManager()))
@@ -56,6 +77,7 @@ struct TargetApp: App {
             systemProxyOperations: systemProxyOperations,
             runtimeOperations: runtimeOperations,
             runtimeObservationOperations: runtimeObservationOperations,
+            smartOperations: smartOperations,
             engineStatusObserver: { status in
                 await MainActor.run { lifecycle.applyAutomationEngineStatus(status) }
             },

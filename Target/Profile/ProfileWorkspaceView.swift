@@ -109,6 +109,7 @@ struct ProfileWorkspaceView: View {
                 refreshParticipatingRoutes()
             }
             .onChange(of: lifecycle?.runtimeChangeGeneration) { _, _ in
+                model.invalidateSmartApplication()
                 model.refreshPolicyState()
             }
             .alert("profile.delete.title", isPresented: Binding(

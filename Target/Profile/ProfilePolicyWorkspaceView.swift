@@ -15,6 +15,11 @@ struct ProfilePolicyWorkspaceView: View {
     var routeBindings: [ProfileRouteBinding] = []
     var bindRoute: ((URL, String, String) -> Void)? = nil
     var removeRouteBinding: ((String) -> Void)? = nil
+    var smartActionsAvailable = false
+    var isApplyingSmart = false
+    var smartResult: SmartApplicationPresentation? = nil
+    var applySmartSwitch: () -> Void = {}
+    var applySmart: () -> Void = {}
     let select: (String, String) -> Void
     let probeLatency: (Int, String) -> Void
     let reset: () -> Void
@@ -78,7 +83,8 @@ struct ProfilePolicyWorkspaceView: View {
     private var proxyWorkspace: some View {
         VStack(spacing: 0) {
             routeToolbar
-            selectorDetail
+            smartFeedback
+                selectorDetail
                 .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -91,6 +97,7 @@ struct ProfilePolicyWorkspaceView: View {
                 searchField.frame(width: 220)
                 latencyButton
                 automaticSelectionButton
+                smartActionMenu
             }
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 12) {
@@ -98,6 +105,7 @@ struct ProfilePolicyWorkspaceView: View {
                     Spacer(minLength: 8)
                     latencyButton
                     automaticSelectionButton
+                    smartActionMenu
                 }
                 searchField.frame(maxWidth: .infinity)
             }
@@ -107,6 +115,73 @@ struct ProfilePolicyWorkspaceView: View {
         .padding(.horizontal, 20)
         .padding(.top, 4)
         .padding(.bottom, 8)
+    }
+
+    private var smartActionMenu: some View {
+        Menu {
+            Button("policy.smart.switch", systemImage: "arrow.triangle.2.circlepath") {
+                applySmartSwitch()
+            }
+            .disabled(!smartActionsAvailable || isApplyingSmart)
+            .accessibilityIdentifier("policy.smart.switch")
+            Button("policy.smart.apply", systemImage: "wand.and.stars") {
+                applySmart()
+            }
+            .disabled(!smartActionsAvailable || isApplyingSmart)
+            .accessibilityIdentifier("policy.smart.apply")
+        } label: {
+            Label("policy.smart.title", systemImage: "wand.and.stars")
+        }
+        .disabled(!smartActionsAvailable && smartResult == nil)
+        .help(Text("policy.smart.help"))
+        .accessibilityLabel(Text("policy.smart.title"))
+        .accessibilityIdentifier("policy.smart.menu")
+    }
+
+    @ViewBuilder
+    private var smartFeedback: some View {
+        if isApplyingSmart {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("policy.smart.progress")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 8)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(Text("policy.smart.progress"))
+            .accessibilityIdentifier("policy.smart.progress")
+        } else if let smartResult {
+            HStack(spacing: 8) {
+                Image(systemName: smartResult.symbolName)
+                    .foregroundStyle(smartResult.isPositive ? .green : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(LocalizedStringKey(smartResult.messageKey))
+                        .font(.caption.weight(.semibold))
+                    if smartResult.result.action == .continuityApply {
+                        Text(String.localizedStringWithFormat(
+                            String(localized: "policy.smart.result.continuity.detail"),
+                            Int64(smartResult.result.closedConnectionCount),
+                            Int64(smartResult.result.preservedConnectionCount)
+                        ))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    } else if smartResult.result.selectorSwitched {
+                        Text("policy.smart.result.switch.detail")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 8)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("policy.smart.feedback")
+        }
     }
 
     private var routeTitle: some View {

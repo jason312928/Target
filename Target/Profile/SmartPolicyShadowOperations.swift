@@ -278,3 +278,87 @@ actor SmartPolicyApplyOperations {
     }
 }
 extension SmartPolicyApplyOperations: SmartPolicyApplying {}
+
+/// The two explicit user-facing Smart actions share these already-guarded
+/// application operations. The result used by the GUI contains only bounded
+/// aggregate facts; automation keeps its existing machine-readable result.
+enum SmartApplicationAction: String, Sendable {
+    case switchAction
+    case continuityApply
+}
+
+struct SmartApplicationResult: Equatable, Sendable {
+    let action: SmartApplicationAction
+    let selectorSwitched: Bool
+    let closedConnectionCount: Int
+    let preservedConnectionCount: Int
+    let reasonCode: String
+
+    init(action: SmartApplicationAction, result: SmartPolicyApplyResult) {
+        self.action = action
+        selectorSwitched = result.applied
+        closedConnectionCount = 0
+        preservedConnectionCount = 0
+        reasonCode = result.reasonCode
+    }
+
+    init(action: SmartApplicationAction, result: SmartContinuityApplyResult) {
+        self.action = action
+        selectorSwitched = result.selectorApplied
+        closedConnectionCount = result.closedConnectionCount
+        preservedConnectionCount = result.preservedConnectionCount
+        if result.failedCloseCount > 0 {
+            reasonCode = "closeFailed"
+        } else if result.closedConnectionCount > 0 {
+            reasonCode = "completed"
+        } else if let reason = [
+            "cancelled", "selectionUnconfirmed", "runtimeUnavailable", "staleEvidence",
+            "noEligibleConnections", "connectionsPreserved", "keepCurrent"
+        ].first(where: result.reasonCodes.contains) {
+            reasonCode = reason
+        } else {
+            reasonCode = result.eligibleConnectionCount > 0 ? "connectionsPreserved" : "noEligibleConnections"
+        }
+    }
+}
+
+protocol SmartApplicationOperating: Sendable {
+    func evaluateShadow() async throws -> SmartShadowRecommendation
+    func applySwitch() async -> SmartPolicyApplyResult
+    func applyContinuity() async -> SmartContinuityApplyResult
+    func evaluateContinuity() async -> SmartContinuitySummary
+}
+
+/// Composition root for Smart Policy application. Both the GUI and local
+/// automation receive the same instance, including the same stateful shadow,
+/// selector-apply and continuity-apply actors.
+actor TargetSmartApplicationOperations: SmartApplicationOperating {
+    private let shadow: any SmartPolicyEvaluating
+    private let smartApply: any SmartPolicyApplying
+    private let continuity: SmartContinuityOperations
+    private let continuityApply: SmartContinuityApplyOperations
+
+    init(shadow: any SmartPolicyEvaluating, smartApply: any SmartPolicyApplying, continuity: SmartContinuityOperations,
+         continuityApply: SmartContinuityApplyOperations) {
+        self.shadow = shadow
+        self.smartApply = smartApply
+        self.continuity = continuity
+        self.continuityApply = continuityApply
+    }
+
+    func evaluateShadow() async throws -> SmartShadowRecommendation {
+        try await shadow.evaluate()
+    }
+
+    func applySwitch() async -> SmartPolicyApplyResult {
+        await smartApply.apply()
+    }
+
+    func applyContinuity() async -> SmartContinuityApplyResult {
+        await continuityApply.apply()
+    }
+
+    func evaluateContinuity() async -> SmartContinuitySummary {
+        await continuity.evaluate()
+    }
+}

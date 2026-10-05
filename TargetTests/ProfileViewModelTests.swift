@@ -170,6 +170,58 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         ))
     }
 
+    func testSmartApplicationPresentationMapsSafeAggregateOutcomes() {
+        let switched = SmartApplicationResult(
+            action: .switchAction,
+            selectorSwitched: true,
+            closedConnectionCount: 0,
+            preservedConnectionCount: 0,
+            reasonCode: "applied"
+        )
+        let switchPresentation = SmartApplicationPresentation(result: switched)
+        XCTAssertEqual(switchPresentation.messageKey, "policy.smart.result.switched")
+        XCTAssertTrue(switchPresentation.isPositive)
+
+        let applied = SmartApplicationResult(
+            action: .continuityApply,
+            selectorSwitched: true,
+            closedConnectionCount: 2,
+            preservedConnectionCount: 5,
+            reasonCode: "completed"
+        )
+        let applyPresentation = SmartApplicationPresentation(result: applied)
+        XCTAssertEqual(applyPresentation.messageKey, "policy.smart.result.completed")
+        XCTAssertEqual(applied.closedConnectionCount, 2)
+        XCTAssertEqual(applied.preservedConnectionCount, 5)
+
+        let unavailable = SmartApplicationResult(
+            action: .switchAction,
+            selectorSwitched: false,
+            closedConnectionCount: 0,
+            preservedConnectionCount: 0,
+            reasonCode: "lowConfidence"
+        )
+        XCTAssertEqual(SmartApplicationPresentation(result: unavailable).messageKey, "policy.smart.result.low-confidence")
+
+        let expected: [(String, String)] = [
+            ("keepCurrent", "policy.smart.result.keep-current"),
+            ("noEligibleConnections", "policy.smart.result.preserved"),
+            ("cancelled", "policy.smart.result.cancelled"),
+            ("operationUnavailable", "policy.smart.result.unavailable"),
+            ("closeFailed", "policy.smart.result.unavailable")
+        ]
+        for (reason, key) in expected {
+            let result = SmartApplicationResult(
+                action: .continuityApply,
+                selectorSwitched: false,
+                closedConnectionCount: 0,
+                preservedConnectionCount: 1,
+                reasonCode: reason
+            )
+            XCTAssertEqual(SmartApplicationPresentation(result: result).messageKey, key)
+        }
+    }
+
     func testPolicyWorkspacePresentationSearchesCredentialSafeTagAndTypeFacts() {
         let catalog = PolicyCatalog(
             formatVersion: 1,

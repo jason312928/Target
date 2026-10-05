@@ -59,6 +59,44 @@ struct PolicyWorkspacePresentation {
     }
 }
 
+/// Credential-safe, finite presentation mapping for the two explicit Smart
+/// actions. Connection identities and recommendation evidence never reach this
+/// type or the SwiftUI view.
+struct SmartApplicationPresentation: Equatable {
+    let result: SmartApplicationResult
+
+    var titleKey: String {
+        switch result.action {
+        case .switchAction: "policy.smart.switch"
+        case .continuityApply: "policy.smart.apply"
+        }
+    }
+
+    var messageKey: String {
+        switch result.reasonCode {
+        case "applied": "policy.smart.result.switched"
+        case "completed": "policy.smart.result.completed"
+        case "connectionsPreserved", "noEligibleConnections": "policy.smart.result.preserved"
+        case "keepCurrent", "alreadySelected": "policy.smart.result.keep-current"
+        case "lowConfidence", "ambiguousEvidence": "policy.smart.result.low-confidence"
+        case "cancelled": "policy.smart.result.cancelled"
+        case "applyInProgress", "evaluationInProgress": "policy.smart.result.busy"
+        default: "policy.smart.result.unavailable"
+        }
+    }
+
+    var symbolName: String {
+        switch result.reasonCode {
+        case "completed": "checkmark.circle.fill"
+        case "connectionsPreserved", "noEligibleConnections", "keepCurrent", "alreadySelected": "pause.circle"
+        case "cancelled": "xmark.circle"
+        default: "exclamationmark.triangle"
+        }
+    }
+
+    var isPositive: Bool { result.reasonCode == "completed" || result.reasonCode == "applied" }
+}
+
 struct PolicySelectorPresentation: Identifiable, Equatable {
     let selector: PolicyCatalogSelector
     let health: [String: RuntimeProxyHealth]

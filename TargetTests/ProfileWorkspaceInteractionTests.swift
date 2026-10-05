@@ -55,6 +55,63 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(shared.resetCount, 2)
     }
 
+    func testGUIAndAutomationShareSmartApplicationStackAndKeepSwitchCloseFree() async throws {
+        let fixture = try makeFixture()
+        let smart = SmartApplicationSpy(
+            switchResult: .init(recommendation: nil, applied: true, after: "redacted", reasonCode: "applied"),
+            continuityResult: .init(
+                selectorApplied: true, observedConnectionCount: 3, eligibleConnectionCount: 1,
+                closedConnectionCount: 1, preservedConnectionCount: 2, failedCloseCount: 0,
+                protectCount: 1, unknownCount: 1, replaceableCount: 1, reasonCodes: ["completed"]
+            )
+        )
+        let model = ProfileViewModel(store: fixture.store, smartOperations: smart)
+        let automation = TargetAutomationOperations(
+            profileStore: fixture.store, smartOperations: smart, backend: MockBackend()
+        )
+
+        model.applySmart(.switchAction)
+        model.applySmart(.continuityApply)
+        XCTAssertTrue(model.isApplyingSmart, "A second Smart action must be ignored while busy")
+        for _ in 0..<200 where model.isApplyingSmart { try await Task.sleep(for: .milliseconds(2)) }
+        XCTAssertFalse(model.isApplyingSmart)
+        XCTAssertEqual(smart.switchCount, 1)
+        XCTAssertEqual(smart.continuityCount, 0)
+        XCTAssertEqual(model.smartApplicationResult?.closedConnectionCount, 0)
+
+        let response = await automation.handle(AutomationRequest(
+            protocolVersion: 1, action: "smart.continuity.apply", arguments: [:]
+        ))
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(smart.continuityCount, 1)
+        let encoded = String(decoding: AutomationProtocol.encodeResponse(response), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("connection-id"))
+        XCTAssertFalse(encoded.contains("controller"))
+        XCTAssertFalse(encoded.contains("subscription"))
+    }
+
+    func testSmartCompletionIsDiscardedAfterProfileGenerationChanges() async throws {
+        let fixture = try makeFixture()
+        let smart = SmartApplicationSpy(
+            switchResult: .init(recommendation: nil, applied: true, after: "redacted", reasonCode: "applied"),
+            continuityResult: .init(
+                selectorApplied: false, observedConnectionCount: 0, eligibleConnectionCount: 0,
+                closedConnectionCount: 0, preservedConnectionCount: 0, failedCloseCount: 0,
+                protectCount: 0, unknownCount: 0, replaceableCount: 0, reasonCodes: ["keepCurrent"]
+            ),
+            delay: .milliseconds(100)
+        )
+        let model = ProfileViewModel(store: fixture.store, smartOperations: smart)
+        model.applySmart(.switchAction)
+        try await Task.sleep(for: .milliseconds(5))
+        model.requestSelection(fixture.second.id)
+        for _ in 0..<200 where model.isPerformingPersistence { try await Task.sleep(for: .milliseconds(2)) }
+        XCTAssertFalse(model.isPerformingPersistence)
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertNil(model.smartApplicationResult)
+        XCTAssertFalse(model.isApplyingSmart)
+    }
+
     func testPolicyMutationBusyGateQueuesLatestSelectionAndRejectsDuplicateReset() async throws {
         let fixture = try makeFixture()
         let catalog = PolicyCatalogParser.parse(
@@ -796,6 +853,52 @@ private final class SharedPolicyOperationSpy: TargetPolicyOperating, @unchecked 
         lock.lock()
         resets += 1
         lock.unlock()
+    }
+}
+
+private final class SmartApplicationSpy: SmartApplicationOperating, @unchecked Sendable {
+    private let lock = NSLock()
+    let switchResult: SmartPolicyApplyResult
+    let continuityResult: SmartContinuityApplyResult
+    private var switches = 0
+    private var continuities = 0
+
+    let delay: Duration
+
+    init(switchResult: SmartPolicyApplyResult, continuityResult: SmartContinuityApplyResult,
+         delay: Duration = .milliseconds(20)) {
+        self.switchResult = switchResult
+        self.continuityResult = continuityResult
+        self.delay = delay
+    }
+
+    var switchCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return switches
+    }
+
+    var continuityCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return continuities
+    }
+
+    func applySwitch() async -> SmartPolicyApplyResult {
+        lock.lock(); switches += 1; lock.unlock()
+        try? await Task.sleep(for: delay)
+        return switchResult
+    }
+
+    func applyContinuity() async -> SmartContinuityApplyResult {
+        lock.lock(); continuities += 1; lock.unlock()
+        return continuityResult
+    }
+
+    func evaluateShadow() async throws -> SmartShadowRecommendation {
+        throw CancellationError()
+    }
+
+    func evaluateContinuity() async -> SmartContinuitySummary {
+        .unavailable("runtimeUnavailable")
     }
 }
 
