@@ -396,6 +396,7 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         let dispatchState = ContinuityCloseDispatchState()
         guard receipt.oldOutbound != receipt.newOutbound,
               receipt.identity == request.plan.evidence.identity,
+              receipt.identity.processStartedAt != nil,
               request.plan.classifications[request.connection.id] == .replaceable,
               SmartContinuityPlan.isRelevantOldConnection(request.connection, receipt: receipt) else {
             return .preserved("unrelatedConnection")

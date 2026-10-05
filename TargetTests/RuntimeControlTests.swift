@@ -1114,12 +1114,13 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
             sourceConfigurationFingerprint: expectedRuntime.sourceFingerprint,
             configurationFingerprint: TargetConfigurationFingerprint.sha256(runtimeData),
             startedAt: .now,
+            processStartedAt: DarwinEngineProcessInspector().processStartTime(pid: getpid()),
             runtimeConfigurationID: configurationID
         )
         let recordStore = MutableEngineRuntimeStore(record: record)
         let ownership = EngineRuntimeOwnership(
             store: recordStore,
-            processInspector: AlwaysMatchingEngineProcessInspector(),
+            processInspector: AlwaysMatchingEngineProcessInspector(startedAt: record.processStartedAt),
             portProbe: AlwaysListeningEnginePortProbe()
         )
         let backend = SingBoxBackend(
@@ -1448,7 +1449,10 @@ private final class MutableEngineRuntimeStore: EngineRuntimeStoring, @unchecked 
 }
 
 private struct AlwaysMatchingEngineProcessInspector: EngineProcessInspecting {
+    var startedAt: Date? = nil
+
     func matches(pid: Int32, executablePath: String) -> Bool { true }
+    func processStartTime(pid: Int32) -> Date? { startedAt }
 }
 
 private struct AlwaysListeningEnginePortProbe: LocalEnginePortProbing {
