@@ -162,6 +162,11 @@ struct ProfilePolicyWorkspaceView: View {
                     Text(LocalizedStringKey(smartResult.messageKey))
                         .font(.caption.weight(.semibold))
                     if smartResult.result.action == .continuityApply {
+                        Text(smartResult.result.selectorSwitched
+                            ? "policy.smart.result.selector-switched"
+                            : "policy.smart.result.selector-unchanged")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                         Text(String.localizedStringWithFormat(
                             String(localized: "policy.smart.result.continuity.detail"),
                             Int64(smartResult.result.closedConnectionCount),
