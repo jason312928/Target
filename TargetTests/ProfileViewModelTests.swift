@@ -180,6 +180,7 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         )
         let switchPresentation = SmartApplicationPresentation(result: switched)
         XCTAssertEqual(switchPresentation.messageKey, "policy.smart.result.switched")
+        XCTAssertEqual(switchPresentation.symbolName, "checkmark.circle.fill")
         XCTAssertTrue(switchPresentation.isPositive)
 
         let applied = SmartApplicationResult(
@@ -191,6 +192,7 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         )
         let applyPresentation = SmartApplicationPresentation(result: applied)
         XCTAssertEqual(applyPresentation.messageKey, "policy.smart.result.completed")
+        XCTAssertEqual(applyPresentation.symbolName, "checkmark.circle.fill")
         XCTAssertEqual(applied.closedConnectionCount, 2)
         XCTAssertEqual(applied.preservedConnectionCount, 5)
 
@@ -220,6 +222,64 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
             )
             XCTAssertEqual(SmartApplicationPresentation(result: result).messageKey, key)
         }
+    }
+
+    func testSmartContinuityApplyMapsReasonsThroughApplicationAndPresentation() {
+        func continuityResult(reason: String, selectorApplied: Bool = false, eligible: Int = 3,
+                              closed: Int = 0, preserved: Int = 0, failed: Int = 0) -> SmartContinuityApplyResult {
+            .init(selectorApplied: selectorApplied, observedConnectionCount: eligible,
+                  eligibleConnectionCount: eligible, closedConnectionCount: closed,
+                  preservedConnectionCount: preserved, failedCloseCount: failed,
+                  protectCount: 0, unknownCount: 0, replaceableCount: eligible,
+                  reasonCodes: [reason])
+        }
+
+        let cases: [(reason: String, expectedReason: String, expectedMessage: String, expectedSymbol: String)] = [
+            ("lowConfidence", "lowConfidence", "policy.smart.result.low-confidence", "exclamationmark.triangle"),
+            ("ambiguousEvidence", "ambiguousEvidence", "policy.smart.result.low-confidence", "exclamationmark.triangle"),
+            ("applyInProgress", "applyInProgress", "policy.smart.result.busy", "exclamationmark.triangle"),
+            ("evaluationInProgress", "evaluationInProgress", "policy.smart.result.busy", "exclamationmark.triangle"),
+            ("operationUnavailable", "operationUnavailable", "policy.smart.result.unavailable", "exclamationmark.triangle"),
+            ("alreadySelected", "alreadySelected", "policy.smart.result.keep-current", "pause.circle"),
+            ("keepCurrent", "keepCurrent", "policy.smart.result.keep-current", "pause.circle"),
+            ("cancelled", "cancelled", "policy.smart.result.cancelled", "xmark.circle"),
+            ("selectionUnconfirmed", "selectionUnconfirmed", "policy.smart.result.unavailable", "exclamationmark.triangle"),
+            ("runtimeUnavailable", "runtimeUnavailable", "policy.smart.result.unavailable", "exclamationmark.triangle"),
+            ("staleEvidence", "staleEvidence", "policy.smart.result.unavailable", "exclamationmark.triangle"),
+            ("noEligibleConnections", "noEligibleConnections", "policy.smart.result.preserved", "pause.circle"),
+            ("connectionsPreserved", "connectionsPreserved", "policy.smart.result.preserved", "pause.circle"),
+            ("closeFailed", "closeFailed", "policy.smart.result.unavailable", "exclamationmark.triangle")
+        ]
+
+        for value in cases {
+            let lowLevel = continuityResult(
+                reason: value.reason,
+                selectorApplied: ["noEligibleConnections", "connectionsPreserved"].contains(value.reason),
+                eligible: ["noEligibleConnections"].contains(value.reason) ? 0 : 3,
+                failed: value.reason == "closeFailed" ? 1 : 0
+            )
+            let application = SmartApplicationResult(action: .continuityApply, result: lowLevel)
+            let presentation = SmartApplicationPresentation(result: application)
+            XCTAssertEqual(application.reasonCode, value.expectedReason, value.reason)
+            XCTAssertEqual(presentation.messageKey, value.expectedMessage, value.reason)
+            XCTAssertEqual(presentation.symbolName, value.expectedSymbol, value.reason)
+        }
+
+        let completed = SmartApplicationResult(
+            action: .continuityApply,
+            result: continuityResult(reason: "completed", selectorApplied: true, eligible: 1, closed: 1)
+        )
+        XCTAssertEqual(completed.reasonCode, "completed")
+        XCTAssertEqual(SmartApplicationPresentation(result: completed).symbolName, "checkmark.circle.fill")
+
+        // A non-presentation reason must never turn a failed selector apply into
+        // a misleading preserved/no-eligible outcome.
+        let unavailable = SmartApplicationResult(
+            action: .continuityApply,
+            result: continuityResult(reason: "selectorUnavailable", eligible: 3)
+        )
+        XCTAssertEqual(unavailable.reasonCode, "operationUnavailable")
+        XCTAssertEqual(SmartApplicationPresentation(result: unavailable).messageKey, "policy.smart.result.unavailable")
     }
 
     func testPolicyWorkspacePresentationSearchesCredentialSafeTagAndTypeFacts() {

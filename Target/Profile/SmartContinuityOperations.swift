@@ -391,7 +391,7 @@ actor SmartContinuityApplyOperations {
     }
 
     private static func safeReason(_ reason: String) -> String {
-        let allowed: Set<String> = ["applyInProgress", "runtimeUnavailable", "engineStopped", "selectionUnconfirmed",
+        let allowed: Set<String> = ["applyInProgress", "evaluationInProgress", "runtimeUnavailable", "engineStopped", "selectionUnconfirmed",
             "snapshotTruncated", "staleEvidence", "closeLimitReached", "closeFailed", "cancelled", "noEligibleConnections",
             "completed", "connectionsPreserved", "keepCurrent", "alreadySelected", "lowConfidence", "ambiguousEvidence",
             "invalidRecommendation", "identityChanged", "profileChanged", "liveSelectionChanged", "selectionChanged",

@@ -87,7 +87,7 @@ struct SmartApplicationPresentation: Equatable {
 
     var symbolName: String {
         switch result.reasonCode {
-        case "completed": "checkmark.circle.fill"
+        case "applied", "completed": "checkmark.circle.fill"
         case "connectionsPreserved", "noEligibleConnections", "keepCurrent", "alreadySelected": "pause.circle"
         case "cancelled": "xmark.circle"
         default: "exclamationmark.triangle"

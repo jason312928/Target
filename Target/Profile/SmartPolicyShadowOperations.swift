@@ -311,14 +311,28 @@ struct SmartApplicationResult: Equatable, Sendable {
             reasonCode = "closeFailed"
         } else if result.closedConnectionCount > 0 {
             reasonCode = "completed"
-        } else if let reason = [
-            "cancelled", "selectionUnconfirmed", "runtimeUnavailable", "staleEvidence",
-            "noEligibleConnections", "connectionsPreserved", "keepCurrent"
-        ].first(where: result.reasonCodes.contains) {
+        } else if let reason = Self.continuityPresentationReason(in: result.reasonCodes) {
             reasonCode = reason
-        } else {
+        } else if result.selectorApplied {
             reasonCode = result.eligibleConnectionCount > 0 ? "connectionsPreserved" : "noEligibleConnections"
+        } else {
+            // A selector that never applied cannot have a connection-preservation
+            // outcome. Keep the UI finite and credential-safe when a lower layer
+            // returns a reason outside the presentation contract.
+            reasonCode = "operationUnavailable"
         }
+    }
+
+    private static func continuityPresentationReason(in reasons: [String]) -> String? {
+        // Keep this ordered: SmartContinuityApplyResult is an aggregate and may
+        // contain more than one bounded reason after a partial operation.
+        let allowed = [
+            "lowConfidence", "ambiguousEvidence", "applyInProgress", "evaluationInProgress",
+            "operationUnavailable", "alreadySelected", "keepCurrent", "cancelled",
+            "selectionUnconfirmed", "runtimeUnavailable", "staleEvidence",
+            "noEligibleConnections", "connectionsPreserved"
+        ]
+        return allowed.first(where: reasons.contains)
     }
 }
 
