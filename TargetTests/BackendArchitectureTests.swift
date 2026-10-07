@@ -813,6 +813,40 @@ final class BackendArchitectureTests: XCTestCase {
         XCTFail("connection invalidation did not release the owned lease")
     }
 
+    func testRemovalConnectionInvalidationDuringPrepareCannotCreateLease() async throws {
+        let barrier = TargetServiceRemovalBarrier()
+        let gate = RemovalPrepareGate()
+        let service = CrossConnectionRemovalService(barrier: barrier, gate: gate)
+        let connection = FakeTargetServiceConnection(
+            service: service,
+            onInvalidate: { service.connectionInvalidated() }
+        )
+        let client = TargetServiceXPCClient(
+            timeouts: .init(read: 1, mutation: 1),
+            connectionFactory: { connection }
+        )
+
+        let prepare = Task { try await client.prepareServiceRemoval() }
+        await service.waitUntilPrepareStarted()
+        connection.invalidate()
+        gate.release()
+
+        await XCTAssertThrowsErrorAsync(try await prepare.value) { error in
+            XCTAssertEqual(error as? BackendError, .serviceUnavailable)
+        }
+        for _ in 0..<100 {
+            do {
+                try await barrier.beginEnable()
+                await barrier.endEnable()
+                return
+            } catch let error as SystemProxyError {
+                XCTAssertEqual(error, .serviceRemovalInProgress)
+                await Task.yield()
+            }
+        }
+        XCTFail("connection invalidation left a prepare in flight")
+    }
+
     func testXPCReadWithoutReplyFailsWithinBoundAndInvalidatesConnection() async {
         let connection = FakeTargetServiceConnection(service: FakeTargetService(pingDelay: nil))
         let client = makeXPCClient(connection: connection)

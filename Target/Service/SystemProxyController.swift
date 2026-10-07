@@ -86,6 +86,7 @@ actor TargetServiceRemovalBarrier {
     private var activeEnableCount = 0
     private var pendingToken: Data?
     private var pendingSessionID: UUID?
+    private var invalidatedSessionIDs = Set<UUID>()
 
     func beginEnable() throws {
         guard !preparing, pendingToken == nil else {
@@ -102,12 +103,19 @@ actor TargetServiceRemovalBarrier {
         sessionID: UUID,
         statusProvider: @escaping @Sendable () async throws -> SystemProxyStatus
     ) async throws -> TargetServiceRemovalLease {
+        guard !invalidatedSessionIDs.contains(sessionID) else {
+            invalidatedSessionIDs.remove(sessionID)
+            throw SystemProxyError.invalidServiceRemovalSession
+        }
         guard !preparing, pendingToken == nil, activeEnableCount == 0 else {
             throw SystemProxyError.serviceRemovalInProgress
         }
         preparing = true
         do {
             let status = try await statusProvider()
+            guard invalidatedSessionIDs.remove(sessionID) == nil else {
+                throw SystemProxyError.invalidServiceRemovalSession
+            }
             guard status.isSafeForServiceRemoval else {
                 preparing = false
                 throw status.error ?? .verificationFailed
@@ -139,6 +147,7 @@ actor TargetServiceRemovalBarrier {
     /// Invalidation is the only implicit release path; elapsed wall-clock time never
     /// releases a lease while the unregister call may still be in flight.
     func invalidate(sessionID: UUID) {
+        invalidatedSessionIDs.insert(sessionID)
         guard pendingSessionID == sessionID else { return }
         clearLease()
     }
