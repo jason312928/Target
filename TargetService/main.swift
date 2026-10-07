@@ -3,6 +3,7 @@ import SystemConfiguration
 
 private final class TargetServiceServer: NSObject, NSXPCListenerDelegate {
     private let listener = NSXPCListener(machServiceName: TargetServiceIdentifiers.machService)
+    private let removalBarrier = TargetServiceRemovalBarrier()
 
     func run() {
         listener.delegate = self
@@ -17,7 +18,7 @@ private final class TargetServiceServer: NSObject, NSXPCListenerDelegate {
               TargetServicePeerAuthorization.allows(peerUID: peerUID, consoleUID: consoleUID),
               let store = UserEngineRuntimeStore(uid: peerUID) else { return false }
         let ownership = EngineRuntimeOwnership(store: store)
-        let endpoint = TargetServiceEndpoint(runtimeOwnership: ownership)
+        let endpoint = TargetServiceEndpoint(runtimeOwnership: ownership, removalBarrier: removalBarrier)
         connection.exportedInterface = NSXPCInterface(with: TargetServiceXPCProtocol.self)
         connection.exportedObject = endpoint
         endpoint.start()
@@ -32,10 +33,14 @@ server.run()
 private final class TargetServiceEndpoint: NSObject, TargetServiceXPCProtocol {
     private let systemProxy: SystemProxyCoordinator
 
-    init(runtimeOwnership: EngineRuntimeOwnership) {
+    private let removalBarrier: TargetServiceRemovalBarrier
+
+    init(runtimeOwnership: EngineRuntimeOwnership, removalBarrier: TargetServiceRemovalBarrier) {
+        self.removalBarrier = removalBarrier
         systemProxy = SystemProxyCoordinator(
             portProbe: TargetOwnedPortProbe(runtimeOwnership: runtimeOwnership),
-            endpointProvider: { await runtimeOwnership.ownedEndpoint() }
+            endpointProvider: { await runtimeOwnership.ownedEndpoint() },
+            removalBarrier: removalBarrier
         )
     }
 
@@ -88,6 +93,47 @@ private final class TargetServiceEndpoint: NSObject, TargetServiceXPCProtocol {
 
     func recoverSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void) {
         performSystemProxyOperation(reply) { try await self.systemProxy.recoverSystemProxy() }
+    }
+
+    func prepareServiceRemoval(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        Task {
+            do {
+                let lease = try await removalBarrier.prepare {
+                    await self.systemProxy.querySystemProxyStatus()
+                }
+                reply(try JSONEncoder().encode(lease), nil)
+            } catch let error as SystemProxyError {
+                reply(nil, xpcError(error))
+            } catch {
+                reply(nil, xpcError(.statusUnavailable))
+            }
+        }
+    }
+
+    func cancelServiceRemoval(_ token: Data, withReply reply: @escaping (NSError?) -> Void) {
+        Task {
+            do {
+                try await removalBarrier.cancel(token: token)
+                reply(nil)
+            } catch let error as SystemProxyError {
+                reply(xpcError(error))
+            } catch {
+                reply(xpcError(.invalidServiceRemovalSession))
+            }
+        }
+    }
+
+    func completeServiceRemoval(_ token: Data, withReply reply: @escaping (NSError?) -> Void) {
+        Task {
+            do {
+                try await removalBarrier.complete(token: token)
+                reply(nil)
+            } catch let error as SystemProxyError {
+                reply(xpcError(error))
+            } catch {
+                reply(xpcError(.invalidServiceRemovalSession))
+            }
+        }
     }
 
     private func performSystemProxyOperation(

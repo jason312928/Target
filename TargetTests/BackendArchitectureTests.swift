@@ -670,6 +670,76 @@ final class BackendArchitectureTests: XCTestCase {
         XCTAssertEqual(proxyStatus, .disabled)
     }
 
+    func testTwoIndependentXPCClientsShareRemovalBarrier() async throws {
+        let barrier = TargetServiceRemovalBarrier(leaseDuration: .seconds(1))
+        let gate = RemovalPrepareGate()
+        let service = CrossConnectionRemovalService(barrier: barrier, gate: gate)
+        let clientA = TargetServiceXPCClient(
+            timeouts: .init(read: 1, mutation: 1),
+            connectionFactory: { FakeTargetServiceConnection(service: service) }
+        )
+        let clientB = TargetServiceXPCClient(
+            timeouts: .init(read: 1, mutation: 1),
+            connectionFactory: { FakeTargetServiceConnection(service: service) }
+        )
+
+        let prepare = Task { try await clientA.prepareServiceRemoval() }
+        await service.waitUntilPrepareStarted()
+        await XCTAssertThrowsErrorAsync(try await clientB.enableSystemProxy()) { error in
+            XCTAssertEqual(error as? SystemProxyError, .serviceRemovalInProgress)
+        }
+
+        gate.release()
+        let lease = try await prepare.value
+        XCTAssertEqual(lease.status, .disabled)
+        try await clientA.completeServiceRemoval(lease.token)
+        let enabled = try await clientB.enableSystemProxy()
+        XCTAssertEqual(enabled.state, .enabled)
+    }
+
+    func testRemovalBarrierRejectsUnsafeOrActivePrepareAndRecoversAfterCancel() async throws {
+        let barrier = TargetServiceRemovalBarrier(leaseDuration: .milliseconds(40))
+        let unsafe: [SystemProxyStatus] = [
+            SystemProxyStatus(state: .enabled, engineReachable: true, affectedServiceCount: 1, error: nil, hasRecoverySnapshot: true),
+            SystemProxyStatus(state: .recoveryRequired, engineReachable: false, affectedServiceCount: 1, error: .localProxyUnavailable, hasRecoverySnapshot: true),
+            SystemProxyStatus(state: .failed, engineReachable: false, affectedServiceCount: 0, error: .statusUnavailable, hasRecoverySnapshot: false)
+        ]
+        for status in unsafe {
+            await XCTAssertThrowsErrorAsync(try await barrier.prepare { status }) { error in
+                XCTAssertEqual(error as? SystemProxyError, status.error ?? .verificationFailed)
+            }
+        }
+        await XCTAssertThrowsErrorAsync(try await barrier.prepare { throw SystemProxyError.statusUnavailable }) { error in
+            XCTAssertEqual(error as? SystemProxyError, .statusUnavailable)
+        }
+
+        try await barrier.beginEnable()
+        await XCTAssertThrowsErrorAsync(try await barrier.prepare { .disabled }) { error in
+            XCTAssertEqual(error as? SystemProxyError, .serviceRemovalInProgress)
+        }
+        await barrier.endEnable()
+
+        let lease = try await barrier.prepare { .disabled }
+        await XCTAssertThrowsErrorAsync(try await barrier.cancel(token: Data("stale".utf8))) { error in
+            XCTAssertEqual(error as? SystemProxyError, .invalidServiceRemovalSession)
+        }
+        await XCTAssertThrowsErrorAsync(try await barrier.complete(token: Data("stale".utf8))) { error in
+            XCTAssertEqual(error as? SystemProxyError, .invalidServiceRemovalSession)
+        }
+        try await barrier.cancel(token: lease.token)
+        try await barrier.beginEnable()
+        await barrier.endEnable()
+    }
+
+    func testRemovalBarrierLeaseExpiresAfterClientFailure() async throws {
+        let barrier = TargetServiceRemovalBarrier(leaseDuration: .milliseconds(20))
+        let lease = try await barrier.prepare { .disabled }
+        XCTAssertFalse(lease.token.isEmpty)
+        try await Task.sleep(for: .milliseconds(50))
+        try await barrier.beginEnable()
+        await barrier.endEnable()
+    }
+
     func testXPCReadWithoutReplyFailsWithinBoundAndInvalidatesConnection() async {
         let connection = FakeTargetServiceConnection(service: FakeTargetService(pingDelay: nil))
         let client = makeXPCClient(connection: connection)
@@ -1060,12 +1130,12 @@ private final class FakeTargetServiceConnection: TargetServiceXPCConnecting, @un
     var interruptionHandler: (() -> Void)?
     var invalidationHandler: (() -> Void)?
 
-    private let service: FakeTargetService
+    private let service: any TargetServiceXPCProtocol
     private let invalidateOnResume: Bool
     private let lock = NSLock()
     private var storedInvalidationCount = 0
 
-    init(service: FakeTargetService, invalidateOnResume: Bool = false) {
+    init(service: any TargetServiceXPCProtocol, invalidateOnResume: Bool = false) {
         self.service = service
         self.invalidateOnResume = invalidateOnResume
     }
@@ -1086,6 +1156,93 @@ private final class FakeTargetServiceConnection: TargetServiceXPCConnecting, @un
 
     func remoteObjectProxyWithErrorHandler(_ handler: @escaping (Error) -> Void) -> Any {
         service
+    }
+}
+
+private actor RemovalPrepareGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    func wait() async { await withCheckedContinuation { continuation = $0 } }
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private final class CrossConnectionRemovalService: NSObject, TargetServiceXPCProtocol, @unchecked Sendable {
+    private let barrier: TargetServiceRemovalBarrier
+    private let gate: RemovalPrepareGate
+    private var prepareStarted = false
+
+    init(barrier: TargetServiceRemovalBarrier, gate: RemovalPrepareGate) {
+        self.barrier = barrier
+        self.gate = gate
+    }
+
+    func ping(withReply reply: @escaping (String) -> Void) { reply("target-service") }
+    func queryStatus(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        reply(try? XPCPayloadCodec.encodeStatus(BackendStatus(serviceInstallation: .enabled, engineState: .stopped)), nil)
+    }
+    func validateConfiguration(_ request: Data, withReply reply: @escaping (NSError?) -> Void) { reply(nil) }
+    func startEngine(withReply reply: @escaping (Data?, NSError?) -> Void) { queryStatus(withReply: reply) }
+    func stopEngine(withReply reply: @escaping (Data?, NSError?) -> Void) { queryStatus(withReply: reply) }
+    func querySystemProxyStatus(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        reply(try? XPCPayloadCodec.encodeSystemProxyStatus(.disabled), nil)
+    }
+    func enableSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        Task {
+            do {
+                try await barrier.beginEnable()
+                await barrier.endEnable()
+                reply(try XPCPayloadCodec.encodeSystemProxyStatus(SystemProxyStatus(
+                    state: .enabled, engineReachable: true, affectedServiceCount: 1,
+                    error: nil, hasRecoverySnapshot: true
+                )), nil)
+            } catch let error as SystemProxyError {
+                reply(nil, xpcError(error))
+            } catch {
+                reply(nil, xpcError(.applyFailed))
+            }
+        }
+    }
+    func disableSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        reply(try? XPCPayloadCodec.encodeSystemProxyStatus(.disabled), nil)
+    }
+    func recoverSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        disableSystemProxy(withReply: reply)
+    }
+    func prepareServiceRemoval(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        Task {
+            do {
+                let lease = try await barrier.prepare {
+                    await self.markPrepareStartedAndWait()
+                    return .disabled
+                }
+                reply(try JSONEncoder().encode(lease), nil)
+            } catch let error as SystemProxyError {
+                reply(nil, xpcError(error))
+            } catch {
+                reply(nil, xpcError(.statusUnavailable))
+            }
+        }
+    }
+    func cancelServiceRemoval(_ token: Data, withReply reply: @escaping (NSError?) -> Void) {
+        Task {
+            do { try await barrier.cancel(token: token); reply(nil) }
+            catch let error as SystemProxyError { reply(xpcError(error)) }
+            catch { reply(xpcError(.invalidServiceRemovalSession)) }
+        }
+    }
+    func completeServiceRemoval(_ token: Data, withReply reply: @escaping (NSError?) -> Void) {
+        cancelServiceRemoval(token, withReply: reply)
+    }
+
+    func waitUntilPrepareStarted() async {
+        while !prepareStarted { await Task.yield() }
+    }
+
+    private func markPrepareStartedAndWait() async {
+        prepareStarted = true
+        await gate.wait()
     }
 }
 
@@ -1150,6 +1307,19 @@ private final class FakeTargetService: NSObject, TargetServiceXPCProtocol, @unch
 
     func recoverSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void) {
         replyWithProxyStatus(after: proxyDelay, reply: reply)
+    }
+
+    func prepareServiceRemoval(withReply reply: @escaping (Data?, NSError?) -> Void) {
+        let lease = TargetServiceRemovalLease(token: Data("test-session".utf8), status: .disabled)
+        reply(try? JSONEncoder().encode(lease), nil)
+    }
+
+    func cancelServiceRemoval(_ token: Data, withReply reply: @escaping (NSError?) -> Void) {
+        reply(nil)
+    }
+
+    func completeServiceRemoval(_ token: Data, withReply reply: @escaping (NSError?) -> Void) {
+        reply(nil)
     }
 
     private func replyWithProxyStatus(

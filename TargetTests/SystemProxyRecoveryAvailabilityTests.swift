@@ -190,6 +190,24 @@ final class SystemProxyRecoveryAvailabilityTests: XCTestCase {
         XCTAssertEqual(model.systemProxyStatus, .disabled)
     }
 
+    func testRemovalUnregisterFailureCancelsLeaseAndAllowsLaterEnable() async throws {
+        let client = RemovalLeaseClient()
+        let operations = TargetSystemProxyOperations(client: client)
+
+        await XCTAssertThrowsErrorAsync(try await operations.removeService(
+            unregisterService: { throw BackendError.serviceRegistrationFailed },
+            serviceStatus: { .enabled }
+        )) { error in
+            XCTAssertEqual(error as? BackendError, .serviceRegistrationFailed)
+        }
+
+        let wasCancelled = await client.wasCancelled
+        XCTAssertTrue(wasCancelled)
+        _ = try await client.enableSystemProxy()
+        let enableCount = await client.enableCount
+        XCTAssertEqual(enableCount, 1)
+    }
+
     func testGUIAndAutomationUseOneSharedServiceRemovalOperation() async throws {
         let shared = RemovalOperationSpy()
         let model = BackendLifecycleModel(
@@ -1139,6 +1157,25 @@ private actor SensitiveRecoveryClient: SystemProxyClient {
     func enableSystemProxy() async throws -> SystemProxyStatus { status }
     func disableSystemProxy() async throws -> SystemProxyStatus { status }
     func recoverSystemProxy() async throws -> SystemProxyStatus { throw error }
+}
+
+private actor RemovalLeaseClient: SystemProxyClient, TargetServiceRemovalClient {
+    private(set) var wasCancelled = false
+    private(set) var enableCount = 0
+
+    func ping() async throws -> String { "test" }
+    func querySystemProxyStatus() async throws -> SystemProxyStatus { .disabled }
+    func enableSystemProxy() async throws -> SystemProxyStatus {
+        enableCount += 1
+        return SystemProxyStatus(state: .enabled, engineReachable: true, affectedServiceCount: 1, error: nil, hasRecoverySnapshot: true)
+    }
+    func disableSystemProxy() async throws -> SystemProxyStatus { .disabled }
+    func recoverSystemProxy() async throws -> SystemProxyStatus { .disabled }
+    func prepareServiceRemoval() async throws -> TargetServiceRemovalLease {
+        TargetServiceRemovalLease(token: Data("lease".utf8), status: .disabled)
+    }
+    func cancelServiceRemoval(_ token: Data) async throws { wasCancelled = true }
+    func completeServiceRemoval(_ token: Data) async throws {}
 }
 
 private struct Issue3PassingChecker: SingBoxConfigurationChecking {

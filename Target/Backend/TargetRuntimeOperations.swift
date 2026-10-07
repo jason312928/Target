@@ -8,6 +8,12 @@ protocol SystemProxyClient: Sendable {
     func recoverSystemProxy() async throws -> SystemProxyStatus
 }
 
+protocol TargetServiceRemovalClient: Sendable {
+    func prepareServiceRemoval() async throws -> TargetServiceRemovalLease
+    func cancelServiceRemoval(_ token: Data) async throws
+    func completeServiceRemoval(_ token: Data) async throws
+}
+
 struct EngineStopResult: Equatable, Sendable {
     let engineStatus: BackendStatus
     let systemProxyStatus: SystemProxyStatus?

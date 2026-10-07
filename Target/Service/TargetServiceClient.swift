@@ -107,7 +107,7 @@ protocol TargetServiceXPCConnecting: AnyObject {
 
 extension NSXPCConnection: TargetServiceXPCConnecting {}
 
-final class TargetServiceXPCClient: SystemProxyClient, @unchecked Sendable {
+final class TargetServiceXPCClient: SystemProxyClient, TargetServiceRemovalClient, @unchecked Sendable {
     private let timeouts: TargetServiceXPCTimeouts
     private let connectionFactory: () -> any TargetServiceXPCConnecting
 
@@ -202,6 +202,25 @@ final class TargetServiceXPCClient: SystemProxyClient, @unchecked Sendable {
         }
     }
 
+    func prepareServiceRemoval() async throws -> TargetServiceRemovalLease {
+        let data = try await callData(timeout: timeouts.mutation) { service, reply in
+            service.prepareServiceRemoval(withReply: reply)
+        }
+        return try JSONDecoder().decode(TargetServiceRemovalLease.self, from: data)
+    }
+
+    func cancelServiceRemoval(_ token: Data) async throws {
+        try await callVoid(timeout: timeouts.mutation) { service, reply in
+            service.cancelServiceRemoval(token, withReply: reply)
+        }
+    }
+
+    func completeServiceRemoval(_ token: Data) async throws {
+        try await callVoid(timeout: timeouts.mutation) { service, reply in
+            service.completeServiceRemoval(token, withReply: reply)
+        }
+    }
+
     private func callSystemProxy(
         timeout: TimeInterval,
         _ action: @escaping (TargetServiceXPCProtocol, @escaping (Data?, NSError?) -> Void) -> Void
@@ -221,7 +240,7 @@ final class TargetServiceXPCClient: SystemProxyClient, @unchecked Sendable {
             }
             action(service) { data, error in
                 if let error {
-                    reply.fail(error)
+                    reply.fail(Self.decodeError(error))
                     return
                 }
                 guard let data else {
@@ -235,6 +254,68 @@ final class TargetServiceXPCClient: SystemProxyClient, @unchecked Sendable {
                 }
             }
         }
+    }
+
+    private func callData(
+        timeout: TimeInterval,
+        _ action: @escaping (TargetServiceXPCProtocol, @escaping (Data?, NSError?) -> Void) -> Void
+    ) async throws -> Data {
+        let connection = connectionFactory()
+        defer { connection.invalidate() }
+        return try await withCheckedThrowingContinuation { continuation in
+            let reply = XPCReplyOnce(continuation)
+            reply.armTimeout(after: timeout) { connection.invalidate() }
+            connection.interruptionHandler = { reply.fail() }
+            connection.invalidationHandler = { reply.fail() }
+            connection.resume()
+            let proxy = connection.remoteObjectProxyWithErrorHandler { error in reply.fail(error) }
+            guard let service = proxy as? TargetServiceXPCProtocol else {
+                reply.fail()
+                return
+            }
+            action(service) { data, error in
+                if let error {
+                    reply.fail(Self.decodeError(error))
+                    return
+                }
+                guard let data else {
+                    reply.fail()
+                    return
+                }
+                reply.succeed(data)
+            }
+        }
+    }
+
+    private func callVoid(
+        timeout: TimeInterval,
+        _ action: @escaping (TargetServiceXPCProtocol, @escaping (NSError?) -> Void) -> Void
+    ) async throws {
+        let connection = connectionFactory()
+        defer { connection.invalidate() }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let reply = XPCReplyOnce(continuation)
+            reply.armTimeout(after: timeout) { connection.invalidate() }
+            connection.interruptionHandler = { reply.fail() }
+            connection.invalidationHandler = { reply.fail() }
+            connection.resume()
+            let proxy = connection.remoteObjectProxyWithErrorHandler { error in reply.fail(error) }
+            guard let service = proxy as? TargetServiceXPCProtocol else {
+                reply.fail()
+                return
+            }
+            action(service) { error in
+                if let error {
+                    reply.fail(Self.decodeError(error))
+                } else {
+                    reply.succeed(())
+                }
+            }
+        }
+    }
+
+    private static func decodeError(_ error: NSError) -> Error {
+        SystemProxyError(serviceError: error) ?? error
     }
 }
 

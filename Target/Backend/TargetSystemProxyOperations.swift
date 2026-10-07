@@ -174,24 +174,74 @@ actor TargetSystemProxyOperations: TargetSystemProxyOperating {
     ) async throws -> TargetServiceRemovalResult {
         let client = client
         return try await enqueue { [weak self] in
+            var removalToken: Data?
             let status: SystemProxyStatus
+            if let removalClient = client as? any TargetServiceRemovalClient {
+                do {
+                    let lease = try await removalClient.prepareServiceRemoval()
+                    removalToken = lease.token
+                    status = lease.status
+                    await self?.record(status)
+                } catch {
+                    let queriedStatus = try? await client.querySystemProxyStatus()
+                    let fallback: SystemProxyStatus
+                    if let queriedStatus {
+                        fallback = queriedStatus
+                    } else {
+                        fallback = await self?.lastStatus() ?? .disabled
+                    }
+                    await self?.record(fallback)
+                    let operationError = SystemProxyError(serviceError: error) ?? .statusUnavailable
+                    let reconciledStatus: SystemProxyStatus
+                    if operationError == .serviceRemovalInProgress {
+                        reconciledStatus = SystemProxyStatus(
+                            state: .failed,
+                            engineReachable: fallback.engineReachable,
+                            affectedServiceCount: fallback.affectedServiceCount,
+                            error: operationError,
+                            hasRecoverySnapshot: fallback.hasRecoverySnapshot
+                        )
+                    } else {
+                        reconciledStatus = fallback
+                    }
+                    throw TargetSystemProxyOperationError(
+                        operationError: operationError,
+                        reconciledStatus: reconciledStatus
+                    )
+                }
+            } else {
+                do {
+                    status = try await client.querySystemProxyStatus()
+                    await self?.record(status)
+                } catch {
+                    let fallback = await self?.lastStatus() ?? .disabled
+                    throw TargetSystemProxyOperationError(
+                        operationError: .statusUnavailable,
+                        reconciledStatus: fallback.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+                    )
+                }
+                guard status.isSafeForServiceRemoval else {
+                    throw TargetSystemProxyOperationError(
+                        operationError: status.error ?? .verificationFailed,
+                        reconciledStatus: status
+                    )
+                }
+            }
+
             do {
-                status = try await client.querySystemProxyStatus()
-                await self?.record(status)
+                try unregisterService()
             } catch {
-                let fallback = await self?.lastStatus() ?? .disabled
-                throw TargetSystemProxyOperationError(
-                    operationError: .statusUnavailable,
-                    reconciledStatus: fallback.preservingRecoveryEvidenceWhileStatusIsUnavailable()
-                )
+                if let removalToken, let removalClient = client as? any TargetServiceRemovalClient {
+                    try? await removalClient.cancelServiceRemoval(removalToken)
+                }
+                throw error
             }
-            guard status.isSafeForServiceRemoval else {
-                throw TargetSystemProxyOperationError(
-                    operationError: status.error ?? .verificationFailed,
-                    reconciledStatus: status
-                )
+            if let removalToken, let removalClient = client as? any TargetServiceRemovalClient {
+                // Unregister succeeded. A best-effort completion releases the lease
+                // promptly; the service-side bounded expiry covers a disappearing
+                // daemon or an interrupted completion call.
+                try? await removalClient.completeServiceRemoval(removalToken)
             }
-            try unregisterService()
             return TargetServiceRemovalResult(
                 systemProxyStatus: status,
                 serviceInstallation: serviceStatus()

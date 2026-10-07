@@ -30,6 +30,9 @@ protocol TargetServiceXPCProtocol: NSObjectProtocol {
     func enableSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void)
     func disableSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void)
     func recoverSystemProxy(withReply reply: @escaping (Data?, NSError?) -> Void)
+    func prepareServiceRemoval(withReply reply: @escaping (Data?, NSError?) -> Void)
+    func cancelServiceRemoval(_ token: Data, withReply reply: @escaping (NSError?) -> Void)
+    func completeServiceRemoval(_ token: Data, withReply reply: @escaping (NSError?) -> Void)
 }
 
 enum XPCPayloadCodec {
@@ -73,6 +76,8 @@ func xpcError(_ error: SystemProxyError) -> NSError {
     case .verificationFailed: code = 108
     case .recoveryFailed: code = 109
     case .statusUnavailable: code = 110
+    case .serviceRemovalInProgress: code = 111
+    case .invalidServiceRemovalSession: code = 112
     }
     return NSError(
         domain: "com.jason312928.Target.TargetService",

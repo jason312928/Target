@@ -25,6 +25,8 @@ enum SystemProxyError: String, Codable, Error, Equatable, Sendable {
     case verificationFailed
     case recoveryFailed
     case statusUnavailable
+    case serviceRemovalInProgress
+    case invalidServiceRemovalSession
 
     var localizedKey: String {
         switch self {
@@ -39,6 +41,8 @@ enum SystemProxyError: String, Codable, Error, Equatable, Sendable {
         case .verificationFailed: "system-proxy.error.verification-failed"
         case .recoveryFailed: "system-proxy.error.recovery-failed"
         case .statusUnavailable: "system-proxy.error.status-unavailable"
+        case .serviceRemovalInProgress: "system-proxy.error.service-removal-in-progress"
+        case .invalidServiceRemovalSession: "system-proxy.error.invalid-service-removal-session"
         }
     }
 
@@ -61,8 +65,113 @@ enum SystemProxyError: String, Codable, Error, Equatable, Sendable {
         case 108: self = .verificationFailed
         case 109: self = .recoveryFailed
         case 110: self = .statusUnavailable
+        case 111: self = .serviceRemovalInProgress
+        case 112: self = .invalidServiceRemovalSession
         default: return nil
         }
+    }
+}
+
+struct TargetServiceRemovalLease: Codable, Equatable, Sendable {
+    let token: Data
+    let status: SystemProxyStatus
+}
+
+/// One fixed-purpose lease shared by every XPC endpoint in one TargetService
+/// process. It closes the safe-read-to-unregister window across connections.
+actor TargetServiceRemovalBarrier {
+    static let productionLeaseDuration: Duration = .seconds(30)
+
+    private let leaseDuration: Duration
+    private var preparing = false
+    private var activeEnableCount = 0
+    private var pendingToken: Data?
+    private var pendingExpiry: ContinuousClock.Instant?
+    private var expiryTask: Task<Void, Never>?
+
+    init(leaseDuration: Duration = productionLeaseDuration) {
+        self.leaseDuration = leaseDuration
+    }
+
+    deinit { expiryTask?.cancel() }
+
+    func beginEnable() throws {
+        reapExpiredLease()
+        guard !preparing, pendingToken == nil else {
+            throw SystemProxyError.serviceRemovalInProgress
+        }
+        activeEnableCount += 1
+    }
+
+    func endEnable() {
+        activeEnableCount = max(0, activeEnableCount - 1)
+    }
+
+    func prepare(
+        statusProvider: @escaping @Sendable () async throws -> SystemProxyStatus
+    ) async throws -> TargetServiceRemovalLease {
+        reapExpiredLease()
+        guard !preparing, pendingToken == nil, activeEnableCount == 0 else {
+            throw SystemProxyError.serviceRemovalInProgress
+        }
+        preparing = true
+        do {
+            let status = try await statusProvider()
+            guard status.isSafeForServiceRemoval else {
+                preparing = false
+                throw status.error ?? .verificationFailed
+            }
+            let token = Data(UUID().uuidString.utf8)
+            let expiry = ContinuousClock.now + leaseDuration
+            pendingToken = token
+            pendingExpiry = expiry
+            preparing = false
+            scheduleExpiry(token: token, at: expiry)
+            return TargetServiceRemovalLease(token: token, status: status)
+        } catch {
+            preparing = false
+            if let error = error as? SystemProxyError { throw error }
+            throw SystemProxyError.statusUnavailable
+        }
+    }
+
+    func cancel(token: Data) throws {
+        reapExpiredLease()
+        guard pendingToken == token else {
+            throw SystemProxyError.invalidServiceRemovalSession
+        }
+        clearLease()
+    }
+
+    func complete(token: Data) throws {
+        try cancel(token: token)
+    }
+
+    private func scheduleExpiry(token: Data, at expiry: ContinuousClock.Instant) {
+        expiryTask?.cancel()
+        expiryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(until: expiry, clock: .continuous)
+                await self?.expire(token: token)
+            } catch { }
+        }
+    }
+
+    private func expire(token: Data) {
+        guard pendingToken == token else { return }
+        clearLease()
+    }
+
+    private func reapExpiredLease() {
+        guard let pendingExpiry, ContinuousClock.now >= pendingExpiry else { return }
+        clearLease()
+    }
+
+    private func clearLease() {
+        pendingToken = nil
+        pendingExpiry = nil
+        expiryTask?.cancel()
+        expiryTask = nil
     }
 }
 
@@ -287,6 +396,7 @@ actor SystemProxyCoordinator {
     private let environment: any HostNetworkEnvironmentChecking
     private let safetyMode: HostNetworkSafetyMode
     private let endpointProvider: @Sendable () async -> LocalEngineEndpoint?
+    private let removalBarrier: TargetServiceRemovalBarrier
     private var monitoringTask: Task<Void, Never>?
 
     init(
@@ -295,7 +405,8 @@ actor SystemProxyCoordinator {
         portProbe: any LocalProxyProbing = TargetOwnedPortProbe(),
         environment: any HostNetworkEnvironmentChecking = HostNetworkEnvironmentProbe(),
         safetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode,
-        endpointProvider: @escaping @Sendable () async -> LocalEngineEndpoint? = { await EngineRuntimeOwnership().ownedEndpoint() }
+        endpointProvider: @escaping @Sendable () async -> LocalEngineEndpoint? = { await EngineRuntimeOwnership().ownedEndpoint() },
+        removalBarrier: TargetServiceRemovalBarrier = TargetServiceRemovalBarrier()
     ) {
         self.system = system
         self.recoveryStore = recoveryStore
@@ -303,6 +414,7 @@ actor SystemProxyCoordinator {
         self.environment = environment
         self.safetyMode = safetyMode
         self.endpointProvider = endpointProvider
+        self.removalBarrier = removalBarrier
     }
 
     deinit { monitoringTask?.cancel() }
@@ -358,6 +470,18 @@ actor SystemProxyCoordinator {
     }
 
     func enableSystemProxy() async throws -> SystemProxyStatus {
+        try await removalBarrier.beginEnable()
+        do {
+            let status = try await performEnableSystemProxy()
+            await removalBarrier.endEnable()
+            return status
+        } catch {
+            await removalBarrier.endEnable()
+            throw error
+        }
+    }
+
+    private func performEnableSystemProxy() async throws -> SystemProxyStatus {
         try requireNetworkTakeoverPermission()
         guard let endpoint = await endpointProvider(), await portProbe.isAvailable() else {
             throw SystemProxyError.localProxyUnavailable
