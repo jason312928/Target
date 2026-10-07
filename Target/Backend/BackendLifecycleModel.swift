@@ -74,10 +74,7 @@ final class BackendLifecycleModel {
         self.serviceManager = backend as? any ServiceLifecycleManaging
         self.serviceTester = backend as? any ServiceConnectionTesting
         self.systemProxyClient = systemProxyClient
-        let resolvedSystemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(
-            client: systemProxyClient,
-            serviceRegistrationStatus: { TargetServiceRegistration.status }
-        )
+        let resolvedSystemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: systemProxyClient)
         self.systemProxyOperations = resolvedSystemProxyOperations
         let resolvedRuntimeOperations = runtimeOperations ?? TargetRuntimeOperations(
             backend: backend,

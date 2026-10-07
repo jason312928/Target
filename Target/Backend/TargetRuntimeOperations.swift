@@ -59,10 +59,7 @@ actor TargetRuntimeOperations: TargetRuntimeOperating, TargetConnectionOperating
         hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode
     ) {
         self.backend = backend
-        self.systemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(
-            client: systemProxyClient,
-            serviceRegistrationStatus: { TargetServiceRegistration.status }
-        )
+        self.systemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: systemProxyClient)
         self.hostNetworkSafetyMode = hostNetworkSafetyMode
     }
 
