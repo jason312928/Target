@@ -237,9 +237,9 @@ actor TargetSystemProxyOperations: TargetSystemProxyOperating {
                 throw error
             }
             if let removalToken, let removalClient = client as? any TargetServiceRemovalClient {
-                // Unregister succeeded. A best-effort completion releases the lease
-                // promptly; the service-side bounded expiry covers a disappearing
-                // daemon or an interrupted completion call.
+                // Unregister succeeded. Completion releases the connection-owned
+                // lease promptly; client disappearance releases it via XPC
+                // invalidation on the service side.
                 try? await removalClient.completeServiceRemoval(removalToken)
             }
             return TargetServiceRemovalResult(

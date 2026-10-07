@@ -110,6 +110,7 @@ extension NSXPCConnection: TargetServiceXPCConnecting {}
 final class TargetServiceXPCClient: SystemProxyClient, TargetServiceRemovalClient, @unchecked Sendable {
     private let timeouts: TargetServiceXPCTimeouts
     private let connectionFactory: () -> any TargetServiceXPCConnecting
+    private let removalConnectionState = RemovalConnectionState()
 
     init(
         timeouts: TargetServiceXPCTimeouts = .production,
@@ -203,22 +204,64 @@ final class TargetServiceXPCClient: SystemProxyClient, TargetServiceRemovalClien
     }
 
     func prepareServiceRemoval() async throws -> TargetServiceRemovalLease {
-        let data = try await callData(timeout: timeouts.mutation) { service, reply in
-            service.prepareServiceRemoval(withReply: reply)
+        // Keep this connection alive for the whole unregister transaction. The
+        // service binds the lease to the connection's server-side session; it
+        // must not be reduced to another short-lived request/response call.
+        guard let connection = removalConnectionState.install(connectionFactory()) else {
+            throw SystemProxyError.serviceRemovalInProgress
         }
-        return try JSONDecoder().decode(TargetServiceRemovalLease.self, from: data)
+
+        do {
+            let data = try await callData(on: connection, timeout: timeouts.mutation) { service, reply in
+                service.prepareServiceRemoval(withReply: reply)
+            }
+            return try JSONDecoder().decode(TargetServiceRemovalLease.self, from: data)
+        } catch {
+            clearRemovalConnection(connection)
+            connection.invalidate()
+            throw error
+        }
     }
 
     func cancelServiceRemoval(_ token: Data) async throws {
-        try await callVoid(timeout: timeouts.mutation) { service, reply in
+        try await finishRemoval(token: token) { service, reply in
             service.cancelServiceRemoval(token, withReply: reply)
         }
     }
 
     func completeServiceRemoval(_ token: Data) async throws {
-        try await callVoid(timeout: timeouts.mutation) { service, reply in
+        try await finishRemoval(token: token) { service, reply in
             service.completeServiceRemoval(token, withReply: reply)
         }
+    }
+
+    private func finishRemoval(
+        token: Data,
+        _ action: @escaping (TargetServiceXPCProtocol, @escaping (NSError?) -> Void) -> Void
+    ) async throws {
+        let connection = removalConnectionState.current
+        guard let connection else {
+            throw SystemProxyError.invalidServiceRemovalSession
+        }
+        do {
+            try await callVoid(on: connection, timeout: timeouts.mutation, resume: false, action)
+            clearRemovalConnection(connection)
+            connection.invalidate()
+        } catch let error as SystemProxyError where error == .invalidServiceRemovalSession {
+            // A stale or foreign token must not turn into an implicit release by
+            // invalidating the connection that owns a different active lease.
+            throw error
+        } catch {
+            // Transport failure still invalidates the session, allowing the
+            // server-side connection handler to release its owned lease.
+            clearRemovalConnection(connection)
+            connection.invalidate()
+            throw error
+        }
+    }
+
+    private func clearRemovalConnection(_ connection: any TargetServiceXPCConnecting) {
+        removalConnectionState.clear(connection)
     }
 
     private func callSystemProxy(
@@ -257,17 +300,17 @@ final class TargetServiceXPCClient: SystemProxyClient, TargetServiceRemovalClien
     }
 
     private func callData(
+        on connection: any TargetServiceXPCConnecting,
         timeout: TimeInterval,
+        resume: Bool = true,
         _ action: @escaping (TargetServiceXPCProtocol, @escaping (Data?, NSError?) -> Void) -> Void
     ) async throws -> Data {
-        let connection = connectionFactory()
-        defer { connection.invalidate() }
-        return try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { continuation in
             let reply = XPCReplyOnce(continuation)
             reply.armTimeout(after: timeout) { connection.invalidate() }
             connection.interruptionHandler = { reply.fail() }
             connection.invalidationHandler = { reply.fail() }
-            connection.resume()
+            if resume { connection.resume() }
             let proxy = connection.remoteObjectProxyWithErrorHandler { error in reply.fail(error) }
             guard let service = proxy as? TargetServiceXPCProtocol else {
                 reply.fail()
@@ -288,17 +331,17 @@ final class TargetServiceXPCClient: SystemProxyClient, TargetServiceRemovalClien
     }
 
     private func callVoid(
+        on connection: any TargetServiceXPCConnecting,
         timeout: TimeInterval,
+        resume: Bool = true,
         _ action: @escaping (TargetServiceXPCProtocol, @escaping (NSError?) -> Void) -> Void
     ) async throws {
-        let connection = connectionFactory()
-        defer { connection.invalidate() }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let reply = XPCReplyOnce(continuation)
             reply.armTimeout(after: timeout) { connection.invalidate() }
             connection.interruptionHandler = { reply.fail() }
             connection.invalidationHandler = { reply.fail() }
-            connection.resume()
+            if resume { connection.resume() }
             let proxy = connection.remoteObjectProxyWithErrorHandler { error in reply.fail(error) }
             guard let service = proxy as? TargetServiceXPCProtocol else {
                 reply.fail()
@@ -316,6 +359,34 @@ final class TargetServiceXPCClient: SystemProxyClient, TargetServiceRemovalClien
 
     private static func decodeError(_ error: NSError) -> Error {
         SystemProxyError(serviceError: error) ?? error
+    }
+}
+
+private final class RemovalConnectionState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var connection: (any TargetServiceXPCConnecting)?
+
+    var current: (any TargetServiceXPCConnecting)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return connection
+    }
+
+    func install(_ newConnection: any TargetServiceXPCConnecting) -> (any TargetServiceXPCConnecting)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard connection == nil else { return nil }
+        connection = newConnection
+        return newConnection
+    }
+
+    func clear(_ oldConnection: any TargetServiceXPCConnecting) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let connection,
+           ObjectIdentifier(connection) == ObjectIdentifier(oldConnection) {
+            self.connection = nil
+        }
     }
 }
 

@@ -671,16 +671,18 @@ final class BackendArchitectureTests: XCTestCase {
     }
 
     func testTwoIndependentXPCClientsShareRemovalBarrier() async throws {
-        let barrier = TargetServiceRemovalBarrier(leaseDuration: .seconds(1))
+        let barrier = TargetServiceRemovalBarrier()
         let gate = RemovalPrepareGate()
         let service = CrossConnectionRemovalService(barrier: barrier, gate: gate)
+        let clientAConnection = FakeTargetServiceConnection(service: service)
+        let clientBConnection = FakeTargetServiceConnection(service: service)
         let clientA = TargetServiceXPCClient(
             timeouts: .init(read: 1, mutation: 1),
-            connectionFactory: { FakeTargetServiceConnection(service: service) }
+            connectionFactory: { clientAConnection }
         )
         let clientB = TargetServiceXPCClient(
             timeouts: .init(read: 1, mutation: 1),
-            connectionFactory: { FakeTargetServiceConnection(service: service) }
+            connectionFactory: { clientBConnection }
         )
 
         let prepare = Task { try await clientA.prepareServiceRemoval() }
@@ -692,52 +694,123 @@ final class BackendArchitectureTests: XCTestCase {
         gate.release()
         let lease = try await prepare.value
         XCTAssertEqual(lease.status, .disabled)
+        XCTAssertEqual(clientAConnection.invalidationCount, 0)
+        await XCTAssertThrowsErrorAsync(try await clientA.completeServiceRemoval(Data("stale".utf8))) { error in
+            XCTAssertEqual(error as? SystemProxyError, .invalidServiceRemovalSession)
+        }
+        XCTAssertEqual(clientAConnection.invalidationCount, 0)
+        // Model an unregister that remains pending past the former TTL window:
+        // every independent connection must stay fail-closed until completion.
+        for _ in 0..<100 {
+            await XCTAssertThrowsErrorAsync(try await clientB.enableSystemProxy()) { error in
+                XCTAssertEqual(error as? SystemProxyError, .serviceRemovalInProgress)
+            }
+        }
         try await clientA.completeServiceRemoval(lease.token)
+        XCTAssertGreaterThanOrEqual(clientAConnection.invalidationCount, 1)
         let enabled = try await clientB.enableSystemProxy()
         XCTAssertEqual(enabled.state, .enabled)
     }
 
     func testRemovalBarrierRejectsUnsafeOrActivePrepareAndRecoversAfterCancel() async throws {
-        let barrier = TargetServiceRemovalBarrier(leaseDuration: .milliseconds(40))
+        let barrier = TargetServiceRemovalBarrier()
+        let sessionID = UUID()
         let unsafe: [SystemProxyStatus] = [
             SystemProxyStatus(state: .enabled, engineReachable: true, affectedServiceCount: 1, error: nil, hasRecoverySnapshot: true),
             SystemProxyStatus(state: .recoveryRequired, engineReachable: false, affectedServiceCount: 1, error: .localProxyUnavailable, hasRecoverySnapshot: true),
             SystemProxyStatus(state: .failed, engineReachable: false, affectedServiceCount: 0, error: .statusUnavailable, hasRecoverySnapshot: false)
         ]
         for status in unsafe {
-            await XCTAssertThrowsErrorAsync(try await barrier.prepare { status }) { error in
+            await XCTAssertThrowsErrorAsync(try await barrier.prepare(sessionID: sessionID) { status }) { error in
                 XCTAssertEqual(error as? SystemProxyError, status.error ?? .verificationFailed)
             }
         }
-        await XCTAssertThrowsErrorAsync(try await barrier.prepare { throw SystemProxyError.statusUnavailable }) { error in
+        await XCTAssertThrowsErrorAsync(try await barrier.prepare(sessionID: sessionID) { throw SystemProxyError.statusUnavailable }) { error in
             XCTAssertEqual(error as? SystemProxyError, .statusUnavailable)
         }
 
         try await barrier.beginEnable()
-        await XCTAssertThrowsErrorAsync(try await barrier.prepare { .disabled }) { error in
+        await XCTAssertThrowsErrorAsync(try await barrier.prepare(sessionID: sessionID) { .disabled }) { error in
             XCTAssertEqual(error as? SystemProxyError, .serviceRemovalInProgress)
         }
         await barrier.endEnable()
 
-        let lease = try await barrier.prepare { .disabled }
-        await XCTAssertThrowsErrorAsync(try await barrier.cancel(token: Data("stale".utf8))) { error in
+        let lease = try await barrier.prepare(sessionID: sessionID) { .disabled }
+        await XCTAssertThrowsErrorAsync(try await barrier.cancel(token: Data("stale".utf8), sessionID: sessionID)) { error in
             XCTAssertEqual(error as? SystemProxyError, .invalidServiceRemovalSession)
         }
-        await XCTAssertThrowsErrorAsync(try await barrier.complete(token: Data("stale".utf8))) { error in
+        await XCTAssertThrowsErrorAsync(try await barrier.complete(token: Data("stale".utf8), sessionID: sessionID)) { error in
             XCTAssertEqual(error as? SystemProxyError, .invalidServiceRemovalSession)
         }
-        try await barrier.cancel(token: lease.token)
+        try await barrier.cancel(token: lease.token, sessionID: sessionID)
         try await barrier.beginEnable()
         await barrier.endEnable()
     }
 
-    func testRemovalBarrierLeaseExpiresAfterClientFailure() async throws {
-        let barrier = TargetServiceRemovalBarrier(leaseDuration: .milliseconds(20))
-        let lease = try await barrier.prepare { .disabled }
+    func testRemovalBarrierInvalidationReleasesOwnedLeaseWithoutTimeExpiry() async throws {
+        let barrier = TargetServiceRemovalBarrier()
+        let sessionID = UUID()
+        let lease = try await barrier.prepare(sessionID: sessionID) { .disabled }
         XCTAssertFalse(lease.token.isEmpty)
-        try await Task.sleep(for: .milliseconds(50))
+        let foreignSessionID = UUID()
+        await XCTAssertThrowsErrorAsync(try await barrier.complete(token: lease.token, sessionID: foreignSessionID)) { error in
+            XCTAssertEqual(error as? SystemProxyError, .invalidServiceRemovalSession)
+        }
+        await barrier.invalidate(sessionID: UUID())
+        await XCTAssertThrowsErrorAsync(try await barrier.beginEnable()) { error in
+            XCTAssertEqual(error as? SystemProxyError, .serviceRemovalInProgress)
+        }
+        await barrier.invalidate(sessionID: sessionID)
         try await barrier.beginEnable()
         await barrier.endEnable()
+    }
+
+    func testRemovalBarrierHasNoElapsedLeaseExpiryWhileUnregisterIsPending() async throws {
+        let barrier = TargetServiceRemovalBarrier()
+        let sessionID = UUID()
+        let lease = try await barrier.prepare(sessionID: sessionID) { .disabled }
+
+        for _ in 0..<100 {
+            await XCTAssertThrowsErrorAsync(try await barrier.beginEnable()) { error in
+                XCTAssertEqual(error as? SystemProxyError, .serviceRemovalInProgress)
+            }
+        }
+
+        try await barrier.complete(token: lease.token, sessionID: sessionID)
+        try await barrier.beginEnable()
+        await barrier.endEnable()
+    }
+
+    func testRemovalClientConnectionInvalidationReleasesOnlyItsLease() async throws {
+        let barrier = TargetServiceRemovalBarrier()
+        let gate = RemovalPrepareGate()
+        let service = CrossConnectionRemovalService(barrier: barrier, gate: gate)
+        let connection = FakeTargetServiceConnection(
+            service: service,
+            onInvalidate: { service.connectionInvalidated() }
+        )
+        let client = TargetServiceXPCClient(
+            timeouts: .init(read: 1, mutation: 1),
+            connectionFactory: { connection }
+        )
+
+        let prepare = Task { try await client.prepareServiceRemoval() }
+        await service.waitUntilPrepareStarted()
+        gate.release()
+        _ = try await prepare.value
+        connection.invalidate()
+
+        for _ in 0..<100 {
+            do {
+                try await barrier.beginEnable()
+                await barrier.endEnable()
+                return
+            } catch let error as SystemProxyError {
+                XCTAssertEqual(error, .serviceRemovalInProgress)
+                await Task.yield()
+            }
+        }
+        XCTFail("connection invalidation did not release the owned lease")
     }
 
     func testXPCReadWithoutReplyFailsWithinBoundAndInvalidatesConnection() async {
@@ -1132,12 +1205,18 @@ private final class FakeTargetServiceConnection: TargetServiceXPCConnecting, @un
 
     private let service: any TargetServiceXPCProtocol
     private let invalidateOnResume: Bool
+    private let onInvalidate: (@Sendable () -> Void)?
     private let lock = NSLock()
     private var storedInvalidationCount = 0
 
-    init(service: any TargetServiceXPCProtocol, invalidateOnResume: Bool = false) {
+    init(
+        service: any TargetServiceXPCProtocol,
+        invalidateOnResume: Bool = false,
+        onInvalidate: (@Sendable () -> Void)? = nil
+    ) {
         self.service = service
         self.invalidateOnResume = invalidateOnResume
+        self.onInvalidate = onInvalidate
     }
 
     var invalidationCount: Int {
@@ -1152,6 +1231,8 @@ private final class FakeTargetServiceConnection: TargetServiceXPCConnecting, @un
 
     func invalidate() {
         lock.withLock { storedInvalidationCount += 1 }
+        onInvalidate?()
+        invalidationHandler?()
     }
 
     func remoteObjectProxyWithErrorHandler(_ handler: @escaping (Error) -> Void) -> Any {
@@ -1171,6 +1252,7 @@ private actor RemovalPrepareGate {
 private final class CrossConnectionRemovalService: NSObject, TargetServiceXPCProtocol, @unchecked Sendable {
     private let barrier: TargetServiceRemovalBarrier
     private let gate: RemovalPrepareGate
+    private let sessionID = UUID()
     private var prepareStarted = false
 
     init(barrier: TargetServiceRemovalBarrier, gate: RemovalPrepareGate) {
@@ -1213,7 +1295,7 @@ private final class CrossConnectionRemovalService: NSObject, TargetServiceXPCPro
     func prepareServiceRemoval(withReply reply: @escaping (Data?, NSError?) -> Void) {
         Task {
             do {
-                let lease = try await barrier.prepare {
+                let lease = try await barrier.prepare(sessionID: sessionID) {
                     await self.markPrepareStartedAndWait()
                     return .disabled
                 }
@@ -1227,7 +1309,7 @@ private final class CrossConnectionRemovalService: NSObject, TargetServiceXPCPro
     }
     func cancelServiceRemoval(_ token: Data, withReply reply: @escaping (NSError?) -> Void) {
         Task {
-            do { try await barrier.cancel(token: token); reply(nil) }
+            do { try await barrier.cancel(token: token, sessionID: sessionID); reply(nil) }
             catch let error as SystemProxyError { reply(xpcError(error)) }
             catch { reply(xpcError(.invalidServiceRemovalSession)) }
         }
@@ -1238,6 +1320,10 @@ private final class CrossConnectionRemovalService: NSObject, TargetServiceXPCPro
 
     func waitUntilPrepareStarted() async {
         while !prepareStarted { await Task.yield() }
+    }
+
+    func connectionInvalidated() {
+        Task { await barrier.invalidate(sessionID: sessionID) }
     }
 
     private func markPrepareStartedAndWait() async {

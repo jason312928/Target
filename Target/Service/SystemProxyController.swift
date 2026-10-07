@@ -77,26 +77,17 @@ struct TargetServiceRemovalLease: Codable, Equatable, Sendable {
     let status: SystemProxyStatus
 }
 
-/// One fixed-purpose lease shared by every XPC endpoint in one TargetService
-/// process. It closes the safe-read-to-unregister window across connections.
+/// One server-wide removal barrier shared by every XPC endpoint in one
+/// TargetService process. Each lease is owned by the fixed-purpose XPC session
+/// that prepared it, so the safe-read-to-unregister window stays closed across
+/// connections until completion, failure, or connection invalidation.
 actor TargetServiceRemovalBarrier {
-    static let productionLeaseDuration: Duration = .seconds(30)
-
-    private let leaseDuration: Duration
     private var preparing = false
     private var activeEnableCount = 0
     private var pendingToken: Data?
-    private var pendingExpiry: ContinuousClock.Instant?
-    private var expiryTask: Task<Void, Never>?
-
-    init(leaseDuration: Duration = productionLeaseDuration) {
-        self.leaseDuration = leaseDuration
-    }
-
-    deinit { expiryTask?.cancel() }
+    private var pendingSessionID: UUID?
 
     func beginEnable() throws {
-        reapExpiredLease()
         guard !preparing, pendingToken == nil else {
             throw SystemProxyError.serviceRemovalInProgress
         }
@@ -108,9 +99,9 @@ actor TargetServiceRemovalBarrier {
     }
 
     func prepare(
+        sessionID: UUID,
         statusProvider: @escaping @Sendable () async throws -> SystemProxyStatus
     ) async throws -> TargetServiceRemovalLease {
-        reapExpiredLease()
         guard !preparing, pendingToken == nil, activeEnableCount == 0 else {
             throw SystemProxyError.serviceRemovalInProgress
         }
@@ -122,11 +113,9 @@ actor TargetServiceRemovalBarrier {
                 throw status.error ?? .verificationFailed
             }
             let token = Data(UUID().uuidString.utf8)
-            let expiry = ContinuousClock.now + leaseDuration
             pendingToken = token
-            pendingExpiry = expiry
+            pendingSessionID = sessionID
             preparing = false
-            scheduleExpiry(token: token, at: expiry)
             return TargetServiceRemovalLease(token: token, status: status)
         } catch {
             preparing = false
@@ -135,43 +124,28 @@ actor TargetServiceRemovalBarrier {
         }
     }
 
-    func cancel(token: Data) throws {
-        reapExpiredLease()
-        guard pendingToken == token else {
+    func cancel(token: Data, sessionID: UUID) throws {
+        guard pendingToken == token, pendingSessionID == sessionID else {
             throw SystemProxyError.invalidServiceRemovalSession
         }
         clearLease()
     }
 
-    func complete(token: Data) throws {
-        try cancel(token: token)
+    func complete(token: Data, sessionID: UUID) throws {
+        try cancel(token: token, sessionID: sessionID)
     }
 
-    private func scheduleExpiry(token: Data, at expiry: ContinuousClock.Instant) {
-        expiryTask?.cancel()
-        expiryTask = Task { [weak self] in
-            do {
-                try await Task.sleep(until: expiry, clock: .continuous)
-                await self?.expire(token: token)
-            } catch { }
-        }
-    }
-
-    private func expire(token: Data) {
-        guard pendingToken == token else { return }
-        clearLease()
-    }
-
-    private func reapExpiredLease() {
-        guard let pendingExpiry, ContinuousClock.now >= pendingExpiry else { return }
+    /// A removal lease is owned by the fixed-purpose XPC connection that prepared it.
+    /// Invalidation is the only implicit release path; elapsed wall-clock time never
+    /// releases a lease while the unregister call may still be in flight.
+    func invalidate(sessionID: UUID) {
+        guard pendingSessionID == sessionID else { return }
         clearLease()
     }
 
     private func clearLease() {
         pendingToken = nil
-        pendingExpiry = nil
-        expiryTask?.cancel()
-        expiryTask = nil
+        pendingSessionID = nil
     }
 }
 

@@ -21,6 +21,9 @@ private final class TargetServiceServer: NSObject, NSXPCListenerDelegate {
         let endpoint = TargetServiceEndpoint(runtimeOwnership: ownership, removalBarrier: removalBarrier)
         connection.exportedInterface = NSXPCInterface(with: TargetServiceXPCProtocol.self)
         connection.exportedObject = endpoint
+        connection.invalidationHandler = { [weak endpoint] in
+            endpoint?.connectionInvalidated()
+        }
         endpoint.start()
         connection.resume()
         return true
@@ -34,6 +37,7 @@ private final class TargetServiceEndpoint: NSObject, TargetServiceXPCProtocol {
     private let systemProxy: SystemProxyCoordinator
 
     private let removalBarrier: TargetServiceRemovalBarrier
+    private let removalSessionID = UUID()
 
     init(runtimeOwnership: EngineRuntimeOwnership, removalBarrier: TargetServiceRemovalBarrier) {
         self.removalBarrier = removalBarrier
@@ -46,6 +50,11 @@ private final class TargetServiceEndpoint: NSObject, TargetServiceXPCProtocol {
 
     func start() {
         Task { await systemProxy.start() }
+    }
+
+    func connectionInvalidated() {
+        let sessionID = removalSessionID
+        Task { await removalBarrier.invalidate(sessionID: sessionID) }
     }
     func ping(withReply reply: @escaping (String) -> Void) {
         reply("target-service")
@@ -98,7 +107,7 @@ private final class TargetServiceEndpoint: NSObject, TargetServiceXPCProtocol {
     func prepareServiceRemoval(withReply reply: @escaping (Data?, NSError?) -> Void) {
         Task {
             do {
-                let lease = try await removalBarrier.prepare {
+                let lease = try await removalBarrier.prepare(sessionID: removalSessionID) {
                     await self.systemProxy.querySystemProxyStatus()
                 }
                 reply(try JSONEncoder().encode(lease), nil)
@@ -113,7 +122,7 @@ private final class TargetServiceEndpoint: NSObject, TargetServiceXPCProtocol {
     func cancelServiceRemoval(_ token: Data, withReply reply: @escaping (NSError?) -> Void) {
         Task {
             do {
-                try await removalBarrier.cancel(token: token)
+                try await removalBarrier.cancel(token: token, sessionID: removalSessionID)
                 reply(nil)
             } catch let error as SystemProxyError {
                 reply(xpcError(error))
@@ -126,7 +135,7 @@ private final class TargetServiceEndpoint: NSObject, TargetServiceXPCProtocol {
     func completeServiceRemoval(_ token: Data, withReply reply: @escaping (NSError?) -> Void) {
         Task {
             do {
-                try await removalBarrier.complete(token: token)
+                try await removalBarrier.complete(token: token, sessionID: removalSessionID)
                 reply(nil)
             } catch let error as SystemProxyError {
                 reply(xpcError(error))
