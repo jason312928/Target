@@ -49,7 +49,6 @@ actor UnavailableTargetConnectionOperations: TargetConnectionOperating {
 
 actor TargetRuntimeOperations: TargetRuntimeOperating, TargetConnectionOperating {
     private let backend: any EngineBackend
-    private let systemProxyClient: any SystemProxyClient
     private let systemProxyOperations: any TargetSystemProxyOperating
     private let hostNetworkSafetyMode: HostNetworkSafetyMode
 
@@ -60,8 +59,10 @@ actor TargetRuntimeOperations: TargetRuntimeOperating, TargetConnectionOperating
         hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode
     ) {
         self.backend = backend
-        self.systemProxyClient = systemProxyClient
-        self.systemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: systemProxyClient)
+        self.systemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(
+            client: systemProxyClient,
+            serviceRegistrationStatus: { TargetServiceRegistration.status }
+        )
         self.hostNetworkSafetyMode = hostNetworkSafetyMode
     }
 
@@ -171,13 +172,23 @@ actor TargetRuntimeOperations: TargetRuntimeOperating, TargetConnectionOperating
         var finalProxyStatus: SystemProxyStatus?
 
         if hostNetworkSafetyMode.permitsNetworkWrites {
-            let currentProxyStatus = try await systemProxyClient.querySystemProxyStatus()
+            let currentProxyStatus: SystemProxyStatus
+            do {
+                currentProxyStatus = try await systemProxyOperations.queryStatus()
+            } catch let error as TargetSystemProxyOperationError {
+                throw error.operationError
+            }
             try Task.checkCancellation()
 
             if currentProxyStatus.state == .disabled && !currentProxyStatus.hasRecoverySnapshot {
                 finalProxyStatus = currentProxyStatus
             } else {
-                let restoredProxyStatus = try await systemProxyClient.disableSystemProxy()
+                let restoredProxyStatus: SystemProxyStatus
+                do {
+                    restoredProxyStatus = try await systemProxyOperations.disable()
+                } catch let error as TargetSystemProxyOperationError {
+                    throw error.operationError
+                }
                 guard restoredProxyStatus.state == .disabled,
                       !restoredProxyStatus.hasRecoverySnapshot,
                       restoredProxyStatus.error == nil else {

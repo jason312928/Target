@@ -47,7 +47,10 @@ struct TargetApp: App {
             continuityApply: continuityApplyOperations
         )
         let systemProxyClient = TargetServiceXPCClient()
-        let systemProxyOperations = TargetSystemProxyOperations(client: systemProxyClient)
+        let systemProxyOperations = TargetSystemProxyOperations(
+            client: systemProxyClient,
+            serviceRegistrationStatus: { TargetServiceRegistration.status }
+        )
         let runtimeOperations = TargetRuntimeOperations(
             backend: backend,
             systemProxyClient: systemProxyClient,

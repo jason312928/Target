@@ -64,11 +64,50 @@ struct TargetSystemProxyOperationError: Error, Equatable, Sendable {
     let reconciledStatus: SystemProxyStatus
 }
 
+struct TargetServiceRemovalResult: Equatable, Sendable {
+    let systemProxyStatus: SystemProxyStatus
+    let serviceInstallation: ServiceInstallationState
+}
+
 protocol TargetSystemProxyOperating: Sendable {
     func queryStatus() async throws -> SystemProxyStatus
     func enable() async throws -> SystemProxyStatus
     func disable() async throws -> SystemProxyStatus
     func recover() async throws -> SystemProxyStatus
+    func removeService(
+        unregisterService: @escaping @Sendable () throws -> Void,
+        serviceStatus: @escaping @Sendable () -> ServiceInstallationState
+    ) async throws -> TargetServiceRemovalResult
+}
+
+extension TargetSystemProxyOperating {
+    func removeService(
+        unregisterService: @escaping @Sendable () throws -> Void,
+        serviceStatus: @escaping @Sendable () -> ServiceInstallationState
+    ) async throws -> TargetServiceRemovalResult {
+        let status: SystemProxyStatus
+        do {
+            status = try await queryStatus()
+        } catch let error as TargetSystemProxyOperationError {
+            throw error
+        } catch {
+            throw TargetSystemProxyOperationError(
+                operationError: .statusUnavailable,
+                reconciledStatus: .disabled.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+            )
+        }
+        guard status.isSafeForServiceRemoval else {
+            throw TargetSystemProxyOperationError(
+                operationError: status.error ?? .verificationFailed,
+                reconciledStatus: status
+            )
+        }
+        try unregisterService()
+        return TargetServiceRemovalResult(
+            systemProxyStatus: status,
+            serviceInstallation: serviceStatus()
+        )
+    }
 }
 
 actor TargetSystemProxyOperations: TargetSystemProxyOperating {
@@ -86,61 +125,135 @@ actor TargetSystemProxyOperations: TargetSystemProxyOperating {
     }
 
     private let client: any SystemProxyClient
+    private let serviceRegistrationStatus: @Sendable () -> ServiceInstallationState
     private var lastAuthoritativeStatus = SystemProxyStatus.disabled
+    // Actor isolation is re-entrant across await. Chain each external operation so
+    // removal's authoritative read and unregister cannot be interleaved by a mutation.
+    private var operationTail: Task<Void, Never>?
 
-    init(client: any SystemProxyClient = TargetServiceXPCClient()) {
+    init(
+        client: any SystemProxyClient = TargetServiceXPCClient(),
+        serviceRegistrationStatus: @escaping @Sendable () -> ServiceInstallationState = { .enabled }
+    ) {
         self.client = client
+        self.serviceRegistrationStatus = serviceRegistrationStatus
     }
 
     func queryStatus() async throws -> SystemProxyStatus {
-        do {
-            return try await authoritativeStatus()
-        } catch {
-            throw TargetSystemProxyOperationError(
-                operationError: .statusUnavailable,
-                reconciledStatus: lastAuthoritativeStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
-            )
+        let client = client
+        return try await enqueue { [weak self] in
+            do {
+                let status = try await client.querySystemProxyStatus()
+                await self?.record(status)
+                return status
+            } catch {
+                let fallback = await self?.lastStatus() ?? .disabled
+                throw TargetSystemProxyOperationError(
+                    operationError: .statusUnavailable,
+                    reconciledStatus: fallback.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+                )
+            }
         }
     }
 
     func enable() async throws -> SystemProxyStatus {
-        try await mutate(.enable) { try await client.enableSystemProxy() }
+        try await mutate(.enable)
     }
 
     func disable() async throws -> SystemProxyStatus {
-        try await mutate(.disable) { try await client.disableSystemProxy() }
+        try await mutate(.disable)
     }
 
     func recover() async throws -> SystemProxyStatus {
-        try await mutate(.recover) { try await client.recoverSystemProxy() }
+        try await mutate(.recover)
     }
 
-    private func mutate(
-        _ mutation: Mutation,
-        action: () async throws -> SystemProxyStatus
-    ) async throws -> SystemProxyStatus {
-        do {
-            let status = try await action()
-            lastAuthoritativeStatus = status
-            return status
-        } catch {
-            let operationError = SystemProxyError(serviceError: error) ?? mutation.fallbackError
-            let reconciledStatus: SystemProxyStatus
+    func removeService(
+        unregisterService: @escaping @Sendable () throws -> Void,
+        serviceStatus: @escaping @Sendable () -> ServiceInstallationState
+    ) async throws -> TargetServiceRemovalResult {
+        let client = client
+        return try await enqueue { [weak self] in
+            let status: SystemProxyStatus
             do {
-                reconciledStatus = try await authoritativeStatus()
+                status = try await client.querySystemProxyStatus()
+                await self?.record(status)
             } catch {
-                reconciledStatus = lastAuthoritativeStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+                let fallback = await self?.lastStatus() ?? .disabled
+                throw TargetSystemProxyOperationError(
+                    operationError: .statusUnavailable,
+                    reconciledStatus: fallback.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+                )
             }
-            throw TargetSystemProxyOperationError(
-                operationError: operationError,
-                reconciledStatus: reconciledStatus
+            guard status.isSafeForServiceRemoval else {
+                throw TargetSystemProxyOperationError(
+                    operationError: status.error ?? .verificationFailed,
+                    reconciledStatus: status
+                )
+            }
+            try unregisterService()
+            return TargetServiceRemovalResult(
+                systemProxyStatus: status,
+                serviceInstallation: serviceStatus()
             )
         }
     }
 
-    private func authoritativeStatus() async throws -> SystemProxyStatus {
-        let status = try await client.querySystemProxyStatus()
+    private func mutate(_ mutation: Mutation) async throws -> SystemProxyStatus {
+        let client = client
+        let serviceRegistrationStatus = serviceRegistrationStatus
+        return try await enqueue { [weak self] in
+            guard serviceRegistrationStatus() != .notRegistered else {
+                let status = await self?.lastStatus() ?? .disabled
+                throw TargetSystemProxyOperationError(
+                    operationError: .noActiveNetworkService,
+                    reconciledStatus: status
+                )
+            }
+            do {
+                let status: SystemProxyStatus
+                switch mutation {
+                case .enable: status = try await client.enableSystemProxy()
+                case .disable: status = try await client.disableSystemProxy()
+                case .recover: status = try await client.recoverSystemProxy()
+                }
+                await self?.record(status)
+                return status
+            } catch {
+                let operationError = SystemProxyError(serviceError: error) ?? mutation.fallbackError
+                let reconciledStatus: SystemProxyStatus
+                do {
+                    reconciledStatus = try await client.querySystemProxyStatus()
+                    await self?.record(reconciledStatus)
+                } catch {
+                    let fallback = await self?.lastStatus() ?? .disabled
+                    reconciledStatus = fallback.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+                }
+                throw TargetSystemProxyOperationError(
+                    operationError: operationError,
+                    reconciledStatus: reconciledStatus
+                )
+            }
+        }
+    }
+
+    private func enqueue<T: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        let previous = operationTail
+        let task = Task<T, Error> {
+            if let previous { await previous.value }
+            return try await operation()
+        }
+        operationTail = Task { _ = await task.result }
+        return try await task.value
+    }
+
+    private func record(_ status: SystemProxyStatus) {
         lastAuthoritativeStatus = status
-        return status
+    }
+
+    private func lastStatus() -> SystemProxyStatus {
+        lastAuthoritativeStatus
     }
 }

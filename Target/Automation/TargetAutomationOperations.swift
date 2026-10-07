@@ -599,24 +599,20 @@ actor TargetAutomationOperations {
     }
 
     private func serviceRemove() async throws -> AutomationResponse {
-        let status: SystemProxyStatus
         do {
-            status = try await systemProxyOperations.queryStatus()
+            let result = try await systemProxyOperations.removeService(
+                unregisterService: { try TargetServiceRegistration.unregister() },
+                serviceStatus: { TargetServiceRegistration.status }
+            )
+            await observeSystemProxyStatus(result.systemProxyStatus)
+            return .success(.object(["serviceState": .string(result.serviceInstallation.rawValue)]))
         } catch let error as TargetSystemProxyOperationError {
-            let reconciledStatus = error.reconciledStatus.isSafeForServiceRemoval
+            let reconciledStatus = error.operationError == .statusUnavailable
                 ? error.reconciledStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
                 : error.reconciledStatus
             await observeSystemProxyStatus(reconciledStatus)
             return .failure(code: "service_remove_blocked", message: "Remove Service requires authoritative System Proxy status showing disabled with no recovery snapshot.")
-        } catch {
-            return .failure(code: "service_remove_blocked", message: "Remove Service requires authoritative System Proxy status showing disabled with no recovery snapshot.")
         }
-        await observeSystemProxyStatus(status)
-        guard status.isSafeForServiceRemoval else {
-            return .failure(code: "service_remove_blocked", message: "Remove Service requires authoritative System Proxy status showing disabled with no recovery snapshot.")
-        }
-        try TargetServiceRegistration.unregister()
-        return serviceStatus()
     }
 
     private func proxyStatus() async -> AutomationResponse {

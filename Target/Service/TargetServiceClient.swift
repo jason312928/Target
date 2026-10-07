@@ -289,7 +289,16 @@ private final class XPCReplyOnce<Value>: @unchecked Sendable {
 
 @available(macOS 13.0, *)
 actor TargetServiceBackend: ServiceLifecycleManaging, ServiceConnectionTesting {
-    private let client = TargetServiceXPCClient()
+    private let client: TargetServiceXPCClient
+    private let systemProxyOperations: TargetSystemProxyOperations
+
+    init(client: TargetServiceXPCClient = TargetServiceXPCClient()) {
+        self.client = client
+        self.systemProxyOperations = TargetSystemProxyOperations(
+            client: client,
+            serviceRegistrationStatus: { TargetServiceRegistration.status }
+        )
+    }
 
     func queryStatus() async throws -> BackendStatus {
         let installation = TargetServiceRegistration.status
@@ -317,16 +326,11 @@ actor TargetServiceBackend: ServiceLifecycleManaging, ServiceConnectionTesting {
     }
 
     func removeService() async throws -> BackendStatus {
-        do {
-            let proxyStatus = try await client.querySystemProxyStatus()
-            guard proxyStatus.isSafeForServiceRemoval else {
-                throw BackendError.serviceUnavailable
-            }
-            try TargetServiceRegistration.unregister()
-            return try await queryStatus()
-        } catch {
-            throw error
-        }
+        _ = try await systemProxyOperations.removeService(
+            unregisterService: { try TargetServiceRegistration.unregister() },
+            serviceStatus: { TargetServiceRegistration.status }
+        )
+        return try await queryStatus()
     }
 
     func pingService() async throws -> String {

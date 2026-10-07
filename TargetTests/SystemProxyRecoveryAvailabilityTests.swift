@@ -155,6 +155,68 @@ final class SystemProxyRecoveryAvailabilityTests: XCTestCase {
         XCTAssertEqual(model.serviceInstallation, .notRegistered)
     }
 
+    func testRemovalTransactionSerializesConcurrentEnableAfterPausedSafeRead() async throws {
+        let gate = RecoveryOperationGate()
+        let client = BlockingRemovalSystemProxyClient(gate: gate)
+        let registration = ServiceRegistrationProbe(statuses: [.enabled])
+        let shared = TargetSystemProxyOperations(
+            client: client,
+            serviceRegistrationStatus: { registration.currentStatus() }
+        )
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest,
+            serviceRegistrationStatusProvider: { registration.currentStatus() },
+            unregisterService: {
+                registration.recordUnregister()
+                registration.setStatus(.notRegistered)
+            }
+        )
+
+        model.removeService()
+        await client.waitUntilQueryStarted()
+        let enableTask = Task { try? await shared.enable() }
+        gate.release()
+
+        try await waitUntil { !model.isBusy }
+        let enableResult = await enableTask.value
+
+        XCTAssertEqual(registration.unregisterCount, 1)
+        XCTAssertEqual(registration.currentStatus(), .notRegistered)
+        let enableCount = await client.enableCount
+        XCTAssertEqual(enableCount, 0)
+        XCTAssertNil(enableResult)
+        XCTAssertEqual(model.systemProxyStatus, .disabled)
+    }
+
+    func testGUIAndAutomationUseOneSharedServiceRemovalOperation() async throws {
+        let shared = RemovalOperationSpy()
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest,
+            serviceRegistrationStatusProvider: { .enabled }
+        )
+        let automation = TargetAutomationOperations(
+            profileStore: testProfileStore(),
+            backend: MockBackend(),
+            systemProxyOperations: shared,
+            hostNetworkSafetyMode: .authorizedNetworkTest
+        )
+
+        model.removeService()
+        try await waitUntil { !model.isBusy }
+        let response = await automation.handle(AutomationRequest(
+            protocolVersion: 1,
+            action: "service.remove"
+        ))
+
+        XCTAssertTrue(response.ok)
+        let removeCount = await shared.removeCount
+        XCTAssertEqual(removeCount, 2)
+    }
+
     func testRecoveryPolicyAllowsOwnedSnapshotWhenLocalProxyIsUnavailable() {
         let capability = recoveryStatus(error: .localProxyUnavailable).recoveryCapability(
             hostNetworkSafetyMode: .authorizedNetworkTest,
@@ -941,6 +1003,62 @@ private actor StaticSystemProxyOperation: TargetSystemProxyOperating {
     func recover() async throws -> SystemProxyStatus { .disabled }
 }
 
+private actor BlockingRemovalSystemProxyClient: SystemProxyClient {
+    private let gate: RecoveryOperationGate
+    private var queryStarted = false
+    private(set) var enableCount = 0
+
+    init(gate: RecoveryOperationGate) {
+        self.gate = gate
+    }
+
+    func ping() async throws -> String { "test" }
+
+    func querySystemProxyStatus() async throws -> SystemProxyStatus {
+        queryStarted = true
+        await gate.wait()
+        return .disabled
+    }
+
+    func enableSystemProxy() async throws -> SystemProxyStatus {
+        enableCount += 1
+        return SystemProxyStatus(
+            state: .enabled,
+            engineReachable: true,
+            affectedServiceCount: 1,
+            error: nil,
+            hasRecoverySnapshot: true
+        )
+    }
+
+    func disableSystemProxy() async throws -> SystemProxyStatus { .disabled }
+    func recoverSystemProxy() async throws -> SystemProxyStatus { .disabled }
+
+    func waitUntilQueryStarted() async {
+        while !queryStarted { await Task.yield() }
+    }
+}
+
+private actor RemovalOperationSpy: TargetSystemProxyOperating {
+    private(set) var removeCount = 0
+
+    func queryStatus() async throws -> SystemProxyStatus { .disabled }
+    func enable() async throws -> SystemProxyStatus { .disabled }
+    func disable() async throws -> SystemProxyStatus { .disabled }
+    func recover() async throws -> SystemProxyStatus { .disabled }
+
+    func removeService(
+        unregisterService: @escaping @Sendable () throws -> Void,
+        serviceStatus: @escaping @Sendable () -> ServiceInstallationState
+    ) async throws -> TargetServiceRemovalResult {
+        removeCount += 1
+        return TargetServiceRemovalResult(
+            systemProxyStatus: .disabled,
+            serviceInstallation: .notRegistered
+        )
+    }
+}
+
 private actor FailingQuerySystemProxyOperation: TargetSystemProxyOperating {
     func queryStatus() async throws -> SystemProxyStatus {
         throw TargetSystemProxyOperationError(
@@ -974,6 +1092,18 @@ private final class ServiceRegistrationProbe: @unchecked Sendable {
             lastStatus = statuses.removeFirst()
         }
         return lastStatus
+    }
+
+    func currentStatus() -> ServiceInstallationState {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastStatus
+    }
+
+    func setStatus(_ status: ServiceInstallationState) {
+        lock.lock()
+        lastStatus = status
+        lock.unlock()
     }
 
     func recordUnregister() {

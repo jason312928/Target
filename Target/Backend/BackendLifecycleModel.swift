@@ -74,7 +74,10 @@ final class BackendLifecycleModel {
         self.serviceManager = backend as? any ServiceLifecycleManaging
         self.serviceTester = backend as? any ServiceConnectionTesting
         self.systemProxyClient = systemProxyClient
-        let resolvedSystemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(client: systemProxyClient)
+        let resolvedSystemProxyOperations = systemProxyOperations ?? TargetSystemProxyOperations(
+            client: systemProxyClient,
+            serviceRegistrationStatus: { TargetServiceRegistration.status }
+        )
         self.systemProxyOperations = resolvedSystemProxyOperations
         let resolvedRuntimeOperations = runtimeOperations ?? TargetRuntimeOperations(
             backend: backend,
@@ -232,41 +235,34 @@ final class BackendLifecycleModel {
         guard canManageService else { return }
         operationTask = Task { [weak self] in
             guard let self else { return }
-
-            let authoritativeStatus: SystemProxyStatus
             do {
-                authoritativeStatus = try await self.systemProxyOperations.queryStatus()
-                self.systemProxyStatus = authoritativeStatus
+                let result = try await self.systemProxyOperations.removeService(
+                    unregisterService: self.unregisterService,
+                    serviceStatus: self.serviceRegistrationStatusProvider
+                )
+                self.systemProxyStatus = result.systemProxyStatus
                 self.hasAuthoritativeSystemProxyStatus = true
+                self.serviceInstallation = result.serviceInstallation
+                self.operationTask = nil
             } catch let error as TargetSystemProxyOperationError {
-                if error.reconciledStatus.isSafeForServiceRemoval {
+                if error.operationError == .statusUnavailable {
                     var unavailableStatus = error.reconciledStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
                     unavailableStatus.hasRecoverySnapshot = unavailableStatus.hasRecoverySnapshot || self.systemProxyStatus.hasRecoverySnapshot
                     self.systemProxyStatus = unavailableStatus
+                    self.hasAuthoritativeSystemProxyStatus = false
                 } else {
                     self.systemProxyStatus = error.reconciledStatus
+                    self.hasAuthoritativeSystemProxyStatus = true
                 }
-                self.hasAuthoritativeSystemProxyStatus = false
                 self.operationTask = nil
                 return
+            } catch let error as BackendError {
+                self.finish(with: error)
             } catch {
                 self.systemProxyStatus = self.systemProxyStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
                 self.hasAuthoritativeSystemProxyStatus = false
                 self.operationTask = nil
                 return
-            }
-
-            guard authoritativeStatus.isSafeForServiceRemoval else {
-                self.operationTask = nil
-                return
-            }
-
-            do {
-                try self.unregisterService()
-                self.serviceInstallation = self.serviceRegistrationStatusProvider()
-                self.operationTask = nil
-            } catch {
-                self.finish(with: .serviceRegistrationFailed)
             }
         }
     }
