@@ -318,6 +318,10 @@ actor TargetServiceBackend: ServiceLifecycleManaging, ServiceConnectionTesting {
 
     func removeService() async throws -> BackendStatus {
         do {
+            let proxyStatus = try await client.querySystemProxyStatus()
+            guard proxyStatus.isSafeForServiceRemoval else {
+                throw BackendError.serviceUnavailable
+            }
             try TargetServiceRegistration.unregister()
             return try await queryStatus()
         } catch {

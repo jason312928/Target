@@ -80,6 +80,12 @@ struct SystemProxyStatus: Codable, Equatable, Sendable {
         error: nil,
         hasRecoverySnapshot: false
     )
+
+    /// Removing the privileged service is safe only after an authoritative read
+    /// proves that the real proxy is disabled and no recovery evidence remains.
+    var isSafeForServiceRemoval: Bool {
+        state == .disabled && !hasRecoverySnapshot && error == nil
+    }
 }
 
 /// Property-list values used by macOS proxy settings. Keeping this type closed prevents

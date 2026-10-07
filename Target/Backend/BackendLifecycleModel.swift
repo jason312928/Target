@@ -28,6 +28,8 @@ final class BackendLifecycleModel {
     private var trafficHistoryModel = RuntimeTrafficHistory()
     private let hostNetworkSafetyMode: HostNetworkSafetyMode
     private let serviceRegistrationStatusProvider: @Sendable () -> ServiceInstallationState
+    private let registerService: @Sendable () throws -> Void
+    private let unregisterService: @Sendable () throws -> Void
     private let cancellationReconciliationTimeout = Duration.milliseconds(250)
 
     private(set) var status: BackendStatus
@@ -37,6 +39,7 @@ final class BackendLifecycleModel {
     private(set) var error: BackendError?
     private(set) var pingResult: String?
     private(set) var systemProxyStatus = SystemProxyStatus.disabled
+    private(set) var hasAuthoritativeSystemProxyStatus = false
     private(set) var runtimeObservation = RuntimeObservation.stopped
     private(set) var trafficHistory: [RuntimeTrafficSample] = []
     private(set) var runtimeConnections = RuntimeConnectionObservation.stopped
@@ -58,6 +61,12 @@ final class BackendLifecycleModel {
         hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode,
         serviceRegistrationStatusProvider: @escaping @Sendable () -> ServiceInstallationState = {
             TargetServiceRegistration.status
+        },
+        registerService: @escaping @Sendable () throws -> Void = {
+            try TargetServiceRegistration.register()
+        },
+        unregisterService: @escaping @Sendable () throws -> Void = {
+            try TargetServiceRegistration.unregister()
         }
     ) {
         self.backend = backend
@@ -82,6 +91,8 @@ final class BackendLifecycleModel {
         self.runtimeLogProvider = runtimeLogProvider ?? (backend as? any RuntimeLogProviding)
         self.hostNetworkSafetyMode = hostNetworkSafetyMode
         self.serviceRegistrationStatusProvider = serviceRegistrationStatusProvider
+        self.registerService = registerService
+        self.unregisterService = unregisterService
         self.status = .mockDefault
         self.serviceInstallation = serviceRegistrationStatusProvider()
         self.xpcState = .unknown
@@ -140,6 +151,12 @@ final class BackendLifecycleModel {
     /// available in Host Safe Mode so a user can approve and repair the bundled
     /// daemon without enabling proxy, DNS, route, firewall, or TUN operations.
     var canManageService: Bool { !isBusy }
+    var canRemoveService: Bool {
+        canManageService
+            && serviceInstallation != .notRegistered
+            && hasAuthoritativeSystemProxyStatus
+            && systemProxyStatus.isSafeForServiceRemoval
+    }
     var safeModeKey: String { "host-safety.status.safe" }
     var isHostSafeMode: Bool { !hostNetworkSafetyMode.permitsNetworkWrites }
     var isUTMValidationMode: Bool { hostNetworkSafetyMode == .authorizedNetworkTest }
@@ -181,8 +198,8 @@ final class BackendLifecycleModel {
         guard canManageService else { return }
         operationTask = Task { [weak self] in
             do {
-                try TargetServiceRegistration.register()
-                self?.serviceInstallation = TargetServiceRegistration.status
+                try self?.registerService()
+                self?.serviceInstallation = self?.serviceRegistrationStatusProvider() ?? .error
                 self?.operationTask = nil
             } catch let error as BackendError {
                 self?.finish(with: error)
@@ -214,13 +231,42 @@ final class BackendLifecycleModel {
     func removeService() {
         guard canManageService else { return }
         operationTask = Task { [weak self] in
+            guard let self else { return }
+
+            let authoritativeStatus: SystemProxyStatus
             do {
-                try TargetServiceRegistration.unregister()
-                self?.serviceInstallation = TargetServiceRegistration.status
-                self?.systemProxyStatus = .disabled
-                self?.operationTask = nil
+                authoritativeStatus = try await self.systemProxyOperations.queryStatus()
+                self.systemProxyStatus = authoritativeStatus
+                self.hasAuthoritativeSystemProxyStatus = true
+            } catch let error as TargetSystemProxyOperationError {
+                if error.reconciledStatus.isSafeForServiceRemoval {
+                    var unavailableStatus = error.reconciledStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+                    unavailableStatus.hasRecoverySnapshot = unavailableStatus.hasRecoverySnapshot || self.systemProxyStatus.hasRecoverySnapshot
+                    self.systemProxyStatus = unavailableStatus
+                } else {
+                    self.systemProxyStatus = error.reconciledStatus
+                }
+                self.hasAuthoritativeSystemProxyStatus = false
+                self.operationTask = nil
+                return
             } catch {
-                self?.finish(with: .serviceRegistrationFailed)
+                self.systemProxyStatus = self.systemProxyStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+                self.hasAuthoritativeSystemProxyStatus = false
+                self.operationTask = nil
+                return
+            }
+
+            guard authoritativeStatus.isSafeForServiceRemoval else {
+                self.operationTask = nil
+                return
+            }
+
+            do {
+                try self.unregisterService()
+                self.serviceInstallation = self.serviceRegistrationStatusProvider()
+                self.operationTask = nil
+            } catch {
+                self.finish(with: .serviceRegistrationFailed)
             }
         }
     }
@@ -233,6 +279,7 @@ final class BackendLifecycleModel {
                 let status = try await self?.systemProxyOperations.enable()
                 guard !Task.isCancelled, let status else { return }
                 self?.systemProxyStatus = status
+                self?.hasAuthoritativeSystemProxyStatus = true
                 self?.operationTask = nil
             } catch let error as TargetSystemProxyOperationError {
                 self?.finishSystemProxyFailure(error)
@@ -256,6 +303,7 @@ final class BackendLifecycleModel {
                 let status = try await self?.systemProxyOperations.disable()
                 guard !Task.isCancelled, let status else { return }
                 self?.systemProxyStatus = status
+                self?.hasAuthoritativeSystemProxyStatus = true
                 self?.operationTask = nil
             } catch let error as TargetSystemProxyOperationError {
                 self?.finishSystemProxyFailure(error)
@@ -279,6 +327,7 @@ final class BackendLifecycleModel {
                 let status = try await self?.systemProxyOperations.recover()
                 guard !Task.isCancelled, let status else { return }
                 self?.systemProxyStatus = status
+                self?.hasAuthoritativeSystemProxyStatus = true
                 self?.operationTask = nil
             } catch let error as TargetSystemProxyOperationError {
                 self?.finishSystemProxyFailure(error)
@@ -341,6 +390,7 @@ final class BackendLifecycleModel {
                     return
                 }
                 self?.systemProxyStatus = result.systemProxyStatus
+                self?.hasAuthoritativeSystemProxyStatus = true
                 self?.finish(with: result.engineStatus)
             } catch is CancellationError {
                 await self?.finishCancellation(afterReconciling: backend)
@@ -374,6 +424,7 @@ final class BackendLifecycleModel {
                 }
                 if let proxyStatus = result.systemProxyStatus {
                     self?.systemProxyStatus = proxyStatus
+                    self?.hasAuthoritativeSystemProxyStatus = true
                 }
                 self?.finish(with: result.engineStatus)
             } catch is CancellationError {
@@ -400,6 +451,7 @@ final class BackendLifecycleModel {
                     return
                 }
                 self?.systemProxyStatus = startResult.systemProxyStatus
+                self?.hasAuthoritativeSystemProxyStatus = true
                 self?.finish(with: startResult.engineStatus)
             } catch is CancellationError {
                 await self?.finishCancellation(afterReconciling: backend)
@@ -505,6 +557,7 @@ final class BackendLifecycleModel {
     func applyAutomationSystemProxyStatus(_ proxyStatus: SystemProxyStatus) {
         guard !isBusy else { return }
         systemProxyStatus = proxyStatus
+        hasAuthoritativeSystemProxyStatus = proxyStatus.error != .statusUnavailable
     }
 
     private func begin(
@@ -570,6 +623,7 @@ final class BackendLifecycleModel {
     private func finishConnectionFailure(_ connectionError: TargetConnectionOperationError) {
         applyAuthoritativeEngineStatus(connectionError.engineStatus)
         systemProxyStatus = connectionError.systemProxyStatus
+        hasAuthoritativeSystemProxyStatus = connectionError.systemProxyStatus.error != .statusUnavailable
         error = .serviceUnavailable
         lifecycleState = .failed(.serviceUnavailable)
         operationTask = nil
@@ -684,10 +738,19 @@ final class BackendLifecycleModel {
     private func loadSystemProxyStatus() async {
         do {
             systemProxyStatus = try await systemProxyOperations.queryStatus()
+            hasAuthoritativeSystemProxyStatus = true
         } catch let error as TargetSystemProxyOperationError {
-            systemProxyStatus = error.reconciledStatus
+            if error.reconciledStatus.isSafeForServiceRemoval {
+                var unavailableStatus = error.reconciledStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+                unavailableStatus.hasRecoverySnapshot = unavailableStatus.hasRecoverySnapshot || systemProxyStatus.hasRecoverySnapshot
+                systemProxyStatus = unavailableStatus
+            } else {
+                systemProxyStatus = error.reconciledStatus
+            }
+            hasAuthoritativeSystemProxyStatus = false
         } catch {
             systemProxyStatus = systemProxyStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+            hasAuthoritativeSystemProxyStatus = false
         }
     }
 
@@ -697,11 +760,13 @@ final class BackendLifecycleModel {
             status.error = failure.operationError
         }
         systemProxyStatus = status
+        hasAuthoritativeSystemProxyStatus = status.error != .statusUnavailable
         operationTask = nil
     }
 
     private func finishUnknownSystemProxyFailure() {
         systemProxyStatus = systemProxyStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+        hasAuthoritativeSystemProxyStatus = false
         operationTask = nil
     }
 

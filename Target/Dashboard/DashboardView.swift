@@ -20,7 +20,8 @@ struct DashboardView: View {
             systemProxyStatus: lifecycle.systemProxyStatus,
             isBusy: lifecycle.isBusy,
             isHostSafeMode: lifecycle.isHostSafeMode,
-            isUTMValidation: lifecycle.isUTMValidationMode
+            isUTMValidation: lifecycle.isUTMValidationMode,
+            canRemoveService: lifecycle.canRemoveService
         )
     }
 
@@ -262,7 +263,7 @@ struct DashboardView: View {
                     Button("service.action.install") { lifecycle.installService() }
                         .disabled(!lifecycle.canManageService || lifecycle.serviceInstallation == .enabled)
                     Button("service.action.remove", role: .destructive) { lifecycle.removeService() }
-                        .disabled(!lifecycle.canManageService || lifecycle.serviceInstallation == .notRegistered)
+                        .disabled(!presentation.canRemoveService)
                 }
 
                 Divider()

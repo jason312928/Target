@@ -118,7 +118,7 @@ actor TargetAutomationOperations {
             case "service.status": return serviceStatus()
             case "service.install": return try serviceInstall()
             case "service.ping": return await servicePing()
-            case "service.remove": return try serviceRemove()
+            case "service.remove": return try await serviceRemove()
             case "proxy.status": return await proxyStatus()
             case "proxy.enable": return try await proxyAction(systemProxyOperations.enable)
             case "proxy.disable": return try await proxyAction(systemProxyOperations.disable)
@@ -598,7 +598,23 @@ actor TargetAutomationOperations {
         }
     }
 
-    private func serviceRemove() throws -> AutomationResponse {
+    private func serviceRemove() async throws -> AutomationResponse {
+        let status: SystemProxyStatus
+        do {
+            status = try await systemProxyOperations.queryStatus()
+        } catch let error as TargetSystemProxyOperationError {
+            let reconciledStatus = error.reconciledStatus.isSafeForServiceRemoval
+                ? error.reconciledStatus.preservingRecoveryEvidenceWhileStatusIsUnavailable()
+                : error.reconciledStatus
+            await observeSystemProxyStatus(reconciledStatus)
+            return .failure(code: "service_remove_blocked", message: "Remove Service requires authoritative System Proxy status showing disabled with no recovery snapshot.")
+        } catch {
+            return .failure(code: "service_remove_blocked", message: "Remove Service requires authoritative System Proxy status showing disabled with no recovery snapshot.")
+        }
+        await observeSystemProxyStatus(status)
+        guard status.isSafeForServiceRemoval else {
+            return .failure(code: "service_remove_blocked", message: "Remove Service requires authoritative System Proxy status showing disabled with no recovery snapshot.")
+        }
         try TargetServiceRegistration.unregister()
         return serviceStatus()
     }

@@ -4,6 +4,157 @@ import XCTest
 
 @MainActor
 final class SystemProxyRecoveryAvailabilityTests: XCTestCase {
+    func testRemoveServiceAllowsAuthoritativeDisabledWithoutRecoverySnapshot() async throws {
+        let registration = ServiceRegistrationProbe()
+        let operation = StaticSystemProxyOperation(status: .disabled)
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: operation,
+            hostNetworkSafetyMode: .authorizedNetworkTest,
+            serviceRegistrationStatusProvider: { registration.nextStatus() },
+            unregisterService: { registration.recordUnregister() }
+        )
+
+        model.refreshSystemProxyStatus()
+        try await waitUntil { !model.isBusy }
+        XCTAssertTrue(model.canRemoveService)
+        model.removeService()
+        try await waitUntil { !model.isBusy }
+
+        XCTAssertEqual(registration.unregisterCount, 1)
+        XCTAssertEqual(model.serviceInstallation, .notRegistered)
+        XCTAssertEqual(model.systemProxyStatus, .disabled)
+    }
+
+    func testRemoveServiceRefusesEnabledProxyWithoutUnregistering() async throws {
+        let registration = ServiceRegistrationProbe()
+        let enabled = SystemProxyStatus(state: .enabled, engineReachable: true, affectedServiceCount: 1, error: nil, hasRecoverySnapshot: true)
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: StaticSystemProxyOperation(status: enabled),
+            hostNetworkSafetyMode: .authorizedNetworkTest,
+            serviceRegistrationStatusProvider: { registration.nextStatus() },
+            unregisterService: { registration.recordUnregister() }
+        )
+
+        model.refreshSystemProxyStatus()
+        try await waitUntil { !model.isBusy }
+        XCTAssertFalse(model.canRemoveService)
+        model.removeService()
+        try await waitUntil { !model.isBusy }
+
+        XCTAssertEqual(registration.unregisterCount, 0)
+        XCTAssertEqual(model.systemProxyStatus, enabled)
+    }
+
+    func testRemoveServiceRefusesRecoveryFailedOrSnapshotPresentStates() async throws {
+        let statuses = [
+            SystemProxyStatus(state: .enabling, engineReachable: true, affectedServiceCount: 0, error: nil, hasRecoverySnapshot: false),
+            SystemProxyStatus(state: .disabling, engineReachable: true, affectedServiceCount: 1, error: nil, hasRecoverySnapshot: true),
+            SystemProxyStatus(state: .recoveryRequired, engineReachable: false, affectedServiceCount: 1, error: .localProxyUnavailable, hasRecoverySnapshot: true),
+            SystemProxyStatus(state: .failed, engineReachable: false, affectedServiceCount: 1, error: .recoveryFailed, hasRecoverySnapshot: true),
+            SystemProxyStatus(state: .disabled, engineReachable: false, affectedServiceCount: 0, error: nil, hasRecoverySnapshot: true)
+        ]
+
+        for status in statuses {
+            let registration = ServiceRegistrationProbe()
+            let model = BackendLifecycleModel(
+                backend: MockBackend(),
+                systemProxyOperations: StaticSystemProxyOperation(status: status),
+                hostNetworkSafetyMode: .authorizedNetworkTest,
+                serviceRegistrationStatusProvider: { registration.nextStatus() },
+                unregisterService: { registration.recordUnregister() }
+            )
+
+            model.removeService()
+            try await waitUntil { !model.isBusy }
+
+            XCTAssertFalse(model.canRemoveService)
+            XCTAssertEqual(registration.unregisterCount, 0)
+            XCTAssertEqual(model.systemProxyStatus, status)
+        }
+    }
+
+    func testRemoveServiceRefusesUnavailableAuthoritativeQueryAndPreservesRecoveryEvidence() async throws {
+        let registration = ServiceRegistrationProbe()
+        let knownStatus = SystemProxyStatus(state: .enabled, engineReachable: true, affectedServiceCount: 1, error: nil, hasRecoverySnapshot: true)
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: FailingQuerySystemProxyOperation(),
+            hostNetworkSafetyMode: .authorizedNetworkTest,
+            serviceRegistrationStatusProvider: { registration.nextStatus() },
+            unregisterService: { registration.recordUnregister() }
+        )
+        model.applyAutomationSystemProxyStatus(knownStatus)
+
+        model.removeService()
+        try await waitUntil { !model.isBusy }
+
+        XCTAssertEqual(registration.unregisterCount, 0)
+        XCTAssertEqual(model.systemProxyStatus.state, .failed)
+        XCTAssertEqual(model.systemProxyStatus.error, .statusUnavailable)
+        XCTAssertTrue(model.systemProxyStatus.hasRecoverySnapshot)
+        XCTAssertFalse(model.canRemoveService)
+    }
+
+    func testRemoveServiceAvailabilityMatchesPresentationSafetyCondition() async throws {
+        let registration = ServiceRegistrationProbe()
+        let operation = StaticSystemProxyOperation(status: .disabled)
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: operation,
+            hostNetworkSafetyMode: .authorizedNetworkTest,
+            serviceRegistrationStatusProvider: { registration.nextStatus() }
+        )
+        model.refreshSystemProxyStatus()
+        try await waitUntil { !model.isBusy }
+
+        let safePresentation = DashboardPresentation(
+            status: model.status,
+            lifecycleState: model.lifecycleState,
+            serviceInstallation: .enabled,
+            xpcState: .connected,
+            error: nil,
+            systemProxyStatus: model.systemProxyStatus,
+            isBusy: false,
+            isHostSafeMode: false,
+            canRemoveService: model.canRemoveService
+        )
+        XCTAssertTrue(model.canRemoveService)
+        XCTAssertTrue(safePresentation.canRemoveService)
+
+        let unsafe = SystemProxyStatus(state: .enabled, engineReachable: true, affectedServiceCount: 1, error: nil, hasRecoverySnapshot: true)
+        let unsafePresentation = DashboardPresentation(
+            status: model.status,
+            lifecycleState: model.lifecycleState,
+            serviceInstallation: .enabled,
+            xpcState: .connected,
+            error: nil,
+            systemProxyStatus: unsafe,
+            isBusy: false,
+            isHostSafeMode: false
+        )
+        XCTAssertFalse(unsafePresentation.canRemoveService)
+    }
+
+    func testRemoveServiceReadsRegistrationStatusAfterSuccessfulUnregister() async throws {
+        let registration = ServiceRegistrationProbe(statuses: [.enabled, .notRegistered])
+        let model = BackendLifecycleModel(
+            backend: MockBackend(),
+            systemProxyOperations: StaticSystemProxyOperation(status: .disabled),
+            hostNetworkSafetyMode: .authorizedNetworkTest,
+            serviceRegistrationStatusProvider: { registration.nextStatus() },
+            unregisterService: { registration.recordUnregister() }
+        )
+
+        model.removeService()
+        try await waitUntil { !model.isBusy }
+
+        XCTAssertEqual(registration.unregisterCount, 1)
+        XCTAssertEqual(registration.statusReadCount, 2)
+        XCTAssertEqual(model.serviceInstallation, .notRegistered)
+    }
+
     func testRecoveryPolicyAllowsOwnedSnapshotWhenLocalProxyIsUnavailable() {
         let capability = recoveryStatus(error: .localProxyUnavailable).recoveryCapability(
             hostNetworkSafetyMode: .authorizedNetworkTest,
@@ -788,6 +939,48 @@ private actor StaticSystemProxyOperation: TargetSystemProxyOperating {
     func enable() async throws -> SystemProxyStatus { enableCount += 1; return status }
     func disable() async throws -> SystemProxyStatus { disableCount += 1; return status }
     func recover() async throws -> SystemProxyStatus { .disabled }
+}
+
+private actor FailingQuerySystemProxyOperation: TargetSystemProxyOperating {
+    func queryStatus() async throws -> SystemProxyStatus {
+        throw TargetSystemProxyOperationError(
+            operationError: .statusUnavailable,
+            reconciledStatus: .disabled
+        )
+    }
+
+    func enable() async throws -> SystemProxyStatus { .disabled }
+    func disable() async throws -> SystemProxyStatus { .disabled }
+    func recover() async throws -> SystemProxyStatus { .disabled }
+}
+
+private final class ServiceRegistrationProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var statuses: [ServiceInstallationState]
+    private var lastStatus: ServiceInstallationState
+    private(set) var unregisterCount = 0
+    private(set) var statusReadCount = 0
+
+    init(statuses: [ServiceInstallationState] = [.enabled, .notRegistered]) {
+        self.statuses = statuses
+        self.lastStatus = statuses.last ?? .enabled
+    }
+
+    func nextStatus() -> ServiceInstallationState {
+        lock.lock()
+        defer { lock.unlock() }
+        statusReadCount += 1
+        if !statuses.isEmpty {
+            lastStatus = statuses.removeFirst()
+        }
+        return lastStatus
+    }
+
+    func recordUnregister() {
+        lock.lock()
+        unregisterCount += 1
+        lock.unlock()
+    }
 }
 
 private actor FailingEnableSystemProxyOperation: TargetSystemProxyOperating {

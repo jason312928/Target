@@ -58,6 +58,7 @@ struct DashboardPresentation: Equatable {
     let systemProxyStateKey: String
     let systemProxyEngineKey: String
     let isSystemProxyToggleOn: Bool
+    let canRemoveService: Bool
     let isHostSafeMode: Bool
     let hostSafetyNoticeKey: String
 
@@ -70,7 +71,8 @@ struct DashboardPresentation: Equatable {
         systemProxyStatus: SystemProxyStatus,
         isBusy: Bool,
         isHostSafeMode: Bool,
-        isUTMValidation: Bool = true
+        isUTMValidation: Bool = true,
+        canRemoveService: Bool = false
     ) {
         self.isBusy = isBusy
         self.showsRestartNotice = status.restartRequired
@@ -86,6 +88,7 @@ struct DashboardPresentation: Equatable {
         self.systemProxyStateKey = systemProxyStatus.state.localizedKey
         self.systemProxyEngineKey = systemProxyStatus.engineReachable ? "system-proxy.engine.reachable" : "system-proxy.engine.unreachable"
         self.isSystemProxyToggleOn = [.enabling, .enabled].contains(systemProxyStatus.state)
+        self.canRemoveService = canRemoveService
         self.isHostSafeMode = isHostSafeMode
         self.hostSafetyNoticeKey = isHostSafeMode
             ? "host-safety.status.safe"
