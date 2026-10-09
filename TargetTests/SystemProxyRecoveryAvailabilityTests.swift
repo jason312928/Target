@@ -177,7 +177,7 @@ final class SystemProxyRecoveryAvailabilityTests: XCTestCase {
         model.removeService()
         await client.waitUntilQueryStarted()
         let enableTask = Task { try? await shared.enable() }
-        gate.release()
+        await gate.release()
 
         try await waitUntil { !model.isBusy }
         let enableResult = await enableTask.value
@@ -194,10 +194,13 @@ final class SystemProxyRecoveryAvailabilityTests: XCTestCase {
         let client = RemovalLeaseClient()
         let operations = TargetSystemProxyOperations(client: client)
 
-        await XCTAssertThrowsErrorAsync(try await operations.removeService(
-            unregisterService: { throw BackendError.serviceRegistrationFailed },
-            serviceStatus: { .enabled }
-        )) { error in
+        do {
+            _ = try await operations.removeService(
+                unregisterService: { throw BackendError.serviceRegistrationFailed },
+                serviceStatus: { .enabled }
+            )
+            XCTFail("Expected unregister failure")
+        } catch {
             XCTAssertEqual(error as? BackendError, .serviceRegistrationFailed)
         }
 

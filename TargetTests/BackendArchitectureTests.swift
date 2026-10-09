@@ -691,7 +691,7 @@ final class BackendArchitectureTests: XCTestCase {
             XCTAssertEqual(error as? SystemProxyError, .serviceRemovalInProgress)
         }
 
-        gate.release()
+        await gate.release()
         let lease = try await prepare.value
         XCTAssertEqual(lease.status, .disabled)
         XCTAssertEqual(clientAConnection.invalidationCount, 0)
@@ -796,7 +796,7 @@ final class BackendArchitectureTests: XCTestCase {
 
         let prepare = Task { try await client.prepareServiceRemoval() }
         await service.waitUntilPrepareStarted()
-        gate.release()
+        await gate.release()
         _ = try await prepare.value
         connection.invalidate()
 
@@ -829,7 +829,7 @@ final class BackendArchitectureTests: XCTestCase {
         let prepare = Task { try await client.prepareServiceRemoval() }
         await service.waitUntilPrepareStarted()
         connection.invalidate()
-        gate.release()
+        await gate.release()
 
         await XCTAssertThrowsErrorAsync(try await prepare.value) { error in
             XCTAssertEqual(error as? BackendError, .serviceUnavailable)

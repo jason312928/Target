@@ -173,10 +173,7 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
     func testSmartApplicationPresentationMapsSafeAggregateOutcomes() {
         let switched = SmartApplicationResult(
             action: .switchAction,
-            selectorSwitched: true,
-            closedConnectionCount: 0,
-            preservedConnectionCount: 0,
-            reasonCode: "applied"
+            result: SmartPolicyApplyResult(recommendation: nil, applied: true, after: nil, reasonCode: "applied")
         )
         let switchPresentation = SmartApplicationPresentation(result: switched)
         XCTAssertEqual(switchPresentation.messageKey, "policy.smart.result.switched")
@@ -185,10 +182,11 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
 
         let applied = SmartApplicationResult(
             action: .continuityApply,
-            selectorSwitched: true,
-            closedConnectionCount: 2,
-            preservedConnectionCount: 5,
-            reasonCode: "completed"
+            result: SmartContinuityApplyResult(
+                selectorApplied: true, observedConnectionCount: 7, eligibleConnectionCount: 2,
+                closedConnectionCount: 2, preservedConnectionCount: 5, failedCloseCount: 0,
+                protectCount: 5, unknownCount: 0, replaceableCount: 2, reasonCodes: ["completed"]
+            )
         )
         let applyPresentation = SmartApplicationPresentation(result: applied)
         XCTAssertEqual(applyPresentation.messageKey, "policy.smart.result.completed")
@@ -198,10 +196,7 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
 
         let unavailable = SmartApplicationResult(
             action: .switchAction,
-            selectorSwitched: false,
-            closedConnectionCount: 0,
-            preservedConnectionCount: 0,
-            reasonCode: "lowConfidence"
+            result: SmartPolicyApplyResult(recommendation: nil, applied: false, after: nil, reasonCode: "lowConfidence")
         )
         XCTAssertEqual(SmartApplicationPresentation(result: unavailable).messageKey, "policy.smart.result.low-confidence")
 
@@ -215,10 +210,12 @@ final class ProfileViewModelTests: XCTestCase, ProfileTestCaseSupport {
         for (reason, key) in expected {
             let result = SmartApplicationResult(
                 action: .continuityApply,
-                selectorSwitched: false,
-                closedConnectionCount: 0,
-                preservedConnectionCount: 1,
-                reasonCode: reason
+                result: SmartContinuityApplyResult(
+                    selectorApplied: false, observedConnectionCount: 1, eligibleConnectionCount: 0,
+                    closedConnectionCount: 0, preservedConnectionCount: 1,
+                    failedCloseCount: reason == "closeFailed" ? 1 : 0,
+                    protectCount: 1, unknownCount: 0, replaceableCount: 0, reasonCodes: [reason]
+                )
             )
             XCTAssertEqual(SmartApplicationPresentation(result: result).messageKey, key)
         }

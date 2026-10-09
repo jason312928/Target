@@ -67,7 +67,7 @@ final class ProfileWorkspaceInteractionTests: XCTestCase {
         )
         let model = ProfileViewModel(store: fixture.store, smartOperations: smart)
         let automation = TargetAutomationOperations(
-            profileStore: fixture.store, smartOperations: smart, backend: MockBackend()
+            profileStore: fixture.store, backend: MockBackend(), smartOperations: smart
         )
 
         model.applySmart(.switchAction)
