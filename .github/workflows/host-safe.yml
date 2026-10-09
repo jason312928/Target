@@ -1,0 +1,61 @@
+name: Host Safe validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      RUN_PRIVILEGED_SERVICE_INTEGRATION_TESTS: '0'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Record toolchain and source
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          {
+            echo "Source: $(git rev-parse HEAD)"
+            echo "Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            uname -m
+            sw_vers
+            xcodebuild -version
+            xcrun swift --version
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          xcodebuild -list -project Target.xcodeproj
+      - name: Service Removal focused XCTest (T0)
+        run: |
+          set -euo pipefail
+          swift test --no-parallel --filter 'BackendArchitectureTests|SystemProxyRecoveryAvailabilityTests' 2>&1 | tee "$RUNNER_TEMP/t0.log"
+          {
+            echo '### T0'
+            grep -E 'Executed [0-9]+ tests?' "$RUNNER_TEMP/t0.log" | tail -1
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Host Safe regression (T1)
+        run: |
+          set -euo pipefail
+          swift test --skip-build --no-parallel 2>&1 | tee "$RUNNER_TEMP/t1.log"
+          {
+            echo '### T1'
+            grep -E 'Executed [0-9]+ tests?' "$RUNNER_TEMP/t1.log" | tail -1
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: arm64 Debug Target and TargetTests build-for-testing
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing -project Target.xcodeproj -scheme Target \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/TargetDerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/TargetBuild.xcresult" \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES TARGET_BUILD_CHANNEL=Local \
+            TARGET_SOURCE_COMMIT="$GITHUB_SHA" TARGET_SOURCE_COMMIT_SHORT="${GITHUB_SHA:0:8}" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            SWIFT_ENABLE_EXPLICIT_MODULES=NO -quiet
+          test -d "$RUNNER_TEMP/TargetDerivedData/Build/Products/Debug.noindex/Target.app"
+          test -d "$RUNNER_TEMP/TargetDerivedData/Build/Products/Debug.noindex/TargetTests.xctest"
+          echo 'arm64 Debug Target + TargetTests build-for-testing: PASS (unsigned, Local)' >> "$GITHUB_STEP_SUMMARY"
