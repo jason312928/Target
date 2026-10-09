@@ -443,8 +443,12 @@ final class EngineLifecycleTests: XCTestCase {
         let fixture = try EngineLifecycleFixture(mode: .exitAfterReady)
         do {
             _ = try await fixture.backend.startEngine()
-            // A cold virtualized runner can spend more than two seconds entering
-            // Xcode's Python runtime before the fixture's intentional exit.
+            // Separate cold interpreter startup from the process-exit assertion.
+            let engineDirectory = fixture.executable.deletingLastPathComponent()
+            try await waitUntil(timeout: .seconds(15)) {
+                FileManager.default.fileExists(atPath: engineDirectory.appending(path: "ready").path)
+            }
+            try Data().write(to: engineDirectory.appending(path: "exit-request"))
             try await waitUntil(timeout: .seconds(4)) {
                 let status = try? await fixture.backend.queryStatus()
                 return status?.engineState == .stopped
@@ -941,6 +945,7 @@ private final class EngineLifecycleFixture: @unchecked Sendable {
           listening|exit-after-ready)
             exec /usr/bin/python3 - "$3" "$mode" <<'PY'
     import json
+    import pathlib
     import signal
     import socket
     import sys
@@ -953,7 +958,10 @@ private final class EngineLifecycleFixture: @unchecked Sendable {
     listener.bind(('127.0.0.1', port))
     listener.listen(8)
     if sys.argv[2] == 'exit-after-ready':
-        time.sleep(1.2)
+        engine_directory = pathlib.Path(sys.argv[1]).parent.parent
+        (engine_directory / 'ready').touch()
+        while not (engine_directory / 'exit-request').exists():
+            time.sleep(0.02)
         sys.exit(0)
     signal.signal(signal.SIGTERM, lambda _signal, _frame: sys.exit(0))
     while True:

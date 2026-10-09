@@ -394,7 +394,7 @@ final class TargetRuntimeOperationsTests: XCTestCase {
         let operations = TargetRuntimeOperations(backend: backend, systemProxyClient: proxy, hostNetworkSafetyMode: .authorizedNetworkTest)
 
         await assertThrowsAsync(try await operations.stopEngineSafely()) { error in
-            XCTAssertEqual(error as? SystemProxyError, .snapshotFailed)
+            XCTAssertEqual(error as? SystemProxyError, .statusUnavailable)
         }
         let stopCount = await backend.stopCount
         XCTAssertEqual(stopCount, 0)

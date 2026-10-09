@@ -64,7 +64,19 @@ jobs:
             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES TARGET_BUILD_CHANNEL=Local \
             TARGET_SOURCE_COMMIT="$GITHUB_SHA" TARGET_SOURCE_COMMIT_SHORT="${GITHUB_SHA:0:8}" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
-            SWIFT_ENABLE_EXPLICIT_MODULES=NO -quiet
-          test -d "$RUNNER_TEMP/TargetDerivedData/Build/Products/Debug.noindex/Target.app"
-          test -d "$RUNNER_TEMP/TargetDerivedData/Build/Products/Debug.noindex/TargetTests.xctest"
+            SWIFT_ENABLE_EXPLICIT_MODULES=NO COPY_PHASE_STRIP=NO \
+            STRIP_INSTALLED_PRODUCT=NO
+          products="$RUNNER_TEMP/TargetDerivedData/Build/Products"
+          app="$products/Debug.noindex/Target.app"
+          test -d "$app"
+          test_bundle="$(find "$products" -type d -name TargetTests.xctest)"
+          test -n "$test_bundle"
+          test -d "$test_bundle"
+          {
+            echo '### Built binary identities (SHA-256)'
+            shasum -a 256 "$app/Contents/MacOS/Target" \
+              "$app/Contents/MacOS/TargetService" \
+              "$app/Contents/Helpers/targetctl" \
+              "$test_bundle/Contents/MacOS/TargetTests"
+          } >> "$GITHUB_STEP_SUMMARY"
           echo 'arm64 Debug Target + TargetTests build-for-testing: PASS (unsigned, Local)' >> "$GITHUB_STEP_SUMMARY"
