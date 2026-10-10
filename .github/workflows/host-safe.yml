@@ -1,82 +1,54 @@
-name: Host Safe validation
+name: Development Preview release build
 
 on:
   workflow_dispatch:
-    inputs:
-      test_filter:
-        description: Optional XCTest filter for focused diagnosis (skips T1)
-        type: string
-        default: ''
 
 permissions:
   contents: read
 
 jobs:
-  validate:
+  release-build:
     runs-on: macos-26
     timeout-minutes: 30
-    env:
-      RUN_PRIVILEGED_SERVICE_INTEGRATION_TESTS: '0'
-      TEST_FILTER: ${{ inputs.test_filter }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: 0fc4c1339ffc984c74344ae4d5987874f694cec6
           persist-credentials: false
-      - name: Record toolchain and source
+      - name: Build exact arm64 Release candidate
         run: |
           set -euo pipefail
+          source_sha=0fc4c1339ffc984c74344ae4d5987874f694cec6
+          test "$(git rev-parse HEAD)" = "$source_sha"
           test "$(uname -m)" = arm64
+          xcodebuild build -project Target.xcodeproj -scheme Target \
+            -configuration Release -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/TargetDerivedData" \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES MARKETING_VERSION=1.0.0 CURRENT_PROJECT_VERSION=138 \
+            TARGET_BUILD_CHANNEL=DevelopmentPreview \
+            TARGET_SOURCE_COMMIT="$source_sha" TARGET_SOURCE_COMMIT_SHORT="${source_sha:0:8}" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            SWIFT_ENABLE_EXPLICIT_MODULES=NO COPY_PHASE_STRIP=NO STRIP_INSTALLED_PRODUCT=NO
+          app="$RUNNER_TEMP/TargetDerivedData/Build/Products/Release.noindex/Target.app"
+          test -d "$app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :TargetSourceCommit' "$app/Contents/Info.plist")" = "$source_sha"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")" = 138
+          test -d "$app/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app"
+          mkdir -p "$RUNNER_TEMP/export"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/export/Target-unsigned.zip"
           {
-            echo "Source: $(git rev-parse HEAD)"
-            echo "Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
-            uname -m
+            echo "Product source: $source_sha"
+            echo 'Configuration: Release; architecture: arm64; channel: DevelopmentPreview; build: 138'
             sw_vers
             xcodebuild -version
             xcrun swift --version
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          xcodebuild -list -project Target.xcodeproj
-      - name: Service Removal focused XCTest (T0)
-        run: |
-          set -euo pipefail
-          filter="${TEST_FILTER:-BackendArchitectureTests|SystemProxyRecoveryAvailabilityTests}"
-          swift test --no-parallel --filter "$filter" 2>&1 | tee "$RUNNER_TEMP/t0.log"
-          {
-            echo '### T0'
-            grep -E 'Executed [0-9]+ tests?' "$RUNNER_TEMP/t0.log" | tail -1
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Host Safe regression (T1)
-        if: ${{ success() && inputs.test_filter == '' }}
-        run: |
-          set -euo pipefail
-          swift test --skip-build --no-parallel 2>&1 | tee "$RUNNER_TEMP/t1.log"
-          {
-            echo '### T1'
-            grep -E 'Executed [0-9]+ tests?' "$RUNNER_TEMP/t1.log" | tail -1
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: arm64 Debug Target and TargetTests build-for-testing
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          xcodebuild build-for-testing -project Target.xcodeproj -scheme Target \
-            -configuration Debug -destination 'platform=macOS,arch=arm64' \
-            -derivedDataPath "$RUNNER_TEMP/TargetDerivedData" \
-            -resultBundlePath "$RUNNER_TEMP/TargetBuild.xcresult" \
-            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES TARGET_BUILD_CHANNEL=Local \
-            TARGET_SOURCE_COMMIT="$GITHUB_SHA" TARGET_SOURCE_COMMIT_SHORT="${GITHUB_SHA:0:8}" \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
-            SWIFT_ENABLE_EXPLICIT_MODULES=NO COPY_PHASE_STRIP=NO \
-            STRIP_INSTALLED_PRODUCT=NO
-          products="$RUNNER_TEMP/TargetDerivedData/Build/Products"
-          app="$products/Debug.noindex/Target.app"
-          test -d "$app"
-          test_bundle="$(find "$products" -type d -name TargetTests.xctest)"
-          test -n "$test_bundle"
-          test -d "$test_bundle"
-          {
-            echo '### Built binary identities (SHA-256)'
-            shasum -a 256 "$app/Contents/MacOS/Target" \
-              "$app/Contents/MacOS/TargetService" \
-              "$app/Contents/Helpers/targetctl" \
-              "$test_bundle/Contents/MacOS/TargetTests"
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo 'arm64 Debug Target + TargetTests build-for-testing: PASS (unsigned, Local)' >> "$GITHUB_STEP_SUMMARY"
+            shasum -a 256 "$RUNNER_TEMP/export/Target-unsigned.zip" \
+              "$app/Contents/MacOS/Target" "$app/Contents/MacOS/TargetService" \
+              "$app/Contents/Helpers/targetctl"
+          } | tee "$RUNNER_TEMP/export/build-identity.txt" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Target-release-0fc4c133-build-138
+          path: ${{ runner.temp }}/export/
+          if-no-files-found: error
+          retention-days: 3
