@@ -7,12 +7,25 @@ on:
         description: Optional XCTest filter for focused diagnosis (skips T1)
         type: string
         default: ''
+      artifact_only:
+        description: Export an unsigned Debug application without rerunning tests
+        type: boolean
+        default: false
+      source_sha:
+        description: Exact source commit for artifact export
+        type: string
+        default: ''
+      validation_build:
+        description: Compile the authorized network validation configuration (never run it in CI)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   validate:
+    if: ${{ !inputs.artifact_only }}
     runs-on: macos-26
     timeout-minutes: 30
     env:
@@ -80,3 +93,58 @@ jobs:
               "$test_bundle/Contents/MacOS/TargetTests"
           } >> "$GITHUB_STEP_SUMMARY"
           echo 'arm64 Debug Target + TargetTests build-for-testing: PASS (unsigned, Local)' >> "$GITHUB_STEP_SUMMARY"
+
+  export:
+    if: ${{ inputs.artifact_only }}
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      VALIDATION_BUILD: ${{ inputs.validation_build }}
+    steps:
+      - name: Validate exact source request
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(uname -m)" = arm64
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Build and package unsigned application
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          conditions='$(inherited) DEBUG'
+          if test "$VALIDATION_BUILD" = true; then
+            conditions='$(inherited) DEBUG TARGET_UTM_VALIDATION TARGET_BUILD_CHANNEL_Local'
+          fi
+          xcodebuild build -project Target.xcodeproj -scheme Target \
+            -configuration Debug -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath "$RUNNER_TEMP/TargetDerivedData" \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES TARGET_BUILD_CHANNEL=Local \
+            TARGET_SOURCE_COMMIT="$SOURCE_SHA" TARGET_SOURCE_COMMIT_SHORT="${SOURCE_SHA:0:8}" \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS="$conditions" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            SWIFT_ENABLE_EXPLICIT_MODULES=NO COPY_PHASE_STRIP=NO STRIP_INSTALLED_PRODUCT=NO
+          app="$RUNNER_TEMP/TargetDerivedData/Build/Products/Debug.noindex/Target.app"
+          test -d "$app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :TargetSourceCommit' "$app/Contents/Info.plist")" = "$SOURCE_SHA"
+          mkdir -p "$RUNNER_TEMP/export"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/export/Target-unsigned.zip"
+          {
+            echo "Source: $SOURCE_SHA"
+            echo "Compilation conditions: $conditions"
+            sw_vers
+            xcodebuild -version
+            xcrun swift --version
+            shasum -a 256 "$RUNNER_TEMP/export/Target-unsigned.zip" \
+              "$app/Contents/MacOS/Target" "$app/Contents/MacOS/TargetService" \
+              "$app/Contents/Helpers/targetctl"
+          } | tee "$RUNNER_TEMP/export/build-identity.txt" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Target-unsigned-${{ inputs.source_sha }}
+          path: ${{ runner.temp }}/export/
+          if-no-files-found: error
+          retention-days: 3
