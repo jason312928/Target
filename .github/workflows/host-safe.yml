@@ -115,9 +115,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          conditions=DEBUG
+          conditions='$(inherited) DEBUG'
           if test "$VALIDATION_BUILD" = true; then
-            conditions='DEBUG TARGET_UTM_VALIDATION TARGET_BUILD_CHANNEL_Local'
+            conditions='$(inherited) DEBUG TARGET_UTM_VALIDATION TARGET_BUILD_CHANNEL_Local'
           fi
           xcodebuild build -project Target.xcodeproj -scheme Target \
             -configuration Debug -destination 'platform=macOS,arch=arm64' \
