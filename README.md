@@ -142,8 +142,6 @@ Target 会先下载并验证候选内容，展示脱敏变化摘要，只有在�
 4. 在 Dashboard 按提示安装 sing-box 内核与 TargetService。
 5. 在 Profiles 导入 sing-box JSON，或添加受支持的订阅；选择 Profile 后回到 Dashboard 连接。
 
-应用内更新目前仍提供 Development Preview 10；dev.11 的升级验证完成后再切换更新源。
-
 当前 Development Preview 11 的要求：
 
 - macOS 15 或更高版本
