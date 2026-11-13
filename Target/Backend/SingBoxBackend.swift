@@ -197,11 +197,28 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
         do { try authorize() }
         catch PolicySelectionApplyRefusal.selectionChanged { return .refused(.selectionChanged) }
         catch PolicySelectionApplyRefusal.profileChanged { return .refused(.profileChanged) }
+        if evidence.requiresNewConnectionsOnly {
+            // OFF cancels evaluation/authorization, but must drain an authorized
+            // write and its readback rather than cancel the HTTP reply. This
+            // unstructured task is bounded by the existing controller timeouts;
+            // the mutation lease above remains held until it finishes.
+            let completion = Task {
+                await finishConditionalPolicySelection(evidence: evidence, outboundTag: outboundTag,
+                    record: before.record, descriptor: before.descriptor)
+            }
+            return await completion.value
+        }
+        return await finishConditionalPolicySelection(evidence: evidence, outboundTag: outboundTag,
+            record: before.record, descriptor: before.descriptor)
+    }
+
+    private func finishConditionalPolicySelection(evidence: PolicySelectionEvidence, outboundTag: String,
+                                                  record: EngineRuntimeRecord, descriptor: RuntimeControlDescriptor) async -> PolicySelectionApplyResult {
         do {
-            let converged = try await performLivePolicySelection(selectorTag: evidence.selector, outboundTag: outboundTag, descriptor: before.descriptor)
+            let converged = try await performLivePolicySelection(selectorTag: evidence.selector, outboundTag: outboundTag, descriptor: descriptor)
             guard converged, let after = await verifiedRuntimeControlMaterial(),
-                  after.record == before.record, after.descriptor == before.descriptor else { return .refused(.mutationUnconfirmed) }
-            return .init(applied: true, after: outboundTag, reason: .applied, runtimeIdentity: before.record)
+                  after.record == record, after.descriptor == descriptor else { return .refused(.mutationUnconfirmed) }
+            return .init(applied: true, after: outboundTag, reason: .applied, runtimeIdentity: record)
         } catch {
             // A dispatched request can have taken effect even when its reply is
             // unavailable. Never retry or claim convergence in that situation.

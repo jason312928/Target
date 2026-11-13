@@ -753,6 +753,31 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(closes, 0)
     }
 
+    @MainActor
+    func testAutoOffDrainsCancellationSensitiveDispatchedControllerRequest() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: ["a": .latency(300), "b": .latency(30)], selectorMembers: ["a", "b"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+        let policy = TargetPolicyOperations(profileStore: fixture.profileStore, runtimeEvidenceProvider: fixture.backend)
+        let shadow = SmartPolicyShadowOperations(catalogReader: PolicyCatalogOperation(profileStore: fixture.profileStore), runtime: fixture.backend)
+        let apply = SmartPolicyApplyOperations(evaluator: shadow, policy: policy)
+        let auto = SmartAutoSwitchCoordinator(policy: policy, runtime: fixture.backend, apply: apply)
+        await client.requireUncancelledSelectionCompletion()
+        await client.gateNextSelection()
+        await auto.on()
+        await client.waitUntilSelecting()
+        auto.requestStop()
+        let off = Task { await auto.off() }
+        XCTAssertEqual(auto.status.state, .stopping)
+        let refused = try await policy.selectIfUnchanged(evidence: fixture.selectionEvidence(), outboundTag: "b", generation: 0)
+        XCTAssertEqual(refused.reason, .mutationInProgress, "OFF must retain the mutation lease while draining")
+        await client.releaseSelection()
+        let status = await off.value
+        XCTAssertEqual(status.state, .off)
+        XCTAssertEqual(status.lastResult, "applied", "A cancellation-sensitive HTTP reply must still settle and be recorded")
+        let writes = await client.selectionCallCount()
+        XCTAssertEqual(writes, 1)
+    }
+
     func testAutoIdentityReadRejectsStoppedUntrustedAndReplacedRuntimeWithoutProbes() async throws {
         for change in ["stopped", "untrusted", "replaced"] {
             let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a", "b"])
@@ -1304,6 +1329,7 @@ private actor ControlledRuntimeControlClient: RuntimeControlClient {
     private var selected: String?
     private var selectorReadAction: (@Sendable () -> Void)?
     private var shouldGateSelection = false
+    private var checksSelectionCancellation = false
     private var selectionGate: CheckedContinuation<Void, Never>?
     private var selectionWaiting: CheckedContinuation<Void, Never>?
     private var snapshot: RuntimeConnectionsSnapshot?
@@ -1351,8 +1377,10 @@ private actor ControlledRuntimeControlClient: RuntimeControlClient {
             shouldGateSelection = false
             await withCheckedContinuation { selectionGate = $0; selectionWaiting?.resume(); selectionWaiting = nil }
         }
+        if checksSelectionCancellation { try Task.checkCancellation() }
         selected = outbound
     }
+    func requireUncancelledSelectionCompletion() { checksSelectionCancellation = true }
     func gateNextSelection() { shouldGateSelection = true }
     func waitUntilSelecting() async {
         if selectionGate != nil { return }
