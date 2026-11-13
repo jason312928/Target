@@ -21,6 +21,18 @@ final class SmartAutoSwitchTests: XCTestCase, ProfileTestCaseSupport {
         return .init(store: store, runtime: runtime, policy: policy, apply: apply, auto: auto, clock: clock, sleeper: sleeper)
     }
 
+    func testSelectorConnectionPreservationRequiresKnownBooleanSemantics() {
+        for (field, allowed) in [("", true), (",\"interrupt_exist_connections\":false", true),
+                                 (",\"interrupt_exist_connections\":true", false), (",\"interrupt_exist_connections\":0", false),
+                                 (",\"interrupt_exist_connections\":null", false), (",\"interrupt_exist_connections\":\"false\"", false)] {
+            let data = Data("{\"outbounds\":[{\"type\":\"selector\",\"tag\":\"group\"\(field)}]}".utf8)
+            XCTAssertEqual(SmartAutoSelectorSafety.preservesConnections(configuration: data, selector: "group"), allowed)
+        }
+        XCTAssertFalse(SmartAutoSelectorSafety.preservesConnections(configuration: Data("{}".utf8), selector: "group"))
+        let duplicate = Data(#"{"outbounds":[{"type":"selector","tag":"group"},{"type":"selector","tag":"group"}]}"#.utf8)
+        XCTAssertFalse(SmartAutoSelectorSafety.preservesConnections(configuration: duplicate, selector: "group"))
+    }
+
     func testDefaultOffExplicitOnOffAndNewProcessDoesNotRestore() async throws {
         let rig = try makeRig()
         XCTAssertEqual(rig.auto.status, SmartAutoStatus())
@@ -518,6 +530,7 @@ private actor AutoTestRuntime: SmartAutoRuntimeReading, SmartShadowRuntimeReadin
         do { try authorize() }
         catch PolicySelectionApplyRefusal.selectionChanged { return .refused(.selectionChanged) }
         catch PolicySelectionApplyRefusal.profileChanged { return .refused(.profileChanged) }
+        XCTAssertTrue(evidence.requiresNewConnectionsOnly, "Auto must carry the dispatch-time connection-preservation constraint")
         conditionalWrites += 1
         current = outboundTag
         if let dispatchGate { self.dispatchGate = nil; await dispatchGate.wait() }

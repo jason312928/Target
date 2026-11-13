@@ -258,11 +258,12 @@ actor SmartPolicyApplyOperations {
             recommendation = value
             try Task.checkCancellation()
             guard value.state == "available" else { return result(value.reasonCodes.first ?? "runtimeUnavailable", value) }
-            guard let evidence = value.selectionEvidence,
+            guard var evidence = value.selectionEvidence,
                   evidence.selector == value.selector, evidence.currentOutbound == value.currentOutbound,
                   evidence.observedAt == value.observedAt,
                   let recommended = value.recommendedOutbound else { return result("invalidRecommendation", value) }
             if let expected {
+                evidence.requiresNewConnectionsOnly = true
                 guard value.connectionSnapshotAvailable, !value.connectionSnapshotTruncated else {
                     return result("runtimeUnavailable", value)
                 }

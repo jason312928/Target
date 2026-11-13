@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 import Observation
 import TargetCore
@@ -9,6 +10,21 @@ protocol SmartAutoRuntimeReading: Sendable {
 }
 
 enum SmartAutoUnavailable: Error { case runtimeUnavailable, identityChanged, selectorUnavailable }
+
+/// Inspect the verified launch document, never a possibly newer source Profile.
+/// A selector configured to interrupt inbound flows is not eligible for Auto.
+enum SmartAutoSelectorSafety {
+    static func preservesConnections(configuration: Data, selector: String) -> Bool {
+        guard let root = (try? JSONSerialization.jsonObject(with: configuration)) as? [String: Any],
+              let outbounds = root["outbounds"] as? [[String: Any]] else { return false }
+        let matches = outbounds.filter { $0["tag"] as? String == selector }
+        guard matches.count == 1, matches[0]["type"] as? String == "selector" else { return false }
+        guard let raw = matches[0]["interrupt_exist_connections"] else { return true }
+        // JSON numbers/strings/null must not be mistaken for the boolean false.
+        guard let flag = raw as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() else { return false }
+        return !flag.boolValue
+    }
+}
 
 struct SmartAutoExpectation: Sendable {
     let evidence: PolicySelectionEvidence

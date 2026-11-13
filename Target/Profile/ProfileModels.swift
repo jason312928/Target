@@ -414,6 +414,8 @@ extension RuntimePolicyApplying {
 }
 
 struct PolicySelectionEvidence: Equatable, Sendable {
+    /// Auto-only constraint, rechecked against the verified runtime at dispatch.
+    var requiresNewConnectionsOnly = false
     let catalog: PolicyCatalog
     let sessionID: UUID
     let selector: String

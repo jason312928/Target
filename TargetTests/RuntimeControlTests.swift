@@ -772,6 +772,26 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         }
     }
 
+    func testAutoRejectsInterruptingRuntimeAtEnableAndConditionalDispatch() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: ["a": .latency(300), "b": .latency(30)], selectorMembers: ["a", "b"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client, interruptExistingConnections: true)
+        let policy = TargetPolicyOperations(profileStore: fixture.profileStore, runtimeEvidenceProvider: fixture.backend)
+        do {
+            _ = try await fixture.backend.autoSelectionEvidence(catalog: policy.readPersisted())
+            XCTFail("An interrupting selector must never enable Auto")
+        } catch {}
+        var evidence = try fixture.selectionEvidence()
+        evidence.requiresNewConnectionsOnly = true
+        let refusal = try await policy.selectIfUnchanged(evidence: evidence, outboundTag: "b", generation: 0)
+        XCTAssertEqual(refusal.reason, .invalidRecommendation)
+        let writes = await client.selectionCallCount()
+        XCTAssertEqual(writes, 0)
+        // Preserve the existing explicit Smart Apply contract.
+        let shadow = SmartPolicyShadowOperations(catalogReader: PolicyCatalogOperation(profileStore: fixture.profileStore), runtime: fixture.backend)
+        let manual = await SmartPolicyApplyOperations(evaluator: shadow, policy: policy).apply()
+        XCTAssertTrue(manual.applied)
+    }
+
     func testAutoExpectedSessionRejectsFreshDecisionFromRebuiltRuntime() async throws {
         let client = ControlledRuntimeControlClient(probeOutcomes: ["a": .latency(300), "b": .latency(30)], selectorMembers: ["a", "b"])
         let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
@@ -1134,7 +1154,8 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
 
     private func makeRuntimePolicyProbeFixture(
         members: [String],
-        client: any RuntimeControlClient
+        client: any RuntimeControlClient,
+        interruptExistingConnections: Bool = false
     ) throws -> RuntimePolicyProbeFixture {
         let root = try temporaryDirectory()
         let engineDirectory = root.appending(path: "Engine", directoryHint: .isDirectory)
@@ -1159,7 +1180,12 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
             profileRevision: version.revision,
             sourceFingerprint: TargetConfigurationFingerprint.sha256(version.data)
         )
-        let runtimeData = Data(#"{"experimental":{"clash_api":{"external_controller":"127.0.0.1:51235","secret":"unit-test-runtime-control-secret"}}}"#.utf8)
+        var runtimeRoot = try JSONSerialization.jsonObject(with: version.data) as! [String: Any]
+        var runtimeOutbounds = runtimeRoot["outbounds"] as! [[String: Any]]
+        runtimeOutbounds[0]["interrupt_exist_connections"] = interruptExistingConnections
+        runtimeRoot["outbounds"] = runtimeOutbounds
+        runtimeRoot["experimental"] = ["clash_api": ["external_controller": "127.0.0.1:51235", "secret": "unit-test-runtime-control-secret"]]
+        let runtimeData = try JSONSerialization.data(withJSONObject: runtimeRoot, options: [.sortedKeys])
         let configurations = RuntimeConfigurationStore(
             directory: engineDirectory.appending(path: "runtime", directoryHint: .isDirectory)
         )

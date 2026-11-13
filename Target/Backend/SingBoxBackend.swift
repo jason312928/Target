@@ -171,6 +171,10 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
               before.record.profileID == evidence.catalog.profileID,
               before.record.profileRevision == evidence.catalog.profileRevision,
               before.record.sourceConfigurationFingerprint == evidence.catalog.sourceFingerprint else { return .refused(.identityChanged) }
+        if evidence.requiresNewConnectionsOnly,
+           !SmartAutoSelectorSafety.preservesConnections(configuration: before.configuration, selector: evidence.selector) {
+            return .refused(.invalidRecommendation)
+        }
         let matches = evidence.catalog.selectors.filter { $0.tag == evidence.selector }
         guard matches.count == 1, matches[0].isMutable,
               matches[0].members.contains(where: { $0.tag == outboundTag && $0.status == .available }),
@@ -316,6 +320,9 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
               before.record.profileRevision == catalog.profileRevision,
               before.record.sourceConfigurationFingerprint == catalog.sourceFingerprint else {
             throw SmartAutoUnavailable.runtimeUnavailable
+        }
+        guard SmartAutoSelectorSafety.preservesConnections(configuration: before.configuration, selector: selector) else {
+            throw SmartAutoUnavailable.selectorUnavailable
         }
         let selections = try await runtimeControlClient.selectors(using: before.descriptor)
         guard let live = selections[selector],
