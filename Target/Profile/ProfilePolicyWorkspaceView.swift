@@ -16,6 +16,9 @@ struct ProfilePolicyWorkspaceView: View {
     var bindRoute: ((URL, String, String) -> Void)? = nil
     var removeRouteBinding: ((String) -> Void)? = nil
     var smartActionsAvailable = false
+    var smartAuto: SmartAutoSwitchCoordinator? = nil
+    var autoUnavailable = false
+    var setAutoEnabled: (Bool) -> Void = { _ in }
     var isApplyingSmart = false
     var smartResult: SmartApplicationPresentation? = nil
     var applySmartSwitch: () -> Void = {}
@@ -46,6 +49,13 @@ struct ProfilePolicyWorkspaceView: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            autoControl
+            catalogContent
+        }
+    }
+
+    private var catalogContent: some View {
         Group {
             if unavailable {
                 PolicyCatalogState(
@@ -77,6 +87,34 @@ struct ProfilePolicyWorkspaceView: View {
         }
         .task {
             if selectedSelectorID == nil { selectedSelectorID = presentation.selectors.first?.id }
+        }
+    }
+
+    @ViewBuilder
+    private var autoControl: some View {
+        if let smartAuto {
+            HStack(spacing: 12) {
+                Toggle("policy.auto.title", isOn: Binding(
+                    get: { smartAuto.status.enabled }, set: setAutoEnabled
+                ))
+                .toggleStyle(.switch)
+                .fixedSize()
+                .disabled(smartAuto.status.state == .stopping || (!smartAuto.status.enabled && autoUnavailable))
+                .accessibilityIdentifier("policy.auto.toggle")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(LocalizedStringKey("policy.auto.state.\(smartAuto.status.state.rawValue)"))
+                        .font(.caption.weight(.medium))
+                        .accessibilityIdentifier("policy.auto.state")
+                    Text(LocalizedStringKey(smartAuto.status.resultMessageKey))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("policy.auto.result")
+                }
+                Spacer(minLength: 0)
+            }
+            .help(Text("policy.auto.detail"))
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
         }
     }
 
@@ -229,7 +267,7 @@ struct ProfilePolicyWorkspaceView: View {
     @ViewBuilder
     private var automaticSelectionButton: some View {
         if presentation.overrideCount > 0 {
-            Button("policy.workspace.automatic-selection", systemImage: "sparkles", action: reset)
+            Button("policy.catalog.reset", systemImage: "sparkles", action: reset)
                 .buttonStyle(.borderless)
                 .disabled(isSelecting)
                 .help(Text("policy.catalog.reset"))

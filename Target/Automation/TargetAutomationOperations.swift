@@ -11,6 +11,7 @@ actor TargetAutomationOperations {
     private let subscriptionOperations: TargetSubscriptionOperations
     private let policyOperations: any TargetPolicyOperating
     private let smartOperations: any SmartApplicationOperating
+    private let smartAuto: SmartAutoSwitchCoordinator?
     private let backend: any EngineBackend
     private let serviceClient: any SystemProxyClient
     private let systemProxyOperations: any TargetSystemProxyOperating
@@ -33,9 +34,11 @@ actor TargetAutomationOperations {
         runtimeObservationOperations: any TargetRuntimeObserving = UnavailableRuntimeObservationProvider(),
         hostNetworkSafetyMode: HostNetworkSafetyMode = TargetValidationPolicy.hostNetworkSafetyMode,
         smartOperations: (any SmartApplicationOperating)? = nil,
+        smartAuto: SmartAutoSwitchCoordinator? = nil,
         engineStatusObserver: (@Sendable (BackendStatus) async -> Void)? = nil,
         systemProxyStatusObserver: (@Sendable (SystemProxyStatus) async -> Void)? = nil
     ) {
+        self.smartAuto = smartAuto
         self.profileStore = profileStore
         self.subscriptionOperations = TargetSubscriptionOperations(store: profileStore, fetcher: subscriptionFetcher)
         let resolvedPolicy = policyOperations ?? TargetPolicyOperations(profileStore: profileStore,
@@ -87,9 +90,19 @@ actor TargetAutomationOperations {
             if Self.argumentFreeActions.contains(request.action), !request.arguments.isEmpty {
                 return .failure(code: "invalid_arguments", message: "This action does not accept arguments.")
             }
+            if Self.autoInvalidatingActions.contains(request.action) {
+                await smartAuto?.off(reason: request.action.hasPrefix("policy.") || request.action.hasPrefix("smart.") ? "manualSelection" : "identityChanged")
+            }
             switch request.action {
             case "capabilities": return capabilities()
             case "status": return await consolidatedStatus()
+            case "smart.auto.on":
+                guard let smartAuto else { return .failure(code: "auto_unavailable", message: "Auto is unavailable.") }
+                return .success(await smartAuto.on().automationJSON())
+            case "smart.auto.off":
+                return .success(await smartAuto?.off().automationJSON() ?? SmartAutoStatus().automationJSON())
+            case "smart.auto.status":
+                return .success(await smartAuto?.status.automationJSON() ?? SmartAutoStatus().automationJSON())
             case "smart.shadow": return .success(try await smartOperations.evaluateShadow().automationJSON())
             case "smart.apply": return .success(await smartOperations.applySwitch().automationJSON())
             case "smart.continuity":
@@ -788,9 +801,14 @@ actor TargetAutomationOperations {
     }
 
     private static let commands = [
-        "capabilities", "status", "runtime.status", "smart.shadow", "smart.apply", "smart.continuity", "smart.continuity.apply", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.select", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset", "route.list", "route.bind", "route.remove",
+        "capabilities", "status", "runtime.status", "smart.auto.on", "smart.auto.off", "smart.auto.status", "smart.shadow", "smart.apply", "smart.continuity", "smart.continuity.apply", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.select", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset", "route.list", "route.bind", "route.remove",
         "engine.status", "engine.start", "engine.stop", "connection.start", "connection.stop", "connection.restart", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
+    ]
+    private static let autoInvalidatingActions: Set<String> = [
+        "smart.apply", "smart.continuity.apply", "policy.select", "policy.reset",
+        "profile.import", "profile.subscribe", "profile.subscription-update", "profile.select", "profile.delete",
+        "route.bind", "route.remove", "engine.start", "engine.stop", "connection.start", "connection.stop", "connection.restart"
     ]
     private static let argumentFreeActions = Set(commands).subtracting([
         "profile.import", "profile.subscribe", "profile.subscription-update", "profile.select", "profile.delete", "policy.select", "policy.probe", "route.bind", "route.remove"

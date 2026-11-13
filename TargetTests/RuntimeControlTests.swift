@@ -731,6 +731,67 @@ final class RuntimeControlTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(calls, 0)
     }
 
+    @MainActor
+    func testSmartAutoSwitchUsesVerifiedSharedStackAndNeverClosesConnections() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: ["a": .latency(300), "b": .latency(30)], selectorMembers: ["a", "b"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+        let policy = TargetPolicyOperations(profileStore: fixture.profileStore, runtimeEvidenceProvider: fixture.backend)
+        let shadow = SmartPolicyShadowOperations(catalogReader: PolicyCatalogOperation(profileStore: fixture.profileStore), runtime: fixture.backend)
+        let apply = SmartPolicyApplyOperations(evaluator: shadow, policy: policy)
+        let auto = SmartAutoSwitchCoordinator(policy: policy, runtime: fixture.backend, apply: apply)
+        await auto.on()
+        let deadline = ContinuousClock.now + .seconds(3)
+        while auto.status.state == .evaluating || auto.status.state == .waiting, ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        let status = await auto.off()
+        XCTAssertEqual(status.lastResult, "applied")
+        XCTAssertEqual(try policy.readPersisted().selectors.first?.effectiveDesired, "b")
+        let writes = await client.selectionCallCount()
+        let closes = await client.closeCallCount()
+        XCTAssertEqual(writes, 1)
+        XCTAssertEqual(closes, 0)
+    }
+
+    func testAutoIdentityReadRejectsStoppedUntrustedAndReplacedRuntimeWithoutProbes() async throws {
+        for change in ["stopped", "untrusted", "replaced"] {
+            let client = ControlledRuntimeControlClient(probeOutcomes: [:], selectorMembers: ["a", "b"])
+            let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+            let catalog = try fixture.selectionEvidence().catalog
+            if change == "stopped" { fixture.clearRuntimeRecord() }
+            if change == "untrusted" { fixture.removeRuntimeConfiguration() }
+            if change == "replaced" { await client.onNextSelectorRead { fixture.replaceRuntimeConfigurationIdentity() } }
+            do {
+                _ = try await fixture.backend.autoSelectionEvidence(catalog: catalog)
+                XCTFail("Expected identity refusal: \(change)")
+            } catch {}
+            let snapshots = await client.snapshotCallCount()
+            let writes = await client.selectionCallCount()
+            XCTAssertEqual(snapshots, 0)
+            XCTAssertEqual(writes, 0)
+        }
+    }
+
+    func testAutoExpectedSessionRejectsFreshDecisionFromRebuiltRuntime() async throws {
+        let client = ControlledRuntimeControlClient(probeOutcomes: ["a": .latency(300), "b": .latency(30)], selectorMembers: ["a", "b"])
+        let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)
+        let policy = TargetPolicyOperations(profileStore: fixture.profileStore, runtimeEvidenceProvider: fixture.backend)
+        let pinned = try await fixture.backend.autoSelectionEvidence(catalog: policy.readPersisted())
+        let expected = SmartAutoExpectation(evidence: pinned, generation: policy.selectionGeneration())
+        fixture.replaceRuntimeConfigurationIdentity()
+        let shadow = SmartPolicyShadowOperations(catalogReader: PolicyCatalogOperation(profileStore: fixture.profileStore), runtime: fixture.backend)
+        let apply = SmartPolicyApplyOperations(evaluator: shadow, policy: policy)
+        let rejected = await apply.apply(expected: expected)
+        XCTAssertEqual(rejected.reasonCode, "identityChanged")
+        let before = await client.selectionCallCount()
+        XCTAssertEqual(before, 0)
+        // A subsequent explicit one-shot request still uses the current session.
+        let manual = await apply.apply()
+        XCTAssertTrue(manual.applied)
+        let after = await client.selectionCallCount()
+        XCTAssertEqual(after, 1)
+    }
+
     func testSmartApplyUsesSharedPolicyAndExactlyOneControllerWrite() async throws {
         let client = ControlledRuntimeControlClient(probeOutcomes: ["a": .latency(300), "b": .latency(30)], selectorMembers: ["a", "b"])
         let fixture = try makeRuntimePolicyProbeFixture(members: ["a", "b"], client: client)

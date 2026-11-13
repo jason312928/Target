@@ -7,6 +7,7 @@ final class ProfileViewModel {
     private let store: ProfileStore
     private let policyOperations: any TargetPolicyOperating
     private let smartOperations: (any SmartApplicationOperating)?
+    let smartAuto: SmartAutoSwitchCoordinator?
     private let policyCatalogLoader: () throws -> PolicyCatalog
     private let usesCustomPolicyCatalogLoader: Bool
     private let configurationLoader: (UUID) throws -> String
@@ -68,6 +69,7 @@ final class ProfileViewModel {
         configurationLoader: ((UUID) throws -> String)? = nil,
         policyOperations: (any TargetPolicyOperating)? = nil,
         smartOperations: (any SmartApplicationOperating)? = nil,
+        smartAuto: SmartAutoSwitchCoordinator? = nil,
         policyCatalogLoader: (() throws -> PolicyCatalog)? = nil,
         loadImmediately: Bool = true
     ) {
@@ -75,6 +77,7 @@ final class ProfileViewModel {
         let resolvedPolicyOperations = policyOperations ?? TargetPolicyOperations(profileStore: store)
         self.policyOperations = resolvedPolicyOperations
         self.smartOperations = smartOperations
+        self.smartAuto = smartAuto
         self.policyCatalogLoader = policyCatalogLoader ?? resolvedPolicyOperations.readPersisted
         self.usesCustomPolicyCatalogLoader = policyCatalogLoader != nil
         self.subscriptionOperations = TargetSubscriptionOperations(store: store, fetcher: subscriptionFetcher)
@@ -366,8 +369,10 @@ final class ProfileViewModel {
     private func startMetadataMutation(_ mutation: @escaping @Sendable () throws -> Void) {
         guard !isPerformingPersistence, persistenceTask == nil else { return }
         isPerformingPersistence = true
+        smartAuto?.requestStop(reason: "identityChanged")
         let store = store
         persistenceTask = Task { [weak self] in
+            await self?.smartAuto?.off(reason: "identityChanged")
             defer {
                 self?.isPerformingPersistence = false
                 self?.persistenceTask = nil
@@ -386,6 +391,7 @@ final class ProfileViewModel {
     }
 
     func selectPolicy(selectorTag: String, outboundTag: String) {
+        smartAuto?.requestStop(reason: "manualSelection")
         if isSelectingPolicy {
             queuedPolicySelection = (selectorTag, outboundTag)
             return
@@ -394,6 +400,7 @@ final class ProfileViewModel {
         messageKey = nil
         policyTask = Task { [weak self] in
             guard let self else { return }
+            await self.smartAuto?.off(reason: "manualSelection")
             var selection = (selectorTag: selectorTag, outboundTag: outboundTag)
             while true {
                 self.messageKey = nil
@@ -424,6 +431,7 @@ final class ProfileViewModel {
 
     func resetPolicy() {
         guard !isSelectingPolicy else { return }
+        smartAuto?.requestStop(reason: "manualSelection")
         isSelectingPolicy = true
         messageKey = nil
         policyTask = Task { [weak self] in
@@ -440,6 +448,7 @@ final class ProfileViewModel {
                 }
             }
             do {
+                await self.smartAuto?.off(reason: "manualSelection")
                 self.policyCatalog = try await self.policyOperations.reset().catalog
                 self.isPolicyCatalogUnavailable = false
                 self.refreshMetadataPreservingEditor()
@@ -464,6 +473,7 @@ final class ProfileViewModel {
               !isDirty,
               !isPerformingPersistence
         else { return }
+        smartAuto?.requestStop(reason: "manualSelection")
         smartApplicationGeneration &+= 1
         let generation = smartApplicationGeneration
         let expectedID = profile.id
@@ -471,6 +481,8 @@ final class ProfileViewModel {
         isApplyingSmart = true
         smartApplicationResult = nil
         smartApplicationTask = Task { [weak self] in
+            await self?.smartAuto?.off(reason: "manualSelection")
+            guard !Task.isCancelled else { return }
             let result: SmartApplicationResult
             switch action {
             case .switchAction:
@@ -498,6 +510,21 @@ final class ProfileViewModel {
         smartApplicationTask = nil
         isApplyingSmart = false
         smartApplicationResult = nil
+    }
+
+    func setSmartAutoEnabled(_ enabled: Bool) {
+        guard let smartAuto else { return }
+        if enabled {
+            guard !isDirty, !isPerformingPersistence, !isSelectingPolicy, !isApplyingSmart else { return }
+            smartAuto.requestOn()
+        } else {
+            smartAuto.requestStop()
+            Task { await smartAuto.off() }
+        }
+    }
+
+    func invalidateSmartAutoRuntime() {
+        smartAuto?.requestStop(reason: "identityChanged")
     }
 
     func refreshPolicyState() {
@@ -533,6 +560,7 @@ final class ProfileViewModel {
         }
         isPerformingPersistence = true
         defer { isPerformingPersistence = false }
+        await smartAuto?.off(reason: "identityChanged")
         let store = store
         let previousID = selectedID
         do {
@@ -682,6 +710,7 @@ final class ProfileViewModel {
         guard !isPerformingPersistence, let selectedID, isConfigurationLoaded else { return false }
         isPerformingPersistence = true
         defer { isPerformingPersistence = false }
+        await smartAuto?.off(reason: "identityChanged")
         let text = editorText
         let generation = editorGeneration
         let store = store
@@ -862,6 +891,7 @@ final class ProfileViewModel {
         // prevents a clean editor from overwriting a recoverable older intent.
         guard pendingOperation == nil, !isPerformingPersistence, !isExporting, persistenceTask == nil else { return }
         invalidateSmartApplication()
+        smartAuto?.requestStop(reason: "identityChanged")
         guard !isDirty else {
             pendingOperation = operation
             unsavedChangesPresentation.requestPresentation()
@@ -885,6 +915,7 @@ final class ProfileViewModel {
         }
         let store = store
         let operations = subscriptionOperations
+        await smartAuto?.off(reason: "identityChanged")
         if case .importCandidate = operation { isCommittingImport = true }
         do {
             let snapshot = try await ProfileBackgroundWork.run {

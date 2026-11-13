@@ -34,6 +34,9 @@ struct TargetApp: App {
             evaluator: shadowOperations,
             policy: policyOperations
         )
+        let smartAuto = SmartAutoSwitchCoordinator(
+            policy: policyOperations, runtime: backend, apply: smartApplyOperations
+        )
         let continuityOperations = SmartContinuityOperations(runtime: backend)
         let continuityApplyOperations = SmartContinuityApplyOperations(
             continuity: continuityOperations,
@@ -68,6 +71,7 @@ struct TargetApp: App {
             store: profileStore,
             policyOperations: policyOperations,
             smartOperations: smartOperations,
+            smartAuto: smartAuto,
             loadImmediately: false
         ))
         _preferences = State(initialValue: ApplicationPreferencesModel(loginItemManager: SMAppLoginItemManager()))
@@ -81,6 +85,7 @@ struct TargetApp: App {
             runtimeOperations: runtimeOperations,
             runtimeObservationOperations: runtimeObservationOperations,
             smartOperations: smartOperations,
+            smartAuto: smartAuto,
             engineStatusObserver: { status in
                 await MainActor.run { lifecycle.applyAutomationEngineStatus(status) }
             },
@@ -88,7 +93,7 @@ struct TargetApp: App {
                 await MainActor.run { lifecycle.applyAutomationSystemProxyStatus(status) }
             }
         )
-        TargetApplicationDelegate.shared.configure(lifecycle: lifecycle, automationOperations: operations)
+        TargetApplicationDelegate.shared.configure(lifecycle: lifecycle, automationOperations: operations, smartAuto: smartAuto)
         NSApplication.shared.delegate = TargetApplicationDelegate.shared
         TargetApplicationDelegate.shared.startAutomationServerIfNeeded()
     }
@@ -166,9 +171,11 @@ final class TargetApplicationDelegate: NSObject, NSApplicationDelegate {
     weak var lifecycle: BackendLifecycleModel?
     private var automationOperations: TargetAutomationOperations?
     private var automationServer: LocalAutomationServer?
+    private var smartAuto: SmartAutoSwitchCoordinator?
     private var terminationTask: Task<Void, Never>?
 
-    func configure(lifecycle: BackendLifecycleModel, automationOperations: TargetAutomationOperations) {
+    func configure(lifecycle: BackendLifecycleModel, automationOperations: TargetAutomationOperations, smartAuto: SmartAutoSwitchCoordinator) {
+        self.smartAuto = smartAuto
         self.lifecycle = lifecycle
         self.automationOperations = automationOperations
     }
@@ -198,6 +205,7 @@ final class TargetApplicationDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard terminationTask == nil, let lifecycle else { return .terminateNow }
         terminationTask = Task { [weak self] in
+            await self?.smartAuto?.off(reason: "applicationTermination")
             let shouldTerminate = await lifecycle.prepareForApplicationTermination()
             self?.terminationTask = nil
             sender.reply(toApplicationShouldTerminate: shouldTerminate)

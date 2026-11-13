@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeSnapshotProviding, RuntimeConnectionProviding, RuntimeLogProviding, SmartShadowRuntimeReading, SmartContinuityRuntimeReading, SmartContinuityRuntimeClosing {
+actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeControlDescriptorProviding, RuntimePolicyApplying, RuntimePolicyHealthProbing, RuntimeSnapshotProviding, RuntimeConnectionProviding, RuntimeLogProviding, SmartShadowRuntimeReading, SmartAutoRuntimeReading, SmartContinuityRuntimeReading, SmartContinuityRuntimeClosing {
     static let applicationSupportDirectoryName = "Target"
     static let engineDirectoryName = "sing-box"
 
@@ -299,6 +299,34 @@ actor SingBoxBackend: EngineInstalling, PolicyRuntimeEvidenceProviding, RuntimeC
             return .runtimeUnavailable
         }
         return .results(indexedResults.sorted { $0.0 < $1.0 }.map(\.1))
+    }
+
+    /// Pins Auto to an already running, verified session without probing,
+    /// starting an engine, or exposing controller credentials.
+    func autoSelectionEvidence(catalog: PolicyCatalog) async throws -> PolicySelectionEvidence {
+        guard let group = catalog.selectors.first, let selector = group.tag,
+              selector.utf8.count <= 256, group.isMutable,
+              catalog.selectors.filter({ $0.tag == selector }).count == 1,
+              !group.members.isEmpty, group.members.count <= SmartPolicyShadowOperations.maximumCandidates,
+              group.members.allSatisfy({ $0.status == .available }) else {
+            throw SmartAutoUnavailable.selectorUnavailable
+        }
+        guard let before = await verifiedRuntimeControlMaterial(),
+              before.record.profileID == catalog.profileID,
+              before.record.profileRevision == catalog.profileRevision,
+              before.record.sourceConfigurationFingerprint == catalog.sourceFingerprint else {
+            throw SmartAutoUnavailable.runtimeUnavailable
+        }
+        let selections = try await runtimeControlClient.selectors(using: before.descriptor)
+        guard let live = selections[selector],
+              Set(live.members) == Set(group.members.map(\.tag)),
+              live.members.contains(live.selected),
+              let after = await verifiedRuntimeControlMaterial(),
+              after.record == before.record, after.descriptor == before.descriptor else {
+            throw SmartAutoUnavailable.identityChanged
+        }
+        return .init(catalog: catalog, sessionID: before.record.runtimeConfigurationID,
+                     selector: selector, currentOutbound: live.selected, observedAt: Date())
     }
 
     func collectShadowEvidence(expectedRuntime: ExpectedPolicyRuntimeIdentity, selector: String, candidates: [String]) async throws -> SmartShadowRuntimeResult {

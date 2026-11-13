@@ -239,14 +239,18 @@ actor SmartPolicyApplyOperations {
         self.clock = clock
     }
 
-    func apply() async -> SmartPolicyApplyResult {
+    func apply() async -> SmartPolicyApplyResult { await apply(expected: nil) }
+
+    /// Auto pins the original session and selection generation across ticks.
+    /// Explicit one-shot callers retain their existing behavior.
+    func apply(expected: SmartAutoExpectation?, allowSelection: Bool = true) async -> SmartPolicyApplyResult {
         func result(_ reason: String, _ recommendation: SmartShadowRecommendation? = nil) -> SmartPolicyApplyResult {
             .init(recommendation: recommendation, applied: false, after: nil, reasonCode: reason)
         }
         guard !applying else { return result("applyInProgress") }
         applying = true
         defer { applying = false }
-        let generation = policy.selectionGeneration()
+        let generation = expected?.generation ?? policy.selectionGeneration()
         var recommendation: SmartShadowRecommendation?
         do {
             try Task.checkCancellation()
@@ -258,6 +262,14 @@ actor SmartPolicyApplyOperations {
                   evidence.selector == value.selector, evidence.currentOutbound == value.currentOutbound,
                   evidence.observedAt == value.observedAt,
                   let recommended = value.recommendedOutbound else { return result("invalidRecommendation", value) }
+            if let expected {
+                guard value.connectionSnapshotAvailable, !value.connectionSnapshotTruncated else {
+                    return result("runtimeUnavailable", value)
+                }
+                guard expected.matches(evidence), policy.selectionGeneration() == expected.generation else {
+                    return result("identityChanged", value)
+                }
+            }
             guard (try? PolicySelectionValidator.validate(selectorTag: evidence.selector, outboundTag: recommended, in: evidence.catalog)) != nil else {
                 return result("invalidRecommendation", value)
             }
@@ -270,6 +282,7 @@ actor SmartPolicyApplyOperations {
             guard value.confidence != .low else { return result("lowConfidence", value) }
             guard !value.keepCurrent else { return result("keepCurrent", value) }
             guard recommended != evidence.currentOutbound else { return result("alreadySelected", value) }
+            guard allowSelection else { return result("cooldown", value) }
             let outcome = try await policy.selectIfUnchanged(evidence: evidence, outboundTag: recommended, generation: generation)
             return .init(recommendation: value, applied: outcome.applied, after: outcome.after,
                          reasonCode: outcome.reason.rawValue, receipt: outcome.receipt)
