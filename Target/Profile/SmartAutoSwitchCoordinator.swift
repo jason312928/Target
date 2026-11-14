@@ -90,6 +90,69 @@ final class SmartAutoSwitchCoordinator {
     // the cooldown; a new application process always starts with Auto OFF.
     private var lastSuccessUptime: TimeInterval?
 
+    static let maximumEvidenceRounds = 32
+    static let maximumEvidenceResponseBytes = 16 * 1024
+    private var evidenceEnabled = false
+    private var evidenceEpoch: UInt64 = 0
+    private var evidenceSequence = 0
+    private var evidenceTruncated = false
+    private var evidenceRounds: [SmartAutoEvidenceRound] = []
+
+    /// Independent of Auto lifecycle; no persistence, I/O or additional work task.
+    func evidenceResponse(action: String) -> AutomationResponse {
+        if action == "smart.auto.evidence.on" || action == "smart.auto.evidence.off" {
+            evidenceEpoch &+= 1
+            evidenceEnabled = action == "smart.auto.evidence.on"
+            evidenceRounds.removeAll()
+            evidenceSequence = 0
+            evidenceTruncated = false
+        }
+        // Measure the complete protocol envelope. SHOW trims a copy, so repeated
+        // reads cannot alter either Auto or the retained evidence.
+        var rounds = evidenceRounds
+        var truncated = evidenceTruncated
+        while true {
+            let response = AutomationResponse.success(.object([
+                "enabled": .boolean(evidenceEnabled),
+                "maximumRounds": .integer(Self.maximumEvidenceRounds),
+                "maximumResponseBytes": .integer(Self.maximumEvidenceResponseBytes),
+                "truncated": .boolean(truncated),
+                "unavailableObservations": .array([
+                    "controllerDispatchTime", "manualSelectionFinalOutcome", "independentRequestOutcome",
+                    "egressAttribution", "counterfactualOutcome"
+                ].map(JSONValue.string)),
+                "rounds": .array(rounds.map { .object($0.fields) })
+            ]))
+            if AutomationProtocol.encodeResponse(response).count <= Self.maximumEvidenceResponseBytes { return response }
+            guard !rounds.isEmpty else {
+                return .failure(code: "evidence_unavailable", message: "Evidence is unavailable.")
+            }
+            rounds.removeFirst()
+            truncated = true
+        }
+    }
+
+    private func beginEvidenceRound() -> SmartAutoEvidenceRound? {
+        guard evidenceEnabled else { return nil }
+        evidenceSequence += 1
+        return SmartAutoEvidenceRound(epoch: evidenceEpoch, number: evidenceSequence,
+            startedAt: uptime())
+    }
+
+    private func finishEvidenceRound(_ round: SmartAutoEvidenceRound?) -> Bool {
+        guard var round, evidenceEnabled, round.epoch == evidenceEpoch else { return false }
+        let end = uptime()
+        round.fields["endedUptimeSeconds"] = round.startedAt.isFinite && end.isFinite && end >= round.startedAt ? .number(end) : .null
+        round.fields["cancellationRequested"] = .boolean(Task.isCancelled)
+        round.fields["stopReason"] = status.stopReason.map(JSONValue.string) ?? .null
+        evidenceRounds.append(round)
+        if evidenceRounds.count > Self.maximumEvidenceRounds {
+            evidenceRounds.removeFirst(evidenceRounds.count - Self.maximumEvidenceRounds)
+            evidenceTruncated = true
+        }
+        return true
+    }
+
     init(policy: any TargetPolicyOperating, runtime: any SmartAutoRuntimeReading,
          apply: SmartPolicyApplyOperations,
          uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
@@ -143,7 +206,13 @@ final class SmartAutoSwitchCoordinator {
     }
 
     private func run() async {
+        var lastRecorded: (epoch: UInt64, number: Int)?
         defer {
+            if let lastRecorded, lastRecorded.epoch == evidenceEpoch,
+               evidenceRounds.last?.number == lastRecorded.number {
+                evidenceRounds[evidenceRounds.count - 1].fields["autoStopped"] = .boolean(true)
+                evidenceRounds[evidenceRounds.count - 1].fields["stopReason"] = status.stopReason.map(JSONValue.string) ?? .null
+            }
             status.state = .off
             task = nil
             finishStarting()
@@ -165,44 +234,64 @@ final class SmartAutoSwitchCoordinator {
             finishStarting()
             while true {
                 try Task.checkCancellation()
-                let coolingDown: Bool
-                if let lastSuccessUptime {
-                    let elapsed = uptime() - lastSuccessUptime
-                    guard elapsed.isFinite, elapsed >= 0 else { throw SmartAutoUnavailable.identityChanged }
-                    coolingDown = elapsed < Self.successCooldown
-                } else { coolingDown = false }
-                guard policy.selectionGeneration() == expected.generation,
-                      try policy.readPersisted() == expected.evidence.catalog else {
-                    throw SmartAutoUnavailable.identityChanged
-                }
-                status.state = .evaluating
-                let result = await apply.apply(expected: expected, allowSelection: !coolingDown)
-                // Do not turn an acknowledged success into "cancelled" if OFF
-                // arrived while its controller reply was in flight.
-                status.lastEvaluatedAt = date()
-                status.lastResult = Self.safeResult(result.reasonCode)
-                if result.applied {
-                    lastSuccessUptime = uptime()
-                    status.lastSwitchAt = date()
-                    guard let receipt = result.receipt,
-                          receipt.identity.runtimeConfigurationID == expected.evidence.sessionID,
-                          receipt.preSelectionCatalog == expected.evidence.catalog,
-                          receipt.selector == expected.evidence.selector,
-                          receipt.oldOutbound == expected.evidence.currentOutbound,
-                          receipt.newOutbound == result.after else {
-                        status.stopReason = "identityChanged"
-                        return
+                var round = beginEvidenceRound()
+                do {
+                    defer {
+                        if finishEvidenceRound(round), let round { lastRecorded = (round.epoch, round.number) }
                     }
-                    expected = .init(evidence: .init(catalog: receipt.catalog,
-                        sessionID: receipt.identity.runtimeConfigurationID, selector: receipt.selector,
-                        currentOutbound: receipt.newOutbound, observedAt: date()), generation: receipt.generation)
+                    do {
+                        let coolingDown: Bool
+                        if let lastSuccessUptime {
+                            let elapsed = uptime() - lastSuccessUptime
+                            guard elapsed.isFinite, elapsed >= 0 else { throw SmartAutoUnavailable.identityChanged }
+                            coolingDown = elapsed < Self.successCooldown
+                        } else { coolingDown = false }
+                        round?.fields["successCooldown"] = .boolean(coolingDown)
+                        round?.fields["selectionAllowedByCooldown"] = .boolean(!coolingDown)
+                        guard policy.selectionGeneration() == expected.generation,
+                              try policy.readPersisted() == expected.evidence.catalog else {
+                            round?.fields["result"] = .string("identityChanged")
+                            throw SmartAutoUnavailable.identityChanged
+                        }
+                        status.state = .evaluating
+                        let result = await apply.apply(expected: expected, allowSelection: !coolingDown)
+                        round?.observe(result, safeReason: Self.safeResult(result.reasonCode))
+                        // Do not turn an acknowledged success into "cancelled" if OFF
+                        // arrived while its controller reply was in flight.
+                        status.lastEvaluatedAt = date()
+                        status.lastResult = Self.safeResult(result.reasonCode)
+                        if result.applied {
+                            lastSuccessUptime = uptime()
+                            status.lastSwitchAt = date()
+                            round?.fields["receiptValidated"] = .boolean(false)
+                            guard let receipt = result.receipt,
+                                  receipt.identity.runtimeConfigurationID == expected.evidence.sessionID,
+                                  receipt.preSelectionCatalog == expected.evidence.catalog,
+                                  receipt.selector == expected.evidence.selector,
+                                  receipt.oldOutbound == expected.evidence.currentOutbound,
+                                  receipt.newOutbound == result.after else {
+                                status.stopReason = "identityChanged"
+                                return
+                            }
+                            round?.fields["receiptValidated"] = .boolean(true)
+                            expected = .init(evidence: .init(catalog: receipt.catalog,
+                                sessionID: receipt.identity.runtimeConfigurationID, selector: receipt.selector,
+                                currentOutbound: receipt.newOutbound, observedAt: date()), generation: receipt.generation)
+                        }
+                        try Task.checkCancellation()
+                        guard result.applied || ["lowConfidence", "ambiguousEvidence", "staleEvidence", "keepCurrent", "alreadySelected", "cooldown"].contains(result.reasonCode) else {
+                            status.stopReason = "safetyRefusal"
+                            return
+                        }
+                        status.state = result.applied || coolingDown ? .cooldown : .waiting
+                    } catch {
+                        if round?.fields["evaluationCompleted"] != .boolean(true) {
+                            round?.fields["result"] = .string(error is CancellationError ? "cancelled" :
+                                (error is SmartAutoUnavailable ? "identityChanged" : "operationUnavailable"))
+                        }
+                        throw error
+                    }
                 }
-                try Task.checkCancellation()
-                guard result.applied || ["lowConfidence", "ambiguousEvidence", "staleEvidence", "keepCurrent", "alreadySelected", "cooldown"].contains(result.reasonCode) else {
-                    status.stopReason = "safetyRefusal"
-                    return
-                }
-                status.state = result.applied || coolingDown ? .cooldown : .waiting
                 try await sleep(Self.evaluationInterval)
             }
         } catch is CancellationError {
@@ -224,5 +313,48 @@ final class SmartAutoSwitchCoordinator {
                        "runtimeUnavailable", "engineStopped", "mutationInProgress", "applyInProgress", "evaluationInProgress",
                        "invalidRecommendation", "mutationUnconfirmed", "operationUnavailable"]
         return allowed.contains(reason) ? reason : "operationUnavailable"
+    }
+}
+
+/// Deliberately stores only scalar aggregates and fixed vocabulary. Never retain
+/// a recommendation, catalog, receipt, runtime identity, tag or connection object.
+private struct SmartAutoEvidenceRound {
+    let epoch: UInt64
+    let number: Int
+    let startedAt: TimeInterval
+    var fields: [String: JSONValue]
+
+    init(epoch: UInt64, number: Int, startedAt: TimeInterval) {
+        self.epoch = epoch; self.number = number; self.startedAt = startedAt
+        fields = [
+            "round": .integer(number), "startedUptimeSeconds": startedAt.isFinite ? .number(startedAt) : .null,
+            "endedUptimeSeconds": .null, "result": .string("operationUnavailable"),
+            "evaluationCompleted": .boolean(false), "candidateCount": .null,
+            "probeSuccessCount": .null, "probeFailureCount": .null, "ambiguousProbeCount": .null,
+            "connectionSnapshotAvailable": .null, "connectionSnapshotTruncated": .null,
+            "confidence": .null, "keepCurrent": .null, "successCooldown": .null,
+            "selectionAllowedByCooldown": .null, "selectionAttempted": .null,
+            "applied": .null, "receiptValidated": .null, "cancellationRequested": .boolean(false),
+            "autoStopped": .boolean(false), "stopReason": .null
+        ]
+    }
+
+    mutating func observe(_ result: SmartPolicyApplyResult, safeReason: String) {
+        fields["result"] = .string(safeReason)
+        fields["selectionAttempted"] = .boolean(result.selectionAttempted)
+        fields["applied"] = .boolean(result.applied)
+        guard let value = result.recommendation else { return }
+        fields["evaluationCompleted"] = .boolean(true)
+        fields["candidateCount"] = .integer(value.candidateCount)
+        // Early unavailable recommendations contain placeholder zeros/booleans,
+        // not observations of probes or connections.
+        guard value.state == "available" else { return }
+        fields["probeSuccessCount"] = .integer(value.probeSuccessCount)
+        fields["probeFailureCount"] = .integer(value.probeFailureCount)
+        fields["ambiguousProbeCount"] = .integer(value.ambiguousProbeCount)
+        fields["connectionSnapshotAvailable"] = .boolean(value.connectionSnapshotAvailable)
+        fields["connectionSnapshotTruncated"] = .boolean(value.connectionSnapshotTruncated)
+        fields["confidence"] = .string(value.confidence.rawValue)
+        fields["keepCurrent"] = .boolean(value.keepCurrent)
     }
 }

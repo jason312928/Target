@@ -21,6 +21,185 @@ final class SmartAutoSwitchTests: XCTestCase, ProfileTestCaseSupport {
         return .init(store: store, runtime: runtime, policy: policy, apply: apply, auto: auto, clock: clock, sleeper: sleeper)
     }
 
+    private func evidence(_ auto: SmartAutoSwitchCoordinator, action: String = "show") -> [String: JSONValue] {
+        let response = auto.evidenceResponse(action: "smart.auto.evidence." + action)
+        XCTAssertTrue(response.ok)
+        XCTAssertLessThanOrEqual(AutomationProtocol.encodeResponse(response).count, 16 * 1024)
+        guard case .object(let fields) = response.result else { XCTFail("Missing evidence"); return [:] }
+        return fields
+    }
+
+    private func rounds(_ auto: SmartAutoSwitchCoordinator) -> [[String: JSONValue]] {
+        guard case .array(let records) = evidence(auto)["rounds"] else { return [] }
+        return records.compactMap { if case .object(let fields) = $0 { return fields }; return nil }
+    }
+
+    func testEvidenceDefaultOffIndependentLifecycleAndReset() async throws {
+        let rig = try makeRig()
+        XCTAssertEqual(evidence(rig.auto)["enabled"], .boolean(false))
+        _ = evidence(rig.auto, action: "on")
+        XCTAssertFalse(rig.auto.status.enabled)
+        XCTAssertTrue(rounds(rig.auto).isEmpty)
+        await rig.auto.on()
+        await rig.sleeper.waitForRequests(1)
+        let record = try XCTUnwrap(rounds(rig.auto).first)
+        XCTAssertEqual(record["result"], .string("applied"))
+        XCTAssertEqual(record["receiptValidated"], .boolean(true))
+        XCTAssertEqual(record["probeSuccessCount"], .integer(2))
+        XCTAssertEqual(record["startedUptimeSeconds"], .number(0))
+        XCTAssertEqual(record["endedUptimeSeconds"], .number(0))
+        let before = rig.auto.evidenceResponse(action: "smart.auto.evidence.show")
+        XCTAssertEqual(before, rig.auto.evidenceResponse(action: "smart.auto.evidence.show"))
+        _ = evidence(rig.auto, action: "off")
+        XCTAssertTrue(rig.auto.status.enabled)
+        XCTAssertTrue(rounds(rig.auto).isEmpty)
+        _ = evidence(rig.auto, action: "on")
+        await rig.sleeper.advance(300)
+        await rig.sleeper.waitForRequests(2)
+        XCTAssertEqual(rounds(rig.auto).first?["round"], .integer(1))
+        XCTAssertEqual(rounds(rig.auto).first?["successCooldown"], .boolean(true))
+        await rig.auto.off()
+        XCTAssertEqual(rounds(rig.auto).last?["autoStopped"], .boolean(true))
+        let replacement = SmartAutoSwitchCoordinator(policy: rig.policy, runtime: rig.runtime, apply: rig.apply)
+        XCTAssertEqual(evidence(replacement)["enabled"], .boolean(false))
+        XCTAssertTrue(rounds(replacement).isEmpty)
+    }
+
+    func testEvidenceBoundedOrderedAndReadOnly() async throws {
+        let rig = try makeRig()
+        await rig.runtime.keepCurrentInitially()
+        _ = evidence(rig.auto, action: "on")
+        await rig.auto.on()
+        await rig.sleeper.waitForRequests(1)
+        for count in 2...41 {
+            await rig.sleeper.advance(300)
+            await rig.sleeper.waitForRequests(count)
+        }
+        let records = rounds(rig.auto)
+        XCTAssertFalse(records.isEmpty)
+        XCTAssertLessThan(records.count, 32, "The byte limit must also trim the response")
+        XCTAssertEqual(records.last?["round"], .integer(41))
+        XCTAssertEqual(records.last?["startedUptimeSeconds"], .number(12000))
+        XCTAssertEqual(evidence(rig.auto)["truncated"], .boolean(true))
+        let numbers = records.compactMap { if case .integer(let n) = $0["round"] { return n }; return nil }
+        XCTAssertEqual(numbers, numbers.sorted())
+        let writes = await rig.runtime.conditionalWrites
+        XCTAssertEqual(writes, 0)
+        XCTAssertTrue(rig.auto.status.enabled)
+        await rig.auto.off()
+    }
+
+    func testEvidenceToggleDuringInflightRoundCannotResurrectClearedData() async throws {
+        let rig = try makeRig()
+        let gate = AutoTestGate()
+        _ = evidence(rig.auto, action: "on")
+        await rig.runtime.gateAfterDispatch(gate)
+        await rig.auto.on()
+        await gate.waitUntilEntered()
+        _ = evidence(rig.auto, action: "off")
+        _ = evidence(rig.auto, action: "on")
+        await gate.release()
+        await rig.sleeper.waitForRequests(1)
+        XCTAssertTrue(rounds(rig.auto).isEmpty)
+        await rig.sleeper.advance(300)
+        await rig.sleeper.waitForRequests(2)
+        XCTAssertEqual(rounds(rig.auto).count, 1)
+        XCTAssertEqual(rounds(rig.auto).first?["round"], .integer(1))
+        await rig.auto.off()
+    }
+
+    func testEvidenceRedactsUntrustedReasonsAndAllIdentityObjects() async throws {
+        let secret = "PRIVATE-profile-selector-outbound-UUID-endpoint-IP-token"
+        let rig = try makeRig { value in
+            .init(state: "unavailable", observedAt: value.observedAt, selector: secret,
+                currentOutbound: secret, recommendedOutbound: secret, confidence: .low,
+                keepCurrent: true, reasonCodes: [secret], candidateCount: 2,
+                selectionEvidence: value.selectionEvidence)
+        }
+        _ = evidence(rig.auto, action: "on")
+        await rig.auto.on()
+        await settle { rig.auto.status.state == .off }
+        let data = AutomationProtocol.encodeResponse(rig.auto.evidenceResponse(action: "smart.auto.evidence.show"))
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(text.contains(secret))
+        XCTAssertFalse(text.contains("group"))
+        let catalog = try rig.policy.readPersisted()
+        XCTAssertFalse(text.contains(catalog.profileID!.uuidString))
+        XCTAssertFalse(text.contains(catalog.sourceFingerprint!))
+        XCTAssertEqual(rounds(rig.auto).first?["result"], .string("operationUnavailable"))
+        XCTAssertEqual(rounds(rig.auto).first?["probeSuccessCount"], .null)
+    }
+
+    func testEvidenceClockRegressionLeavesEndUnavailable() async throws {
+        let rig = try makeRig()
+        let gate = AutoTestGate()
+        _ = evidence(rig.auto, action: "on")
+        await rig.runtime.gateCollection(gate)
+        await rig.auto.on()
+        await gate.waitUntilEntered()
+        rig.clock.advance(-1)
+        await gate.release()
+        await settle { rig.auto.status.state == .off }
+        XCTAssertEqual(rounds(rig.auto).first?["startedUptimeSeconds"], .number(0))
+        XCTAssertEqual(rounds(rig.auto).first?["endedUptimeSeconds"], .null)
+        let writes = await rig.runtime.conditionalWrites
+        XCTAssertEqual(writes, 0)
+    }
+
+    func testEvidenceParserAndRejectedPeerCannotEnableCapture() async throws {
+        for action in ["on", "off", "show"] {
+            let parsed = try TargetCtlCommandParser.parse(["smart", "auto", "evidence", action, "--json"])
+            XCTAssertEqual(parsed.action, "smart.auto.evidence." + action)
+            XCTAssertTrue(parsed.arguments.isEmpty)
+        }
+        for args in [["smart", "auto", "evidence", "show"],
+                     ["smart", "auto", "evidence", "clear", "--json"],
+                     ["smart", "auto", "evidence", "on", "extra", "--json"]] {
+            XCTAssertThrowsError(try TargetCtlCommandParser.parse(args))
+        }
+        let rig = try makeRig()
+        let operations = TargetAutomationOperations(profileStore: rig.store, policyOperations: rig.policy,
+            backend: MockBackend(), smartAuto: rig.auto)
+        let invalid = await operations.handle(.init(protocolVersion: 1, action: "smart.auto.evidence.on", arguments: ["extra": "value"]))
+        XCTAssertEqual(invalid.error?.code, "invalid_arguments")
+        let root = URL(fileURLWithPath: "/tmp/Evidence-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let socket = root.appending(path: "Target/Automation/control.sock")
+        let server = LocalAutomationServer(socketURL: socket, expectedUID: geteuid() &+ 1) { await operations.handle($0) }
+        try server.start()
+        defer { server.stop() }
+        let data = try await Task.detached {
+            try LocalAutomationClient.send(.init(protocolVersion: 1, action: "smart.auto.evidence.on"), socketURL: socket)
+        }.value
+        XCTAssertEqual(try JSONDecoder().decode(AutomationResponse.self, from: data).error?.code, "peer_rejected")
+        XCTAssertEqual(evidence(rig.auto)["enabled"], .boolean(false))
+        XCTAssertFalse(rig.auto.status.enabled)
+    }
+
+    func testEvidenceCollectionDoesNotChangeAutoResultsOrWriteCount() async throws {
+        var outcomes: [[String]] = []
+        var counts: [Int] = []
+        for enabled in [false, true] {
+            let rig = try makeRig()
+            if enabled { _ = evidence(rig.auto, action: "on") }
+            await rig.auto.on()
+            await rig.sleeper.waitForRequests(1)
+            var results = [rig.auto.status.lastResult!]
+            await rig.runtime.reverseLatencies()
+            for count in 2...4 {
+                await rig.sleeper.advance(300)
+                await rig.sleeper.waitForRequests(count)
+                results.append(rig.auto.status.lastResult!)
+            }
+            await rig.auto.off()
+            outcomes.append(results)
+            counts.append(await rig.runtime.conditionalWrites)
+            if !enabled { XCTAssertTrue(rounds(rig.auto).isEmpty) }
+        }
+        XCTAssertEqual(outcomes[0], outcomes[1])
+        XCTAssertEqual(counts, [2, 2])
+    }
+
     func testSelectorConnectionPreservationRequiresKnownBooleanSemantics() {
         for (field, allowed) in [("", true), (",\"interrupt_exist_connections\":false", true),
                                  (",\"interrupt_exist_connections\":true", false), (",\"interrupt_exist_connections\":0", false),
@@ -87,10 +266,12 @@ final class SmartAutoSwitchTests: XCTestCase, ProfileTestCaseSupport {
                 }
                 return copy
             }
+            _ = evidence(rig.auto, action: "on")
             await rig.auto.on()
             await rig.sleeper.waitForRequests(1)
             XCTAssertEqual(rig.auto.status.state, .waiting)
             XCTAssertEqual(rig.auto.status.lastResult, reason)
+            XCTAssertEqual(rounds(rig.auto).last?["result"], .string(reason))
             let interval = await rig.sleeper.requests
             XCTAssertEqual(interval, [300])
             await rig.sleeper.advance(299)
@@ -114,6 +295,7 @@ final class SmartAutoSwitchTests: XCTestCase, ProfileTestCaseSupport {
                 copy.connectionSnapshotTruncated = truncated
                 return copy
             }
+            _ = evidence(rig.auto, action: "on")
             await rig.auto.on()
             await settle { rig.auto.status.state == .off }
             XCTAssertEqual(rig.auto.status.lastResult, "runtimeUnavailable")
@@ -192,6 +374,7 @@ final class SmartAutoSwitchTests: XCTestCase, ProfileTestCaseSupport {
 
     func testSingleFlightCancelBeforeDispatchAndOffConfirmationHasNoLaterMutation() async throws {
         let rig = try makeRig()
+        _ = evidence(rig.auto, action: "on")
         let gate = AutoTestGate()
         await rig.runtime.gateCollection(gate)
         await rig.auto.on()
@@ -207,6 +390,8 @@ final class SmartAutoSwitchTests: XCTestCase, ProfileTestCaseSupport {
         await gate.release()
         let confirmed = await off.value
         XCTAssertEqual(confirmed.state, .off)
+        XCTAssertEqual(rounds(rig.auto).last?["result"], .string("cancelled"))
+        XCTAssertEqual(rounds(rig.auto).last?["applied"], .boolean(false))
         let writes = await rig.runtime.conditionalWrites
         XCTAssertEqual(writes, 0)
         await rig.sleeper.advance(10_000)
@@ -216,6 +401,7 @@ final class SmartAutoSwitchTests: XCTestCase, ProfileTestCaseSupport {
 
     func testOffDrainsDispatchedWriteAndRetainsAcknowledgedSuccess() async throws {
         let rig = try makeRig()
+        _ = evidence(rig.auto, action: "on")
         let gate = AutoTestGate()
         await rig.runtime.gateAfterDispatch(gate)
         await rig.auto.on()
@@ -230,6 +416,9 @@ final class SmartAutoSwitchTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(first.state, .off)
         XCTAssertEqual(second.state, .off)
         XCTAssertEqual(first.lastResult, "applied")
+        XCTAssertEqual(rounds(rig.auto).last?["result"], .string("applied"))
+        XCTAssertEqual(rounds(rig.auto).last?["receiptValidated"], .boolean(true))
+        XCTAssertEqual(rounds(rig.auto).last?["cancellationRequested"], .boolean(true))
         XCTAssertNotNil(first.lastSwitchAt)
         await rig.sleeper.advance(10_000)
         let writes = await rig.runtime.conditionalWrites
@@ -238,6 +427,7 @@ final class SmartAutoSwitchTests: XCTestCase, ProfileTestCaseSupport {
 
     func testGUIManualSelectionDrainsAutoAndWins() async throws {
         let rig = try makeRig()
+        _ = evidence(rig.auto, action: "on")
         let model = ProfileViewModel(store: rig.store, policyOperations: rig.policy, smartAuto: rig.auto)
         let gate = AutoTestGate()
         await rig.runtime.gateAfterDispatch(gate)
@@ -250,6 +440,8 @@ final class SmartAutoSwitchTests: XCTestCase, ProfileTestCaseSupport {
         XCTAssertEqual(try rig.policy.readPersisted().selectors.first?.effectiveDesired, "a")
         let current = await rig.runtime.current
         XCTAssertEqual(current, "a")
+        XCTAssertEqual(rounds(rig.auto).last?["result"], .string("applied"))
+        XCTAssertEqual(rounds(rig.auto).last?["stopReason"], .string("manualSelection"))
         await rig.sleeper.advance(10_000)
         let writes = await rig.runtime.conditionalWrites
         XCTAssertEqual(writes, 1)
@@ -337,7 +529,7 @@ final class SmartAutoSwitchTests: XCTestCase, ProfileTestCaseSupport {
         let automation = TargetAutomationOperations(profileStore: rig.store, policyOperations: rig.policy,
             backend: MockBackend(), smartAuto: rig.auto)
         for action in ["on", "off", "status"] {
-            XCTAssertEqual(try TargetCtlCommandParser.parse(["smart", "auto", action, "--json"]).action, "smart.auto.\(action)")
+            XCTAssertEqual(try TargetCtlCommandParser.parse(["smart", "auto"] + action.split(separator: ".").map(String.init) + ["--json"]).action, "smart.auto.\(action)")
             XCTAssertThrowsError(try TargetCtlCommandParser.parse(["smart", "auto", action]))
             let invalid = await automation.handle(.init(protocolVersion: 1, action: "smart.auto.\(action)", arguments: ["selector": "group"]))
             XCTAssertFalse(invalid.ok)
@@ -371,8 +563,8 @@ final class SmartAutoSwitchTests: XCTestCase, ProfileTestCaseSupport {
         let server = LocalAutomationServer(socketURL: socket) { await operations.handle($0) }
         try server.start()
         defer { server.stop() }
-        for action in ["status", "on", "status", "off", "status"] {
-            let parsed = try TargetCtlCommandParser.parse(["smart", "auto", action, "--json"])
+        for action in ["evidence.on", "evidence.show", "evidence.off", "status", "on", "status", "off", "status"] {
+            let parsed = try TargetCtlCommandParser.parse(["smart", "auto"] + action.split(separator: ".").map(String.init) + ["--json"])
             let request = AutomationRequest(protocolVersion: 1, action: parsed.action, arguments: parsed.arguments)
             let data = try await Task.detached { try LocalAutomationClient.send(request, socketURL: socket) }.value
             let response = try JSONDecoder().decode(AutomationResponse.self, from: data)

@@ -202,6 +202,7 @@ struct SmartPolicyApplyResult: Sendable {
     let after: String?
     let reasonCode: String
     var receipt: PolicySelectionReceipt? = nil
+    var selectionAttempted = false
 
     func automationJSON() -> JSONValue {
         var fields: [String: JSONValue] = [
@@ -244,8 +245,9 @@ actor SmartPolicyApplyOperations {
     /// Auto pins the original session and selection generation across ticks.
     /// Explicit one-shot callers retain their existing behavior.
     func apply(expected: SmartAutoExpectation?, allowSelection: Bool = true) async -> SmartPolicyApplyResult {
+        var selectionAttempted = false
         func result(_ reason: String, _ recommendation: SmartShadowRecommendation? = nil) -> SmartPolicyApplyResult {
-            .init(recommendation: recommendation, applied: false, after: nil, reasonCode: reason)
+            .init(recommendation: recommendation, applied: false, after: nil, reasonCode: reason, selectionAttempted: selectionAttempted)
         }
         guard !applying else { return result("applyInProgress") }
         applying = true
@@ -284,9 +286,10 @@ actor SmartPolicyApplyOperations {
             guard !value.keepCurrent else { return result("keepCurrent", value) }
             guard recommended != evidence.currentOutbound else { return result("alreadySelected", value) }
             guard allowSelection else { return result("cooldown", value) }
+            selectionAttempted = true
             let outcome = try await policy.selectIfUnchanged(evidence: evidence, outboundTag: recommended, generation: generation)
             return .init(recommendation: value, applied: outcome.applied, after: outcome.after,
-                         reasonCode: outcome.reason.rawValue, receipt: outcome.receipt)
+                         reasonCode: outcome.reason.rawValue, receipt: outcome.receipt, selectionAttempted: true)
         } catch is CancellationError { return result("cancelled", recommendation) }
         catch { return result("operationUnavailable", recommendation) }
     }

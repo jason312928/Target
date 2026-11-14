@@ -11,6 +11,9 @@ public enum TargetCtlCommandParser {
         switch values {
         case ["capabilities"]: return ("capabilities", [:])
         case ["status"]: return ("status", [:])
+        case ["smart", "auto", "evidence", "on"]: return ("smart.auto.evidence.on", [:])
+        case ["smart", "auto", "evidence", "off"]: return ("smart.auto.evidence.off", [:])
+        case ["smart", "auto", "evidence", "show"]: return ("smart.auto.evidence.show", [:])
         case ["smart", "auto", "on"]: return ("smart.auto.on", [:])
         case ["smart", "auto", "off"]: return ("smart.auto.off", [:])
         case ["smart", "auto", "status"]: return ("smart.auto.status", [:])

@@ -96,6 +96,9 @@ actor TargetAutomationOperations {
             switch request.action {
             case "capabilities": return capabilities()
             case "status": return await consolidatedStatus()
+            case "smart.auto.evidence.on", "smart.auto.evidence.off", "smart.auto.evidence.show":
+                guard let smartAuto else { return .failure(code: "auto_unavailable", message: "Auto is unavailable.") }
+                return await smartAuto.evidenceResponse(action: request.action)
             case "smart.auto.on":
                 guard let smartAuto else { return .failure(code: "auto_unavailable", message: "Auto is unavailable.") }
                 return .success(await smartAuto.on().automationJSON())
@@ -801,7 +804,7 @@ actor TargetAutomationOperations {
     }
 
     private static let commands = [
-        "capabilities", "status", "runtime.status", "smart.auto.on", "smart.auto.off", "smart.auto.status", "smart.shadow", "smart.apply", "smart.continuity", "smart.continuity.apply", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.select", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset", "route.list", "route.bind", "route.remove",
+        "capabilities", "status", "runtime.status", "smart.auto.on", "smart.auto.off", "smart.auto.status", "smart.auto.evidence.on", "smart.auto.evidence.off", "smart.auto.evidence.show", "smart.shadow", "smart.apply", "smart.continuity", "smart.continuity.apply", "profile.import", "profile.subscribe", "profile.subscription-update", "profile.list", "profile.select", "profile.delete", "policy.list", "policy.select", "policy.probe", "policy.reset", "route.list", "route.bind", "route.remove",
         "engine.status", "engine.start", "engine.stop", "connection.start", "connection.stop", "connection.restart", "service.status", "service.install",
         "service.ping", "service.remove", "proxy.status", "proxy.enable", "proxy.disable", "proxy.recover"
     ]
